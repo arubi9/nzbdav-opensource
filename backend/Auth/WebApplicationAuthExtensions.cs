@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using NzbWebDAV.Utils;
 using Serilog;
 
@@ -23,6 +24,16 @@ public static class WebApplicationAuthExtensions
     public static void UseWebdavBasicAuthentication(this WebApplication app)
     {
         if (IsWebdavAuthDisabled()) return;
-        app.UseAuthentication();
+        app.UseWhen(
+            context => ShouldUseWebdavBasicAuthentication(context.Request.Path),
+            branch => branch.UseAuthentication());
+    }
+
+    public static bool ShouldUseWebdavBasicAuthentication(PathString path)
+    {
+        return !path.StartsWithSegments("/metrics", StringComparison.OrdinalIgnoreCase)
+               && !path.StartsWithSegments("/health", StringComparison.OrdinalIgnoreCase)
+               && !path.StartsWithSegments("/api", StringComparison.OrdinalIgnoreCase)
+               && !path.StartsWithSegments("/ws", StringComparison.OrdinalIgnoreCase);
     }
 }
