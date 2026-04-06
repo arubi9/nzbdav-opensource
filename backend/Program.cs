@@ -13,12 +13,14 @@ using NzbWebDAV.Database;
 using NzbWebDAV.Database.Interceptors;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Middlewares;
+using NzbWebDAV.Metrics;
 using NzbWebDAV.Queue;
 using NzbWebDAV.Services;
 using NzbWebDAV.Utils;
 using NzbWebDAV.WebDav;
 using NzbWebDAV.WebDav.Base;
 using NzbWebDAV.Websocket;
+using Prometheus;
 using Serilog;
 using Serilog.Events;
 using Serilog.Sinks.SystemConsole.Themes;
@@ -96,6 +98,7 @@ class Program
             .AddSingleton<UsenetStreamingClient>()
             .AddSingleton<QueueManager>()
             .AddSingleton<ReadAheadWarmingService>()
+            .AddSingleton<NzbdavMetricsCollector>()
             .AddHostedService<ContentIndexRecoveryService>()
             .AddHostedService<HealthCheckService>()
             .AddHostedService<ArrMonitoringService>()
@@ -118,13 +121,17 @@ class Program
 
         // run
         var app = builder.Build();
+        app.UseRouting();
+        app.UseHttpMetrics();
         app.UseMiddleware<ExceptionMiddleware>();
         app.UseWebSockets();
         app.MapHealthChecks("/health");
+        app.MapMetrics();
         app.Map("/ws", websocketManager.HandleRoute);
         app.MapControllers();
         app.UseWebdavBasicAuthentication();
         app.UseNWebDav();
+        _ = app.Services.GetRequiredService<NzbdavMetricsCollector>();
         app.Lifetime.ApplicationStopping.Register(() =>
         {
             SigtermUtil.Cancel();
