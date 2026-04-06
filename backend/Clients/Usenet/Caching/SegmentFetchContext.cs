@@ -17,6 +17,16 @@ public sealed class SegmentFetchContext
 
     public static SegmentFetchContext? GetCurrent() => _current.Value;
 
+    /// <summary>
+    /// Update the category of the current async-local context.
+    /// Used when StreamClassifier commits from Unknown (SmallFile default) to Playback (VideoSegment).
+    /// </summary>
+    public static void UpdateCurrentCategory(SegmentCategory newCategory)
+    {
+        if (_current.Value is not null)
+            _current.Value = new SegmentFetchContext(newCategory, _current.Value.OwnerNzbId);
+    }
+
     public static IDisposable Set(SegmentCategory category, Guid? ownerNzbId = null)
     {
         var previous = _current.Value;

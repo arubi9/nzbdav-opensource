@@ -83,6 +83,13 @@ public interface INntpClient : IDisposable
         StreamingBufferSettings streamingBufferSettings,
         Action<int>? onSegmentIndexChanged);
 
+    NzbFileStream GetFileStream(
+        string[] segmentIds,
+        long fileSize,
+        StreamingBufferSettings streamingBufferSettings,
+        Action<int>? onSegmentIndexChanged,
+        Streams.RequestHint requestHint);
+
     Task CheckAllSegmentsAsync(
         IEnumerable<string> segmentIds, int concurrency, IProgress<int>? progress, CancellationToken cancellationToken);
 }

@@ -89,6 +89,14 @@ public class WrappingNntpClient(INntpClient usenetClient) : NntpClient, ICachedS
         Action<int>? onSegmentIndexChanged
     ) => _usenetClient.GetFileStream(segmentIds, fileSize, streamingBufferSettings, onSegmentIndexChanged);
 
+    public override NzbFileStream GetFileStream(
+        string[] segmentIds,
+        long fileSize,
+        StreamingBufferSettings streamingBufferSettings,
+        Action<int>? onSegmentIndexChanged,
+        RequestHint requestHint
+    ) => _usenetClient.GetFileStream(segmentIds, fileSize, streamingBufferSettings, onSegmentIndexChanged, requestHint);
+
     protected void ReplaceUnderlyingClient(INntpClient usenetClient)
     {
         var old = _usenetClient;

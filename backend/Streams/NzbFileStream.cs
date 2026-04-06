@@ -12,15 +12,19 @@ public class NzbFileStream(
     long fileSize,
     INntpClient usenetClient,
     StreamingBufferSettings streamingBufferSettings,
-    Action<int>? onSegmentIndexChanged = null
+    Action<int>? onSegmentIndexChanged = null,
+    RequestHint requestHint = RequestHint.Unknown
 ) : FastReadOnlyStream
 {
     private readonly LongRange?[] _segmentRanges = new LongRange?[fileSegmentIds.Length];
+    private StreamClassifier _classifier = new(requestHint, fileSize);
     private long _position;
     private bool _disposed;
     private bool _seekPending;
     private Stream? _innerStream;
     private Stream? _seekOverlayStream;
+
+    public StreamClassification Classification => _classifier.Classification;
 
     public override bool CanSeek => true;
     public override long Length => fileSize;
@@ -67,6 +71,8 @@ public class NzbFileStream(
 
         _innerStream ??= await GetFileStream(_position, cancellationToken).ConfigureAwait(false);
         var read = await _innerStream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+        if (read > 0)
+            _classifier.ObserveRead(_position, read);
         _position += read;
         return read;
     }
@@ -77,6 +83,7 @@ public class NzbFileStream(
             : origin == SeekOrigin.Current ? _position + offset
             : throw new InvalidOperationException("SeekOrigin must be Begin or Current.");
         if (_position == absoluteOffset) return _position;
+        _classifier.ObserveSeek(_position, absoluteOffset);
         _position = absoluteOffset;
         _seekPending = true;
         return _position;

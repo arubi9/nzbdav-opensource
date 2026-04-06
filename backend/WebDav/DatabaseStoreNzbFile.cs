@@ -29,41 +29,74 @@ public class DatabaseStoreNzbFile(
 
     protected override async Task<Stream> GetStreamAsync(CancellationToken cancellationToken)
     {
-        // store the DavItem being accessed in the http context
         httpContext.Items["DavItem"] = davNzbFile;
 
-        // Set segment fetch context for tiered eviction
-        var category = SegmentCategoryClassifier.Classify(davNzbFile.Name);
+        // Set initial cache context — SmallFile for video files (pre-classification default).
+        // When StreamClassifier commits to Playback, the context updates to VideoSegment.
+        var isVideo = FilenameUtil.IsVideoFile(davNzbFile.Name);
+        var category = isVideo ? SegmentCategory.SmallFile : SegmentCategoryClassifier.Classify(davNzbFile.Name);
         var ownerId = davNzbFile.ParentId ?? davNzbFile.Id;
         httpContext.Items[SegmentFetchContext.HttpContextItemKey] = SegmentFetchContext.Set(category, ownerId);
 
-        // return the stream
         var id = davNzbFile.Id;
         var file = await dbClient.GetNzbFileAsync(id, cancellationToken).ConfigureAwait(false);
         if (file is null) throw new FileNotFoundException($"Could not find nzb file with id: {id}");
-        // Start read-ahead warming for video files
-        if (warmingService != null && FilenameUtil.IsVideoFile(davNzbFile.Name))
+
+        // Extract RequestHint from Range header
+        var hint = GetRequestHint();
+
+        // Create stream with classifier — warming starts lazily when classified as Playback
+        string? warmingSessionId = null;
+        var stream = usenetClient.GetFileStream(
+            file.SegmentIds,
+            FileSize,
+            StreamingBufferSettings.LiveDefault(configManager.GetArticleBufferSize()),
+            onSegmentIndexChanged: index =>
+            {
+                // Lazy warming: start when classifier commits to Playback
+                if (warmingService != null && isVideo && warmingSessionId == null)
+                {
+                    warmingSessionId = warmingService.CreateSession(file.SegmentIds, cancellationToken);
+                }
+
+                if (warmingSessionId != null)
+                    warmingService!.UpdatePosition(warmingSessionId, index);
+
+                // Update cache context when past the probe window
+                if (index >= 5 && isVideo)
+                    SegmentFetchContext.UpdateCurrentCategory(SegmentCategory.VideoSegment);
+            },
+            requestHint: hint
+        );
+
+        // Clean up warming on dispose
+        if (warmingService != null && isVideo)
         {
-            var sessionId = warmingService.CreateSession(file.SegmentIds, cancellationToken);
-            var stream = usenetClient.GetFileStream(
-                file.SegmentIds,
-                FileSize,
-                StreamingBufferSettings.LiveDefault(configManager.GetArticleBufferSize()),
-                index => warmingService.UpdatePosition(sessionId, index)
-            );
             return new DisposableCallbackStream(stream,
-                onDispose: () => warmingService.StopSession(sessionId),
+                onDispose: () => { if (warmingSessionId != null) warmingService.StopSession(warmingSessionId); },
                 onDisposeAsync: () =>
                 {
-                    warmingService.StopSession(sessionId);
+                    if (warmingSessionId != null) warmingService.StopSession(warmingSessionId);
                     return ValueTask.CompletedTask;
                 });
         }
 
-        return usenetClient.GetFileStream(
-            file.SegmentIds,
-            FileSize,
-            StreamingBufferSettings.LiveDefault(configManager.GetArticleBufferSize())
-        );
+        return stream;
+    }
+
+    private RequestHint GetRequestHint()
+    {
+        var rangeHeader = httpContext.Request.Headers.Range.FirstOrDefault();
+        if (string.IsNullOrEmpty(rangeHeader)) return RequestHint.Unknown;
+
+        // bytes=0-65535 or bytes=0-1048575 (< 1MB explicit end) → SuspectedProbe
+        if (rangeHeader.StartsWith("bytes=0-", StringComparison.OrdinalIgnoreCase))
+        {
+            var endStr = rangeHeader["bytes=0-".Length..];
+            if (long.TryParse(endStr, out var end) && end < 1_048_576)
+                return RequestHint.SuspectedProbe;
+        }
+
+        return RequestHint.Unknown;
     }
 }
