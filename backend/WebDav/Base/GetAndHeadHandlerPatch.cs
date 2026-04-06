@@ -6,6 +6,7 @@ using NWebDav.Server.Props;
 using NWebDav.Server.Stores;
 using NzbWebDAV.Clients.Usenet.Caching;
 using NzbWebDAV.Extensions;
+using NzbWebDAV.Metrics;
 
 namespace NzbWebDAV.WebDav.Base;
 
@@ -146,12 +147,20 @@ public class GetAndHeadHandlerPatch : IRequestHandler
                     // HEAD method doesn't require the actual item data
                     if (!isHeadRequest)
                     {
-                        await stream.CopyRangeToPooledAsync(
-                            response.Body,
-                            range?.Start ?? 0,
-                            range?.End,
-                            cancellationToken: httpContext.RequestAborted
-                        ).ConfigureAwait(false);
+                        NzbdavMetricsCollector.IncrementActiveStreams();
+                        try
+                        {
+                            await stream.CopyRangeToPooledAsync(
+                                response.Body,
+                                range?.Start ?? 0,
+                                range?.End,
+                                cancellationToken: httpContext.RequestAborted
+                            ).ConfigureAwait(false);
+                        }
+                        finally
+                        {
+                            NzbdavMetricsCollector.DecrementActiveStreams();
+                        }
                     }
                 }
                 else
