@@ -37,7 +37,8 @@ public class QueueManager : IDisposable
         _websocketManager = websocketManager;
         _cancellationTokenSource = CancellationTokenSource
             .CreateLinkedTokenSource(SigtermUtil.GetCancellationToken());
-        _ = ProcessQueueAsync(_cancellationTokenSource.Token);
+        if (NodeRoleConfig.RunsIngest)
+            _ = ProcessQueueAsync(_cancellationTokenSource.Token);
     }
 
     public (QueueItem? queueItem, int? progress) GetInProgressQueueItem()

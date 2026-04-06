@@ -68,6 +68,13 @@ class Program
             return;
         }
 
+        if (!string.IsNullOrEmpty(EnvironmentUtil.GetEnvironmentVariable("DATABASE_URL")))
+        {
+            await databaseContext.Database
+                .EnsureCreatedAsync(SigtermUtil.GetCancellationToken())
+                .ConfigureAwait(false);
+        }
+
         // initialize the config-manager
         var configManager = new ConfigManager();
         await configManager.LoadConfig().ConfigureAwait(false);
@@ -83,6 +90,7 @@ class Program
 
         // initialize websocket-manager
         var websocketManager = new WebsocketManager();
+        Log.Information("NZBDAV starting in {Role} mode", NodeRoleConfig.Current);
 
         // initialize webapp
         var builder = WebApplication.CreateBuilder(args);
@@ -101,19 +109,27 @@ class Program
             .AddSingleton<ReadAheadWarmingService>()
             .AddSingleton<StreamExecutionService>()
             .AddSingleton<NzbdavMetricsCollector>()
-            .AddHostedService<ContentIndexRecoveryService>()
-            .AddHostedService<HealthCheckService>()
-            .AddHostedService<ArrMonitoringService>()
-            .AddHostedService<BlobCleanupService>()
-            .AddHostedService<SmallFilePrecacheService>()
             .AddScoped<DavDatabaseContext>()
             .AddScoped<DavDatabaseClient>()
             .AddScoped<DatabaseStore>()
             .AddScoped<IStore, DatabaseStore>()
             .AddScoped<GetAndHeadHandlerPatch>()
             .AddSingleton<ApiKeyAuthFilter>()
-            .AddScoped<SabApiController>()
-            .AddNWebDav(opts =>
+            .AddScoped<SabApiController>();
+
+        if (NodeRoleConfig.RunsIngest)
+        {
+            builder.Services
+                .AddHostedService<ContentIndexRecoveryService>()
+                .AddHostedService<HealthCheckService>()
+                .AddHostedService<ArrMonitoringService>()
+                .AddHostedService<BlobCleanupService>()
+                .AddHostedService<SmallFilePrecacheService>();
+        }
+
+        if (NodeRoleConfig.RunsStreaming)
+        {
+            builder.Services.AddNWebDav(opts =>
             {
                 opts.Handlers["GET"] = typeof(GetAndHeadHandlerPatch);
                 opts.Handlers["HEAD"] = typeof(GetAndHeadHandlerPatch);
@@ -121,6 +137,7 @@ class Program
                 opts.RequireAuthentication = !WebApplicationAuthExtensions
                     .IsWebdavAuthDisabled();
             });
+        }
 
         // run
         var app = builder.Build();
@@ -133,7 +150,8 @@ class Program
         app.Map("/ws", websocketManager.HandleRoute);
         app.MapControllers();
         app.UseWebdavBasicAuthentication();
-        app.UseNWebDav();
+        if (NodeRoleConfig.RunsStreaming)
+            app.UseNWebDav();
         _ = app.Services.GetRequiredService<NzbdavMetricsCollector>();
         app.Lifetime.ApplicationStopping.Register(() =>
         {
