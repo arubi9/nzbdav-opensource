@@ -112,17 +112,30 @@ public class SabApiController(
             if (RequiresAuthentication)
             {
                 var apiKey = httpContext.GetRequestApiKey();
-                var isValidKey = apiKey?.IsAny(
-                    configManager.GetApiKey(),
-                    EnvironmentUtil.GetRequiredVariable("FRONTEND_BACKEND_API_KEY")
-                );
-                if (!isValidKey.HasValue)
+                if (string.IsNullOrEmpty(apiKey))
                     throw new UnauthorizedAccessException("API Key Required");
-                if (!isValidKey.Value)
+                if (!ValidateApiKeyConstantTime(apiKey))
                     throw new UnauthorizedAccessException("API Key Incorrect");
             }
 
             return Handle();
+        }
+
+        private bool ValidateApiKeyConstantTime(string providedKey)
+        {
+            var providedBytes = System.Text.Encoding.UTF8.GetBytes(providedKey);
+            var key1Bytes = System.Text.Encoding.UTF8.GetBytes(configManager.GetApiKey());
+            var key2Bytes = System.Text.Encoding.UTF8.GetBytes(
+                EnvironmentUtil.GetRequiredVariable("FRONTEND_BACKEND_API_KEY"));
+
+            // Evaluate BOTH comparisons — do not short-circuit.
+            // FixedTimeEquals handles different-length inputs safely.
+            var matchesKey1 = System.Security.Cryptography.CryptographicOperations
+                .FixedTimeEquals(providedBytes, key1Bytes);
+            var matchesKey2 = System.Security.Cryptography.CryptographicOperations
+                .FixedTimeEquals(providedBytes, key2Bytes);
+
+            return matchesKey1 | matchesKey2;
         }
 
         protected virtual bool RequiresAuthentication => true;
