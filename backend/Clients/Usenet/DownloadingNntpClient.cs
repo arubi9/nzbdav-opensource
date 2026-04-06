@@ -96,6 +96,7 @@ public class DownloadingNntpClient : WrappingNntpClient
 
     private Task AcquireExclusiveConnectionAsync(CancellationToken cancellationToken)
     {
+        _semaphore.ThrowIfOverloaded(_configManager.GetMaxDownloadConnections() * 2);
         var downloadPriorityContext = cancellationToken.GetContext<DownloadPriorityContext>();
         var semaphorePriority = downloadPriorityContext?.Priority ?? SemaphorePriority.High;
         return _semaphore.WaitAsync(semaphorePriority, cancellationToken);

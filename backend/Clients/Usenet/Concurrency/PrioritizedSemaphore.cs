@@ -159,6 +159,17 @@ public class PrioritizedSemaphore : IDisposable
         return null;
     }
 
+    public int PendingCount
+    {
+        get { lock (_lock) return _highPriorityWaiters.Count + _lowPriorityWaiters.Count; }
+    }
+
+    public void ThrowIfOverloaded(int maxQueueDepth)
+    {
+        if (PendingCount > maxQueueDepth)
+            throw new NzbWebDAV.Exceptions.ServiceOverloadedException();
+    }
+
     public void UpdateMaxAllowed(int newMaxAllowed)
     {
         lock (_lock)

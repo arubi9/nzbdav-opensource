@@ -20,6 +20,7 @@ using NzbWebDAV.Services;
 using NzbWebDAV.Utils;
 using NzbWebDAV.WebDav;
 using NzbWebDAV.WebDav.Base;
+using Microsoft.Extensions.Hosting;
 using NzbWebDAV.Websocket;
 using Prometheus;
 using Serilog;
@@ -96,9 +97,11 @@ class Program
         var builder = WebApplication.CreateBuilder(args);
         var maxRequestBodySize = EnvironmentUtil.GetLongVariable("MAX_REQUEST_BODY_SIZE") ?? 100 * 1024 * 1024;
         builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = maxRequestBodySize);
+        builder.Services.Configure<HostOptions>(opts => opts.ShutdownTimeout = TimeSpan.FromSeconds(30));
         builder.Host.UseSerilog();
         builder.Services.AddControllers();
-        builder.Services.AddHealthChecks();
+        builder.Services.AddHealthChecks()
+            .AddCheck<NzbdavHealthCheck>("nzbdav");
         builder.Services
             .AddWebdavBasicAuthentication(configManager)
             .AddSingleton(configManager)
@@ -144,6 +147,7 @@ class Program
         app.UseRouting();
         app.UseHttpMetrics();
         app.UseMetricServer("/metrics");
+        app.UseMiddleware<RequestTimeoutMiddleware>();
         app.UseMiddleware<ExceptionMiddleware>();
         app.UseWebSockets();
         app.MapHealthChecks("/health").AllowAnonymous();

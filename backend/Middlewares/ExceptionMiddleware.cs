@@ -25,6 +25,17 @@ public class ExceptionMiddleware(RequestDelegate next)
                 await context.Response.WriteAsync("Client closed request.").ConfigureAwait(false);
             }
         }
+        catch (ServiceOverloadedException)
+        {
+            if (!context.Response.HasStarted)
+            {
+                context.Response.Clear();
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                context.Response.Headers.RetryAfter = "5";
+                await context.Response.WriteAsync("Service temporarily overloaded. Retry after 5 seconds.")
+                    .ConfigureAwait(false);
+            }
+        }
         catch (UsenetArticleNotFoundException e)
         {
             if (!context.Response.HasStarted)

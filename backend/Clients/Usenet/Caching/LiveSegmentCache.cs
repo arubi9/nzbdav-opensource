@@ -151,6 +151,7 @@ public sealed class LiveSegmentCache : IDisposable
     }
 
     public string CacheDirectory { get; }
+    public long MaxCacheSizeBytes => Interlocked.Read(ref _maxCacheSizeBytes);
 
     public bool TryReadBody(string segmentId, out UsenetDecodedBodyResponse response)
     {

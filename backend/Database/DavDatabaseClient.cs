@@ -36,6 +36,11 @@ public sealed class DavDatabaseClient(DavDatabaseContext ctx)
         return ctx.Items.FirstOrDefaultAsync(x => x.ParentId == dirId && x.Name == childName, ct);
     }
 
+    public Task<DavItem?> GetItemByPathAsync(string path, CancellationToken ct = default)
+    {
+        return ctx.Items.FirstOrDefaultAsync(x => x.Path == path, ct);
+    }
+
     public async Task<long> GetRecursiveSize(Guid dirId, CancellationToken ct = default)
     {
         if (dirId == DavItem.Root.Id)
