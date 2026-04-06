@@ -34,6 +34,31 @@ public sealed class NzbdavApiClient
     public string GetSignedStreamUrl(Guid id, string streamToken)
         => $"{BaseUrl}/api/stream/{id}?token={streamToken}";
 
+    /// <summary>
+    /// Fetch the entire /content tree in one request. ETag-cached — pass the
+    /// previous ETag and get 304 Not Modified if nothing changed.
+    /// </summary>
+    public async Task<(ManifestResponse? Manifest, string? ETag)> GetManifestAsync(
+        string? ifNoneMatch, CancellationToken ct)
+    {
+        var request = CreateRequest(HttpMethod.Get, $"{BaseUrl}/api/manifest");
+        if (!string.IsNullOrEmpty(ifNoneMatch))
+            request.Headers.IfNoneMatch.Add(new System.Net.Http.Headers.EntityTagHeaderValue(ifNoneMatch));
+
+        using (request)
+        {
+            using var response = await SharedHttp.SendAsync(request, ct).ConfigureAwait(false);
+            var etag = response.Headers.ETag?.Tag;
+
+            if (response.StatusCode == System.Net.HttpStatusCode.NotModified)
+                return (null, etag);
+
+            response.EnsureSuccessStatusCode();
+            var manifest = await response.Content.ReadFromJsonAsync<ManifestResponse>(ct).ConfigureAwait(false);
+            return (manifest, etag);
+        }
+    }
+
     private string BaseUrl => _config.NzbdavBaseUrl.TrimEnd('/');
 
     private HttpRequestMessage CreateRequest(HttpMethod method, string url)

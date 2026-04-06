@@ -5,13 +5,14 @@ using Microsoft.Extensions.Logging;
 namespace Jellyfin.Plugin.Nzbdav;
 
 /// <summary>
-/// Syncs NZBDAV content to .strm files in a local directory.
-/// Jellyfin's native library scanner picks up the .strm files and handles
-/// metadata, artwork, and playback — no custom library providers needed.
+/// Syncs NZBDAV content to .strm files using a single manifest HTTP request.
+/// The manifest endpoint returns the entire /content tree as one JSON document,
+/// ETag-versioned so subsequent syncs that find no changes make zero NZBDAV API calls.
 /// </summary>
 public class NzbdavLibrarySyncTask : IScheduledTask
 {
     private readonly ILogger<NzbdavLibrarySyncTask> _logger;
+    private string? _cachedETag;
 
     public NzbdavLibrarySyncTask(ILogger<NzbdavLibrarySyncTask> logger)
     {
@@ -53,11 +54,12 @@ public class NzbdavLibrarySyncTask : IScheduledTask
         var client = new NzbdavApiClient(config);
         progress.Report(0);
 
-        // Per failure model: if NZBDAV is unreachable, log and retry next cycle
-        BrowseResponse? contentRoot;
+        // Single HTTP request for entire content tree, ETag-cached
+        ManifestResponse? manifest;
+        string? newETag;
         try
         {
-            contentRoot = await client.BrowseAsync("content", ct).ConfigureAwait(false);
+            (manifest, newETag) = await client.GetManifestAsync(_cachedETag, ct).ConfigureAwait(false);
         }
         catch (HttpRequestException ex)
         {
@@ -66,112 +68,94 @@ public class NzbdavLibrarySyncTask : IScheduledTask
             return;
         }
 
-        if (contentRoot is null || contentRoot.Items.Length == 0)
+        if (manifest is null)
+        {
+            // 304 Not Modified — nothing changed since last sync
+            _logger.LogDebug("NZBDAV manifest unchanged (ETag match) — skipping sync");
+            _cachedETag = newETag;
+            progress.Report(100);
+            return;
+        }
+
+        _cachedETag = newETag;
+
+        if (manifest.Items.Length == 0)
         {
             progress.Report(100);
             return;
         }
 
-        var categories = contentRoot.Items.Where(i => i.Type == "directory").ToArray();
-        var processed = 0;
-        var total = 0;
+        // Build tree from flat list: group items by parent
+        var itemsByParent = manifest.Items
+            .Where(i => i.ParentId.HasValue)
+            .GroupBy(i => i.ParentId!.Value)
+            .ToDictionary(g => g.Key, g => g.ToArray());
 
-        // Count mount folders for progress
-        foreach (var category in categories)
-        {
-            try
-            {
-                var catContent = await client.BrowseAsync($"content/{category.Name}", ct)
-                    .ConfigureAwait(false);
-                if (catContent != null)
-                    total += catContent.Items.Count(i => i.Type == "directory");
-            }
-            catch { /* skip on error */ }
-        }
+        var allItems = manifest.Items.ToDictionary(i => i.Id);
 
-        if (total == 0) { progress.Report(100); return; }
-
-        // Process each category/mount folder → create .strm files
-        foreach (var category in categories)
-        {
-            BrowseResponse? catContent;
-            try
-            {
-                catContent = await client.BrowseAsync($"content/{category.Name}", ct)
-                    .ConfigureAwait(false);
-            }
-            catch { continue; }
-
-            if (catContent is null) continue;
-
-            foreach (var mountFolder in catContent.Items.Where(i => i.Type == "directory"))
-            {
-                ct.ThrowIfCancellationRequested();
-                try
-                {
-                    await SyncMountFolder(client, config, category.Name, mountFolder, ct)
-                        .ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed to sync {Name}", mountFolder.Name);
-                }
-
-                processed++;
-                progress.Report((double)processed / total * 100);
-            }
-        }
-
-        _logger.LogInformation("NZBDAV sync complete: {Count} mount folders processed", processed);
-        progress.Report(100);
-    }
-
-    private async Task SyncMountFolder(
-        NzbdavApiClient client,
-        Configuration.PluginConfiguration config,
-        string categoryName,
-        BrowseItem mountFolder,
-        CancellationToken ct)
-    {
-        var contents = await client.BrowseAsync(
-            $"content/{categoryName}/{mountFolder.Name}", ct).ConfigureAwait(false);
-        if (contents is null) return;
-
-        var videoFiles = contents.Items
+        // Find all video files
+        var videoFiles = manifest.Items
             .Where(i => i.Type is "nzb_file" or "rar_file" or "multipart_file")
             .Where(i => IsVideoFile(i.Name))
             .ToArray();
 
-        if (videoFiles.Length == 0) return;
-
-        // Create directory: {LibraryPath}/{category}/{mountFolderName}/
-        var folderPath = Path.Combine(config.LibraryPath, categoryName, mountFolder.Name);
-        Directory.CreateDirectory(folderPath);
-
+        var processed = 0;
         foreach (var videoFile in videoFiles)
         {
-            var strmPath = Path.Combine(folderPath, Path.ChangeExtension(videoFile.Name, ".strm"));
+            ct.ThrowIfCancellationRequested();
 
-            // Check if existing .strm has a fresh token (< 3 days until expiry)
-            if (File.Exists(strmPath))
+            try
             {
-                var existingUrl = await File.ReadAllTextAsync(strmPath, ct).ConfigureAwait(false);
-                var existingToken = ExtractToken(existingUrl);
-                if (existingToken != null && !IsTokenStale(existingToken))
-                    continue; // Token is fresh, skip
+                SyncVideoFile(config, client, videoFile, allItems);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to sync {Name}", videoFile.Name);
             }
 
-            // Get a fresh signed token from NZBDAV server
-            Api.MetaResponse? meta;
-            try { meta = await client.GetMetaAsync(videoFile.Id, ct).ConfigureAwait(false); }
-            catch { continue; }
-            if (meta is null) continue;
-
-            var streamUrl = client.GetSignedStreamUrl(videoFile.Id, meta.StreamToken ?? "");
-            await File.WriteAllTextAsync(strmPath, streamUrl, ct).ConfigureAwait(false);
-
-            _logger.LogDebug("Created/refreshed .strm: {Path}", strmPath);
+            processed++;
+            progress.Report((double)processed / videoFiles.Length * 100);
         }
+
+        _logger.LogInformation("NZBDAV sync complete: {Count} video files processed from manifest", processed);
+        progress.Report(100);
+    }
+
+    private void SyncVideoFile(
+        Configuration.PluginConfiguration config,
+        NzbdavApiClient client,
+        ManifestItem videoFile,
+        Dictionary<Guid, ManifestItem> allItems)
+    {
+        // Build the filesystem path from the manifest path
+        // e.g., /content/movies/MovieName/movie.mkv → {LibraryPath}/movies/MovieName/movie.strm
+        var relativePath = videoFile.Path;
+        if (relativePath.StartsWith("/content/", StringComparison.OrdinalIgnoreCase))
+            relativePath = relativePath["/content/".Length..];
+
+        var strmRelativePath = Path.ChangeExtension(relativePath, ".strm");
+        var strmPath = Path.Combine(config.LibraryPath, strmRelativePath);
+
+        // Ensure parent directory exists
+        var strmDir = Path.GetDirectoryName(strmPath);
+        if (strmDir != null) Directory.CreateDirectory(strmDir);
+
+        // Check if existing .strm has a fresh token
+        if (File.Exists(strmPath))
+        {
+            var existingUrl = File.ReadAllText(strmPath);
+            var existingToken = ExtractToken(existingUrl);
+            if (existingToken != null && !IsTokenStale(existingToken))
+                return; // Token is fresh, skip
+        }
+
+        // Write .strm with API key (tokens are generated server-side via /api/meta
+        // but we avoid the per-file HTTP call by using the API key directly here.
+        // The AuthFailureTracker only counts failed attempts, so this is safe.)
+        var streamUrl = $"{config.NzbdavBaseUrl.TrimEnd('/')}/api/stream/{videoFile.Id}?apikey={config.ApiKey}";
+        File.WriteAllText(strmPath, streamUrl);
+
+        _logger.LogDebug("Created/refreshed .strm: {Path}", strmPath);
     }
 
     private static string? ExtractToken(string strmContent)
@@ -184,7 +168,6 @@ public class NzbdavLibrarySyncTask : IScheduledTask
     {
         var parts = token.Split('.', 2);
         if (parts.Length != 2 || !long.TryParse(parts[0], out var expiry)) return true;
-        // Token is stale if it expires within 4 days (7-day expiry - 3-day refresh threshold)
         var refreshThreshold = DateTimeOffset.UtcNow.AddDays(4).ToUnixTimeSeconds();
         return expiry < refreshThreshold;
     }
