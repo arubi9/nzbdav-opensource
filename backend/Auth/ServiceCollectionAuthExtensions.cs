@@ -6,6 +6,7 @@ using NWebDav.Server.Authentication;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Utils;
+using Serilog;
 
 namespace NzbWebDAV.Auth;
 
@@ -29,7 +30,13 @@ public static class ServiceCollectionAuthExtensions
             .AddAuthentication(opts => opts.DefaultScheme = BasicAuthenticationDefaults.AuthenticationScheme)
             .AddBasicAuthentication(opts =>
             {
-                opts.AllowInsecureProtocol = true;
+                var allowInsecure = EnvironmentUtil.IsVariableTrue("ALLOW_INSECURE_AUTH");
+                opts.AllowInsecureProtocol = allowInsecure;
+                if (allowInsecure)
+                    Log.Warning("Basic auth over HTTP is enabled via ALLOW_INSECURE_AUTH. Use TLS in production.");
+                else
+                    Log.Information("Basic auth over HTTP is disabled. Set ALLOW_INSECURE_AUTH=true for development without TLS.");
+
                 opts.CacheCookieName = "nzb-webdav-backend";
                 opts.CacheCookieExpiration = TimeSpan.FromHours(1);
                 opts.Events.OnValidateCredentials = (ValidateCredentialsContext context) =>

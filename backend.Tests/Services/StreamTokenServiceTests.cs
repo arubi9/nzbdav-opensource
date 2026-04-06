@@ -45,11 +45,21 @@ public sealed class StreamTokenServiceTests
     }
 
     [Fact]
-    public void ValidateToken_ReturnsFalseWhenTokenIsExpired()
+    public void ValidateToken_ReturnsFalseWhenTokenIsExpiredBeyondGracePeriod()
     {
         var configManager = CreateConfigManager();
-        var token = StreamTokenService.GenerateToken("/api/stream/abc123", configManager, expiryMinutes: -1);
+        // Must be beyond expiry + 7-day grace period (10080 + 1 = 10081 minutes ago)
+        var token = StreamTokenService.GenerateToken("/api/stream/abc123", configManager, expiryMinutes: -10081);
         Assert.False(StreamTokenService.ValidateToken(token, "/api/stream/abc123", configManager));
+    }
+
+    [Fact]
+    public void ValidateToken_AcceptsTokenWithinGracePeriod()
+    {
+        var configManager = CreateConfigManager();
+        // Expired 1 minute ago — within the 7-day grace period
+        var token = StreamTokenService.GenerateToken("/api/stream/abc123", configManager, expiryMinutes: -1);
+        Assert.True(StreamTokenService.ValidateToken(token, "/api/stream/abc123", configManager));
     }
 
     [Fact]

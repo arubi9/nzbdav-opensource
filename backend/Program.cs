@@ -20,6 +20,9 @@ using NzbWebDAV.Services;
 using NzbWebDAV.Utils;
 using NzbWebDAV.WebDav;
 using NzbWebDAV.WebDav.Base;
+using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.Hosting;
 using NzbWebDAV.Websocket;
 using Prometheus;
@@ -52,6 +55,7 @@ public partial class Program
             .MinimumLevel.Override("Microsoft.AspNetCore.Mvc", LogEventLevel.Warning)
             .MinimumLevel.Override("Microsoft.AspNetCore.Routing", LogEventLevel.Warning)
             .MinimumLevel.Override("Microsoft.AspNetCore.DataProtection", LogEventLevel.Error)
+            .Enrich.With<NzbWebDAV.Logging.ApiKeyRedactionEnricher>()
             .WriteTo.Console(theme: AnsiConsoleTheme.Code)
             .CreateLogger();
 
@@ -100,6 +104,22 @@ public partial class Program
         builder.Services.Configure<HostOptions>(opts => opts.ShutdownTimeout = TimeSpan.FromSeconds(30));
         builder.Host.UseSerilog();
         builder.Services.AddControllers();
+        builder.Services.AddRateLimiter(options =>
+        {
+            options.RejectionStatusCode = 429;
+            options.AddFixedWindowLimiter("auth", limiterOptions =>
+            {
+                limiterOptions.PermitLimit = 10;
+                limiterOptions.Window = TimeSpan.FromSeconds(60);
+                limiterOptions.QueueLimit = 0;
+            });
+            options.OnRejected = async (context, ct) =>
+            {
+                context.HttpContext.Response.Headers.RetryAfter = "60";
+                await context.HttpContext.Response.Body.WriteAsync(
+                    System.Text.Encoding.UTF8.GetBytes("Too many requests. Retry after 60 seconds."), ct).ConfigureAwait(false);
+            };
+        });
         builder.Services.AddHealthChecks()
             .AddCheck<NzbdavHealthCheck>("nzbdav");
         builder.Services
@@ -130,6 +150,9 @@ public partial class Program
                 .AddHostedService<SmallFilePrecacheService>();
         }
 
+        if (WebApplicationAuthExtensions.IsWebdavAuthDisabled())
+            builder.Services.AddHostedService<InsecureAuthWarningService>();
+
         if (NodeRoleConfig.RunsStreaming)
         {
             builder.Services.AddNWebDav(opts =>
@@ -144,6 +167,11 @@ public partial class Program
 
         // run
         var app = builder.Build();
+        app.UseForwardedHeaders(new ForwardedHeadersOptions
+        {
+            ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
+        });
+        app.UseRateLimiter();
         app.UseRouting();
         app.UseHttpMetrics();
         app.UseMetricServer("/metrics");
@@ -172,7 +200,7 @@ public partial class Program
             }
         }).AllowAnonymous();
         app.Map("/ws", websocketManager.HandleRoute);
-        app.MapControllers();
+        app.MapControllers().RequireRateLimiting("auth");
         app.UseWebdavBasicAuthentication();
         if (NodeRoleConfig.RunsStreaming)
             app.UseNWebDav();

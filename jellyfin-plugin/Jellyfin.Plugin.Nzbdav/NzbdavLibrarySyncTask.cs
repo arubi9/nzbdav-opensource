@@ -152,17 +152,41 @@ public class NzbdavLibrarySyncTask : IScheduledTask
         {
             var strmPath = Path.Combine(folderPath, Path.ChangeExtension(videoFile.Name, ".strm"));
 
-            // Skip if .strm already exists (idempotent)
-            if (File.Exists(strmPath)) continue;
+            // Check if existing .strm has a fresh token (< 3 days until expiry)
+            if (File.Exists(strmPath))
+            {
+                var existingUrl = await File.ReadAllTextAsync(strmPath, ct).ConfigureAwait(false);
+                var existingToken = ExtractToken(existingUrl);
+                if (existingToken != null && !IsTokenStale(existingToken))
+                    continue; // Token is fresh, skip
+            }
 
-            // .strm file contains a direct stream URL.
-            // Uses API key (not signed token) because .strm files are persistent
-            // and signed tokens expire after 24h.
-            var streamUrl = $"{config.NzbdavBaseUrl.TrimEnd('/')}/api/stream/{videoFile.Id}?apikey={config.ApiKey}";
+            // Get a fresh signed token from NZBDAV server
+            Api.MetaResponse? meta;
+            try { meta = await client.GetMetaAsync(videoFile.Id, ct).ConfigureAwait(false); }
+            catch { continue; }
+            if (meta is null) continue;
+
+            var streamUrl = client.GetSignedStreamUrl(videoFile.Id, meta.StreamToken ?? "");
             await File.WriteAllTextAsync(strmPath, streamUrl, ct).ConfigureAwait(false);
 
-            _logger.LogDebug("Created .strm: {Path}", strmPath);
+            _logger.LogDebug("Created/refreshed .strm: {Path}", strmPath);
         }
+    }
+
+    private static string? ExtractToken(string strmContent)
+    {
+        var idx = strmContent.IndexOf("token=", StringComparison.Ordinal);
+        return idx >= 0 ? strmContent[(idx + 6)..].Trim() : null;
+    }
+
+    private static bool IsTokenStale(string token)
+    {
+        var parts = token.Split('.', 2);
+        if (parts.Length != 2 || !long.TryParse(parts[0], out var expiry)) return true;
+        // Token is stale if it expires within 4 days (7-day expiry - 3-day refresh threshold)
+        var refreshThreshold = DateTimeOffset.UtcNow.AddDays(4).ToUnixTimeSeconds();
+        return expiry < refreshThreshold;
     }
 
     private static bool IsVideoFile(string filename)

@@ -8,6 +8,7 @@ namespace NzbWebDAV.Auth;
 public static class WebApplicationAuthExtensions
 {
     private const string DisableWebdavAuthEnvVar = "DISABLE_WEBDAV_AUTH";
+    private const string RequiredConfirmation = "I_UNDERSTAND_THIS_IS_INSECURE";
 
     private const string DisabledWebdavAuthLog =
         "WebDAV authentication is DISABLED via the DISABLE_WEBDAV_AUTH environment variable";
@@ -16,9 +17,20 @@ public static class WebApplicationAuthExtensions
 
     public static bool IsWebdavAuthDisabled()
     {
-        var isWebdavAuthDisabled = EnvironmentUtil.IsVariableTrue(DisableWebdavAuthEnvVar);
-        if (isWebdavAuthDisabled) LogOnlyOnce(() => Log.Information(DisabledWebdavAuthLog));
-        return isWebdavAuthDisabled;
+        var value = EnvironmentUtil.GetEnvironmentVariable(DisableWebdavAuthEnvVar);
+        if (string.IsNullOrEmpty(value)) return false;
+
+        if (value == RequiredConfirmation)
+        {
+            LogOnlyOnce(() => Log.Warning(DisabledWebdavAuthLog));
+            return true;
+        }
+
+        Log.Error(
+            "DISABLE_WEBDAV_AUTH is set to '{Value}' but requires the exact value '{Required}' to take effect. " +
+            "WebDAV authentication remains ENABLED.",
+            value, RequiredConfirmation);
+        return false;
     }
 
     public static void UseWebdavBasicAuthentication(this WebApplication app)
