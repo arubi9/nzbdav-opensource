@@ -7,39 +7,59 @@ namespace NzbWebDAV.Clients.Usenet;
 
 public class UsenetStreamingClient : WrappingNntpClient
 {
+    private readonly record struct PipelineResult(LiveSegmentCachingNntpClient Client, ConnectionPoolStats Stats);
+    private volatile ConnectionPoolStats? _poolStats;
+
+    public ConnectionPoolStats? PoolStats => _poolStats;
+
     public UsenetStreamingClient
     (
         ConfigManager configManager,
         WebsocketManager websocketManager,
         LiveSegmentCache liveSegmentCache
+    ) : this(
+        CreatePipeline(configManager, websocketManager, liveSegmentCache),
+        configManager,
+        websocketManager,
+        liveSegmentCache
     )
-        : base(CreateLiveStreamingClient(configManager, websocketManager, liveSegmentCache))
     {
-        // when config changes, create a new MultiProviderClient to use instead.
+    }
+
+    private UsenetStreamingClient
+    (
+        PipelineResult pipeline,
+        ConfigManager configManager,
+        WebsocketManager websocketManager,
+        LiveSegmentCache liveSegmentCache
+    ) : base(pipeline.Client)
+    {
+        _poolStats = pipeline.Stats;
+
         configManager.OnConfigChanged += (_, configEventArgs) =>
         {
-            // if unrelated config changed, do nothing
             if (!configEventArgs.ChangedConfig.ContainsKey("usenet.providers")) return;
 
-            // update the connection-pool according to the new config
-            var newUsenetClient = CreateLiveStreamingClient(configManager, websocketManager, liveSegmentCache);
-            ReplaceUnderlyingClient(newUsenetClient);
+            var nextPipeline = CreatePipeline(configManager, websocketManager, liveSegmentCache);
+            ReplaceUnderlyingClient(nextPipeline.Client);
+            _poolStats = nextPipeline.Stats;
         };
     }
 
-    private static LiveSegmentCachingNntpClient CreateLiveStreamingClient
+    private static PipelineResult CreatePipeline
     (
         ConfigManager configManager,
         WebsocketManager websocketManager,
         LiveSegmentCache liveSegmentCache
     )
     {
-        var multiProviderClient = CreateMultiProviderClient(configManager, websocketManager);
-        var downloadingClient = new DownloadingNntpClient(multiProviderClient, configManager);
-        return new LiveSegmentCachingNntpClient(downloadingClient, liveSegmentCache);
+        var multiProviderResult = CreateMultiProviderClient(configManager, websocketManager);
+        var downloadingClient = new DownloadingNntpClient(multiProviderResult.Client, configManager);
+        var cachingClient = new LiveSegmentCachingNntpClient(downloadingClient, liveSegmentCache);
+        return new PipelineResult(cachingClient, multiProviderResult.Stats);
     }
 
-    private static MultiProviderNntpClient CreateMultiProviderClient
+    private static (MultiProviderNntpClient Client, ConnectionPoolStats Stats) CreateMultiProviderClient
     (
         ConfigManager configManager,
         WebsocketManager websocketManager
@@ -53,7 +73,7 @@ public class UsenetStreamingClient : WrappingNntpClient
                 connectionPoolStats.GetOnConnectionPoolChanged(index)
             ))
             .ToList();
-        return new MultiProviderNntpClient(providerClients);
+        return (new MultiProviderNntpClient(providerClients), connectionPoolStats);
     }
 
     private static MultiConnectionNntpClient CreateProviderClient

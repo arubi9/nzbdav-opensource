@@ -50,6 +50,19 @@ public class ConnectionPoolStats
         }
     }
 
+    public int TotalLive
+    {
+        get { lock (this) return _totalLive; }
+    }
+
+    public int TotalIdle
+    {
+        get { lock (this) return _totalIdle; }
+    }
+
+    public int MaxPooled => _max;
+    public int TotalActive => TotalLive - TotalIdle;
+
     public sealed class ConnectionPoolChangedEventArgs(int live, int idle, int max) : EventArgs
     {
         public int Live { get; } = live;
