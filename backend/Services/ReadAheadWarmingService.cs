@@ -162,7 +162,7 @@ public class ReadAheadWarmingService : IDisposable
             SessionId = sessionId;
             SegmentIds = segmentIds;
             CancellationTokenSource = cancellationTokenSource;
-            PositionChanged = new SemaphoreSlim(0);
+            PositionChanged = new SemaphoreSlim(0, 1);
         }
 
         public string SessionId { get; }

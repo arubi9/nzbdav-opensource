@@ -226,6 +226,9 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
     protected override void Dispose(bool disposing)
     {
         if (!disposing) return;
+        // Intentionally discard the Task: sync Dispose signals cancellation and cleans up
+        // the current stream immediately, then detaches in-flight download cleanup to the
+        // background. DisposeAsync will await _disposeTask if called subsequently.
         _ = DisposeAsyncCore(disposeCurrentStreamSynchronously: true);
         base.Dispose(disposing);
     }

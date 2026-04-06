@@ -112,6 +112,7 @@ public sealed class DebouncedSnapshotWriter : IDisposable
             _debounceCts = null;
         }
 
+        _writeLock.Dispose();
         GC.SuppressFinalize(this);
     }
 
