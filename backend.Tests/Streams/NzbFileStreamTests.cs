@@ -1,5 +1,6 @@
 using System.Text;
 using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Clients.Usenet.Caching;
 using NzbWebDAV.Clients.Usenet.Models;
 using NzbWebDAV.Models;
 using NzbWebDAV.Models.Nzb;
@@ -82,6 +83,39 @@ public class NzbFileStreamTests
     }
 
     [Fact]
+    public async Task SeekIntoCachedSegmentDoesNotReplaceActivePrefetchStream()
+    {
+        await using var cacheScope = new TempCacheScope();
+        using var liveCache = new LiveSegmentCache(cacheScope.Path);
+        using var fakeNntpClient = new FakeNntpClient()
+            .AddSegment("segment-1", Encoding.ASCII.GetBytes("AAAA"), partOffset: 0)
+            .AddSegment("segment-2", Encoding.ASCII.GetBytes("BBBB"), partOffset: 4)
+            .AddSegment("segment-3", Encoding.ASCII.GetBytes("CCCC"), partOffset: 8);
+        using var cachingClient = new LiveSegmentCachingNntpClient(fakeNntpClient, liveCache);
+
+        var cachedResponse = await cachingClient.DecodedBodyAsync("segment-2", CancellationToken.None);
+        await using (cachedResponse.Stream)
+        {
+        }
+
+        await using var stream = new NzbFileStream(
+            ["segment-1", "segment-2", "segment-3"],
+            fileSize: 12,
+            cachingClient,
+            StreamingBufferSettings.LiveDefault(articleBufferSize: 3)
+        );
+
+        await stream.ReadExactlyAsync(new byte[1]);
+        var innerBeforeSeek = GetInnerStream(stream);
+
+        stream.Seek(4, SeekOrigin.Begin);
+        await stream.ReadExactlyAsync(new byte[1]);
+        var innerAfterSeekRead = GetInnerStream(stream);
+
+        Assert.Same(innerBeforeSeek, innerAfterSeekRead);
+    }
+
+    [Fact]
     public async Task MissingPreferredDuplicateSegmentFallsBackToAlternate()
     {
         var fakeNntpClient = new FakeNntpClient()
@@ -116,6 +150,13 @@ public class NzbFileStreamTests
         }
 
         return buffer[..offset];
+    }
+
+    private static Stream? GetInnerStream(NzbFileStream stream)
+    {
+        var field = typeof(NzbFileStream)
+            .GetField("_innerStream", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        return field?.GetValue(stream) as Stream;
     }
 
     private sealed class NonCancellingSeekClient(Task gateTask) : NntpClient
@@ -219,6 +260,34 @@ public class NzbFileStreamTests
 
         public override void Dispose()
         {
+        }
+    }
+
+    private sealed class TempCacheScope : IAsyncDisposable
+    {
+        public TempCacheScope()
+        {
+            Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path);
+        }
+
+        public string Path { get; }
+
+        public ValueTask DisposeAsync()
+        {
+            if (!Directory.Exists(Path))
+                return ValueTask.CompletedTask;
+
+            try
+            {
+                Directory.Delete(Path, recursive: true);
+            }
+            catch
+            {
+                // Best-effort temp cleanup.
+            }
+
+            return ValueTask.CompletedTask;
         }
     }
 }

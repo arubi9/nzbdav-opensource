@@ -6,7 +6,7 @@ namespace NzbWebDAV.Clients.Usenet.Caching;
 public sealed class LiveSegmentCachingNntpClient(
     INntpClient usenetClient,
     LiveSegmentCache liveSegmentCache
-) : WrappingNntpClient(usenetClient)
+) : WrappingNntpClient(usenetClient), ICachedSegmentReader
 {
     public override Task<UsenetExclusiveConnection> AcquireExclusiveConnectionAsync(
         string segmentId,
@@ -158,5 +158,15 @@ public sealed class LiveSegmentCachingNntpClient(
     public override Task<UsenetYencHeader> GetYencHeadersAsync(string segmentId, CancellationToken ct)
     {
         return liveSegmentCache.GetOrAddHeaderAsync(segmentId, token => base.GetYencHeadersAsync(segmentId, token), ct);
+    }
+
+    public override bool HasCachedBody(string segmentId)
+    {
+        return liveSegmentCache.HasBody(segmentId);
+    }
+
+    public override bool TryReadCachedBody(string segmentId, out UsenetDecodedBodyResponse response)
+    {
+        return liveSegmentCache.TryReadBody(segmentId, out response);
     }
 }

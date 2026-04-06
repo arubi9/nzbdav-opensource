@@ -1,3 +1,4 @@
+using NzbWebDAV.Clients.Usenet.Caching;
 using NzbWebDAV.Clients.Usenet.Models;
 using NzbWebDAV.Models;
 using NzbWebDAV.Models.Nzb;
@@ -6,7 +7,7 @@ using UsenetSharp.Models;
 
 namespace NzbWebDAV.Clients.Usenet;
 
-public class WrappingNntpClient(INntpClient usenetClient) : NntpClient
+public class WrappingNntpClient(INntpClient usenetClient) : NntpClient, ICachedSegmentReader
 {
     private INntpClient _usenetClient = usenetClient;
 
@@ -60,6 +61,19 @@ public class WrappingNntpClient(INntpClient usenetClient) : NntpClient
 
     public override Task<UsenetYencHeader> GetYencHeadersAsync(string segmentId, CancellationToken ct) =>
         _usenetClient.GetYencHeadersAsync(segmentId, ct);
+
+    public virtual bool HasCachedBody(string segmentId) =>
+        _usenetClient is ICachedSegmentReader cachedSegmentReader
+        && cachedSegmentReader.HasCachedBody(segmentId);
+
+    public virtual bool TryReadCachedBody(string segmentId, out UsenetDecodedBodyResponse response)
+    {
+        if (_usenetClient is ICachedSegmentReader cachedSegmentReader)
+            return cachedSegmentReader.TryReadCachedBody(segmentId, out response);
+
+        response = default!;
+        return false;
+    }
 
     public override NzbFileStream GetFileStream(
         NzbFile nzbFile,

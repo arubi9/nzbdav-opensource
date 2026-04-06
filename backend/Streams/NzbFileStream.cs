@@ -1,4 +1,5 @@
 using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Clients.Usenet.Caching;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Models;
 using NzbWebDAV.Utils;
@@ -19,6 +20,7 @@ public class NzbFileStream(
     private bool _disposed;
     private bool _seekPending;
     private Stream? _innerStream;
+    private Stream? _seekOverlayStream;
 
     public override bool CanSeek => true;
     public override long Length => fileSize;
@@ -40,6 +42,25 @@ public class NzbFileStream(
         if (_seekPending)
         {
             _seekPending = false;
+            _seekOverlayStream = await TryCreateCachedSeekOverlayAsync(_position, cancellationToken).ConfigureAwait(false);
+            if (_seekOverlayStream == null)
+            {
+                _innerStream?.Dispose();
+                _innerStream = null;
+            }
+        }
+
+        if (_seekOverlayStream != null)
+        {
+            var overlayRead = await _seekOverlayStream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+            if (overlayRead > 0)
+            {
+                _position += overlayRead;
+                return overlayRead;
+            }
+
+            await _seekOverlayStream.DisposeAsync().ConfigureAwait(false);
+            _seekOverlayStream = null;
             _innerStream?.Dispose();
             _innerStream = null;
         }
@@ -104,6 +125,32 @@ public class NzbFileStream(
         return stream;
     }
 
+    private async Task<Stream?> TryCreateCachedSeekOverlayAsync(long rangeStart, CancellationToken cancellationToken)
+    {
+        if (usenetClient is not ICachedSegmentReader cachedSegmentReader)
+            return null;
+
+        if (rangeStart == 0)
+        {
+            if (!cachedSegmentReader.HasCachedBody(fileSegmentIds[0]))
+                return null;
+
+            onSegmentIndexChanged?.Invoke(0);
+            return new CachedSegmentStream(fileSegmentIds.AsMemory(), cachedSegmentReader);
+        }
+
+        var foundSegment = await SeekSegment(rangeStart, cancellationToken).ConfigureAwait(false);
+        if (!cachedSegmentReader.HasCachedBody(fileSegmentIds[foundSegment.FoundIndex]))
+            return null;
+
+        onSegmentIndexChanged?.Invoke(foundSegment.FoundIndex);
+        return new CachedSegmentStream(
+            fileSegmentIds.AsMemory()[foundSegment.FoundIndex..],
+            cachedSegmentReader,
+            rangeStart - foundSegment.FoundByteRange.StartInclusive
+        );
+    }
+
     private Stream GetMultiSegmentStream(int firstSegmentIndex, CancellationToken cancellationToken)
     {
         var segmentIds = fileSegmentIds.AsMemory()[firstSegmentIndex..];
@@ -120,7 +167,23 @@ public class NzbFileStream(
     {
         if (_disposed) return;
         if (!disposing) return;
+        _seekOverlayStream?.Dispose();
+        _seekOverlayStream = null;
         _innerStream?.Dispose();
+        _innerStream = null;
+        _disposed = true;
+        GC.SuppressFinalize(this);
+    }
+
+    public override async ValueTask DisposeAsync()
+    {
+        if (_disposed) return;
+        if (_seekOverlayStream != null)
+            await _seekOverlayStream.DisposeAsync().ConfigureAwait(false);
+        if (_innerStream != null)
+            await _innerStream.DisposeAsync().ConfigureAwait(false);
+        _seekOverlayStream = null;
+        _innerStream = null;
         _disposed = true;
         GC.SuppressFinalize(this);
     }
