@@ -97,6 +97,7 @@ class Program
             .AddSingleton<UsenetStreamingClient>()
             .AddSingleton<QueueManager>()
             .AddSingleton<ReadAheadWarmingService>()
+            .AddSingleton<StreamExecutionService>()
             .AddHostedService<ContentIndexRecoveryService>()
             .AddHostedService<HealthCheckService>()
             .AddHostedService<ArrMonitoringService>()
