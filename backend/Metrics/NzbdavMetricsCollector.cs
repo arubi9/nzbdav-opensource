@@ -11,6 +11,7 @@ public sealed class NzbdavMetricsCollector
 {
     private readonly Func<LiveSegmentCacheStats> _getCacheStats;
     private readonly Func<ConnectionPoolStats?> _getPoolStats;
+    private readonly Func<int> _getHealthyProviders;
     private readonly Func<int> _getWarmingSessions;
     private readonly Func<int> _getQueueProcessing;
 
@@ -25,6 +26,7 @@ public sealed class NzbdavMetricsCollector
     private readonly Gauge _nntpIdle;
     private readonly Gauge _nntpActive;
     private readonly Gauge _nntpMax;
+    private readonly Gauge _nntpProvidersHealthy;
     private readonly Gauge _warmingSessions;
     private readonly Gauge _queueProcessing;
 
@@ -45,6 +47,7 @@ public sealed class NzbdavMetricsCollector
     ) : this(
         () => cache.GetStats(),
         () => usenetClient.PoolStats,
+        () => usenetClient.HealthyProviderCount,
         () => warming.ActiveSessionCount,
         () => queue.GetInProgressQueueItem().queueItem != null ? 1 : 0,
         Prometheus.Metrics.DefaultRegistry,
@@ -56,6 +59,7 @@ public sealed class NzbdavMetricsCollector
     public NzbdavMetricsCollector(
         Func<LiveSegmentCacheStats> getCacheStats,
         Func<ConnectionPoolStats?> getPoolStats,
+        Func<int> getHealthyProviders,
         Func<int> getWarmingSessions,
         Func<int> getQueueProcessing,
         CollectorRegistry registry,
@@ -64,6 +68,7 @@ public sealed class NzbdavMetricsCollector
     {
         _getCacheStats = getCacheStats;
         _getPoolStats = getPoolStats;
+        _getHealthyProviders = getHealthyProviders;
         _getWarmingSessions = getWarmingSessions;
         _getQueueProcessing = getQueueProcessing;
 
@@ -102,6 +107,9 @@ public sealed class NzbdavMetricsCollector
         _nntpMax = metricFactory.CreateGauge(
             "nzbdav_nntp_connections_max",
             "Max pooled NNTP connections");
+        _nntpProvidersHealthy = metricFactory.CreateGauge(
+            "nzbdav_nntp_providers_healthy",
+            "Number of NNTP providers not in cooldown");
 
         _warmingSessions = metricFactory.CreateGauge(
             "nzbdav_warming_sessions_active",
@@ -139,6 +147,8 @@ public sealed class NzbdavMetricsCollector
                 _nntpActive.Set(poolStats.TotalActive);
                 _nntpMax.Set(poolStats.MaxPooled);
             }
+
+            _nntpProvidersHealthy.Set(_getHealthyProviders());
 
             _warmingSessions.Set(_getWarmingSessions());
             _queueProcessing.Set(_getQueueProcessing());

@@ -86,6 +86,11 @@ public class NzbdavHealthCheck(
             data["nntp_pool"] = "not initialized";
         }
 
+        data["nntp_healthy_providers"] = usenetClient.HealthyProviderCount;
+        data["nntp_total_providers"] = usenetClient.TotalProviderCount;
+        if (usenetClient.TotalProviderCount > 0 && !usenetClient.HasAvailableProvider)
+            status = HealthStatus.Unhealthy;
+
         return new HealthCheckResult(status, "NZBDAV health check", data: data);
     }
 }

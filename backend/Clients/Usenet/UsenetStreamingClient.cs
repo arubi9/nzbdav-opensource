@@ -7,10 +7,17 @@ namespace NzbWebDAV.Clients.Usenet;
 
 public class UsenetStreamingClient : WrappingNntpClient
 {
-    private readonly record struct PipelineResult(LiveSegmentCachingNntpClient Client, ConnectionPoolStats Stats);
+    private readonly record struct PipelineResult(
+        LiveSegmentCachingNntpClient Client,
+        MultiProviderNntpClient MultiProviderClient,
+        ConnectionPoolStats Stats);
     private volatile ConnectionPoolStats? _poolStats;
+    private volatile MultiProviderNntpClient? _multiProviderClient;
 
     public ConnectionPoolStats? PoolStats => _poolStats;
+    public bool HasAvailableProvider => _multiProviderClient?.HasAvailableProvider() ?? false;
+    public int HealthyProviderCount => _multiProviderClient?.HealthyProviderCount ?? 0;
+    public int TotalProviderCount => _multiProviderClient?.TotalProviderCount ?? 0;
 
     public UsenetStreamingClient
     (
@@ -35,6 +42,7 @@ public class UsenetStreamingClient : WrappingNntpClient
     ) : base(pipeline.Client)
     {
         _poolStats = pipeline.Stats;
+        _multiProviderClient = pipeline.MultiProviderClient;
 
         configManager.OnConfigChanged += (_, configEventArgs) =>
         {
@@ -43,6 +51,7 @@ public class UsenetStreamingClient : WrappingNntpClient
             var nextPipeline = CreatePipeline(configManager, websocketManager, liveSegmentCache);
             ReplaceUnderlyingClient(nextPipeline.Client);
             _poolStats = nextPipeline.Stats;
+            _multiProviderClient = nextPipeline.MultiProviderClient;
         };
     }
 
@@ -56,7 +65,7 @@ public class UsenetStreamingClient : WrappingNntpClient
         var multiProviderResult = CreateMultiProviderClient(configManager, websocketManager);
         var downloadingClient = new DownloadingNntpClient(multiProviderResult.Client, configManager);
         var cachingClient = new LiveSegmentCachingNntpClient(downloadingClient, liveSegmentCache);
-        return new PipelineResult(cachingClient, multiProviderResult.Stats);
+        return new PipelineResult(cachingClient, multiProviderResult.Client, multiProviderResult.Stats);
     }
 
     private static (MultiProviderNntpClient Client, ConnectionPoolStats Stats) CreateMultiProviderClient

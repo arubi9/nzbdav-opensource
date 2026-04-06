@@ -32,6 +32,7 @@ public sealed class NzbdavMetricsCollectorTests
                 VideoSegmentCount: 3,
                 UnknownCount: 1),
             () => poolStats,
+            () => 1,
             () => 7,
             () => 1,
             registry,
@@ -55,6 +56,7 @@ public sealed class NzbdavMetricsCollectorTests
         Assert.Contains("nzbdav_nntp_connections_idle 1", metricsText);
         Assert.Contains("nzbdav_nntp_connections_active 3", metricsText);
         Assert.Contains("nzbdav_nntp_connections_max 5", metricsText);
+        Assert.Contains("nzbdav_nntp_providers_healthy 1", metricsText);
         Assert.Contains("nzbdav_warming_sessions_active 7", metricsText);
         Assert.Contains("nzbdav_queue_processing 1", metricsText);
     }
