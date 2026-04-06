@@ -133,7 +133,8 @@ public partial class Program
                 .AddHostedService<HealthCheckService>()
                 .AddHostedService<ArrMonitoringService>()
                 .AddHostedService<BlobCleanupService>()
-                .AddHostedService<SmallFilePrecacheService>();
+                .AddHostedService<SmallFilePrecacheService>()
+                .AddHostedService<MediaProbeService>();
         }
 
         if (WebApplicationAuthExtensions.IsWebdavAuthDisabled())

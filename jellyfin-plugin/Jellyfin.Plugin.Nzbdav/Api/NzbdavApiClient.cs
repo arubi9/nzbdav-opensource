@@ -34,6 +34,23 @@ public sealed class NzbdavApiClient
     public string GetSignedStreamUrl(Guid id, string streamToken)
         => $"{BaseUrl}/api/stream/{id}?token={streamToken}";
 
+    public async Task<string?> GetProbeDataAsync(Guid id, CancellationToken ct)
+    {
+        var request = CreateRequest(HttpMethod.Get, $"{BaseUrl}/api/probe/{id}");
+        try
+        {
+            using (request)
+            {
+                using var response = await SharedHttp.SendAsync(request, ct).ConfigureAwait(false);
+                if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                    return null;
+                response.EnsureSuccessStatusCode();
+                return await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            }
+        }
+        catch { return null; }
+    }
+
     /// <summary>
     /// Fetch the entire /content tree in one request. ETag-cached — pass the
     /// previous ETag and get 304 Not Modified if nothing changed.

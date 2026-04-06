@@ -106,7 +106,7 @@ public class NzbdavLibrarySyncTask : IScheduledTask
 
             try
             {
-                SyncVideoFile(config, client, videoFile, allItems);
+                await SyncVideoFile(config, client, videoFile, allItems, ct).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -121,11 +121,12 @@ public class NzbdavLibrarySyncTask : IScheduledTask
         progress.Report(100);
     }
 
-    private void SyncVideoFile(
+    private async Task SyncVideoFile(
         Configuration.PluginConfiguration config,
         NzbdavApiClient client,
         ManifestItem videoFile,
-        Dictionary<Guid, ManifestItem> allItems)
+        Dictionary<Guid, ManifestItem> allItems,
+        CancellationToken ct)
     {
         // Build the filesystem path from the manifest path
         // e.g., /content/movies/MovieName/movie.mkv → {LibraryPath}/movies/MovieName/movie.strm
@@ -154,6 +155,22 @@ public class NzbdavLibrarySyncTask : IScheduledTask
         // The AuthFailureTracker only counts failed attempts, so this is safe.)
         var streamUrl = $"{config.NzbdavBaseUrl.TrimEnd('/')}/api/stream/{videoFile.Id}?apikey={config.ApiKey}";
         File.WriteAllText(strmPath, streamUrl);
+
+        // If probe data is available, write it alongside the .strm so Jellyfin
+        // can read media info without probing the stream via NNTP.
+        if (videoFile.HasProbeData)
+        {
+            var probePath = Path.ChangeExtension(strmPath, ".mediainfo.json");
+            if (!File.Exists(probePath))
+            {
+                var probeData = await client.GetProbeDataAsync(videoFile.Id, ct).ConfigureAwait(false);
+                if (probeData != null)
+                {
+                    File.WriteAllText(probePath, probeData);
+                    _logger.LogDebug("Wrote probe data: {Path}", probePath);
+                }
+            }
+        }
 
         _logger.LogDebug("Created/refreshed .strm: {Path}", strmPath);
     }

@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Api.Filters;
+using NzbWebDAV.Clients.Usenet.Caching;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 
@@ -15,7 +16,7 @@ namespace NzbWebDAV.Api.Controllers.Manifest;
 [ApiController]
 [Route("api/manifest")]
 [ServiceFilter(typeof(ApiKeyAuthFilter))]
-public class ManifestController(DavDatabaseClient dbClient) : ControllerBase
+public class ManifestController(DavDatabaseClient dbClient, LiveSegmentCache liveSegmentCache) : ControllerBase
 {
     [HttpGet]
     public async Task<IActionResult> GetManifest(CancellationToken ct)
@@ -37,10 +38,18 @@ public class ManifestController(DavDatabaseClient dbClient) : ControllerBase
                     : x.Type == DavItem.ItemType.MultipartFile ? "multipart_file"
                     : "unknown",
                 FileSize = x.FileSize,
-                CreatedAt = x.CreatedAt
+                CreatedAt = x.CreatedAt,
+                HasProbeData = false // Set below after query
             })
             .ToListAsync(ct)
             .ConfigureAwait(false);
+
+        // Mark items that have pre-generated probe data
+        foreach (var item in items)
+        {
+            var probePath = Path.Combine(liveSegmentCache.CacheDirectory, $"probe-{item.Id:N}.json");
+            item.HasProbeData = System.IO.File.Exists(probePath);
+        }
 
         // ETag based on item count + latest creation date
         var latestCreated = items.Count > 0
@@ -81,4 +90,5 @@ public class ManifestItem
     public required string Type { get; init; }
     public long? FileSize { get; init; }
     public required DateTime CreatedAt { get; init; }
+    public bool HasProbeData { get; set; }
 }

@@ -15,4 +15,5 @@ public class ManifestItem
     public string Type { get; set; } = "";
     public long? FileSize { get; set; }
     public DateTime CreatedAt { get; set; }
+    public bool HasProbeData { get; set; }
 }
