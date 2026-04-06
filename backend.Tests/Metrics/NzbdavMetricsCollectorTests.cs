@@ -31,6 +31,7 @@ public sealed class NzbdavMetricsCollectorTests
                 SmallFileCount: 2,
                 VideoSegmentCount: 3,
                 UnknownCount: 1),
+            () => 10_000L,
             () => poolStats,
             () => 1,
             () => 7,

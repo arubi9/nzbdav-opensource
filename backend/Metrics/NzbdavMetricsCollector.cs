@@ -10,12 +10,14 @@ namespace NzbWebDAV.Metrics;
 public sealed class NzbdavMetricsCollector
 {
     private readonly Func<LiveSegmentCacheStats> _getCacheStats;
+    private readonly Func<long> _getMaxCacheBytes;
     private readonly Func<ConnectionPoolStats?> _getPoolStats;
     private readonly Func<int> _getHealthyProviders;
     private readonly Func<int> _getWarmingSessions;
     private readonly Func<int> _getQueueProcessing;
 
     private readonly Gauge _cachedBytes;
+    private readonly Gauge _cacheMaxBytes;
     private readonly Gauge _cachedSegments;
     private readonly Gauge _cacheHitRate;
     private readonly Counter _cacheHits;
@@ -51,6 +53,7 @@ public sealed class NzbdavMetricsCollector
         QueueManager queue
     ) : this(
         () => cache.GetStats(),
+        () => cache.MaxCacheSizeBytes,
         () => usenetClient.PoolStats,
         () => usenetClient.HealthyProviderCount,
         () => warming.ActiveSessionCount,
@@ -63,6 +66,7 @@ public sealed class NzbdavMetricsCollector
 
     public NzbdavMetricsCollector(
         Func<LiveSegmentCacheStats> getCacheStats,
+        Func<long> getMaxCacheBytes,
         Func<ConnectionPoolStats?> getPoolStats,
         Func<int> getHealthyProviders,
         Func<int> getWarmingSessions,
@@ -72,6 +76,7 @@ public sealed class NzbdavMetricsCollector
     )
     {
         _getCacheStats = getCacheStats;
+        _getMaxCacheBytes = getMaxCacheBytes;
         _getPoolStats = getPoolStats;
         _getHealthyProviders = getHealthyProviders;
         _getWarmingSessions = getWarmingSessions;
@@ -80,6 +85,9 @@ public sealed class NzbdavMetricsCollector
         _cachedBytes = metricFactory.CreateGauge(
             "nzbdav_cache_bytes",
             "Total bytes in segment cache");
+        _cacheMaxBytes = metricFactory.CreateGauge(
+            "nzbdav_cache_max_bytes",
+            "Configured maximum cache size in bytes");
         _cachedSegments = metricFactory.CreateGauge(
             "nzbdav_cache_segments",
             "Cached segments by category",
@@ -132,6 +140,7 @@ public sealed class NzbdavMetricsCollector
         {
             var stats = _getCacheStats();
             _cachedBytes.Set(stats.CachedBytes);
+            _cacheMaxBytes.Set(_getMaxCacheBytes());
             _cachedSegments.WithLabels("video").Set(stats.VideoSegmentCount);
             _cachedSegments.WithLabels("small_file").Set(stats.SmallFileCount);
             _cachedSegments.WithLabels("unknown").Set(stats.UnknownCount);

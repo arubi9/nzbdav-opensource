@@ -45,6 +45,7 @@ public sealed class NzbdavApiClient
 
     private static async Task<T?> SendJsonAsync<T>(HttpRequestMessage request, CancellationToken ct)
     {
+        using (request)
         using var response = await SharedHttp.SendAsync(request, ct).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadFromJsonAsync<T>(ct).ConfigureAwait(false);

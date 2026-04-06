@@ -163,13 +163,13 @@ public class NzbdavLibrarySyncTask : IScheduledTask
             IsVirtualItem = true
         };
 
+        // Use a stable identifier as Path, not a signed URL (which expires in 24h).
+        // NzbdavMediaSourceProvider generates fresh signed URLs on each playback request.
+        movie.Path = $"nzbdav://{primaryFile.Id}";
+
         var meta = await client.GetMetaAsync(primaryFile.Id, ct).ConfigureAwait(false);
         if (meta != null)
-        {
-            var streamUrl = client.GetSignedStreamUrl(primaryFile.Id, meta.StreamToken ?? string.Empty);
-            movie.Path = streamUrl;
             movie.Size = meta.FileSize ?? 0;
-        }
 
         _libraryManager.CreateItem(movie, null);
         existingNzbdavIds.Add(nzbdavId);

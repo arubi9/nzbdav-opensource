@@ -7,8 +7,10 @@ namespace NzbWebDAV.Api.Filters;
 
 public class ApiKeyAuthFilter(ConfigManager configManager) : IAsyncActionFilter
 {
-    private byte[]? _cachedKeyBytes;
-    private string? _cachedKeySource;
+    // Thread-safe: immutable record swapped atomically via volatile reference.
+    // Singleton filter accessed by concurrent requests.
+    private volatile CachedKeyData? _cachedKey;
+    private sealed record CachedKeyData(string Source, byte[] Bytes);
 
     public async Task OnActionExecutionAsync(ActionExecutingContext context, ActionExecutionDelegate next)
     {
@@ -41,19 +43,18 @@ public class ApiKeyAuthFilter(ConfigManager configManager) : IAsyncActionFilter
         try
         {
             var expectedKey = configManager.GetApiKey();
-            if (_cachedKeySource != expectedKey)
+            var cached = _cachedKey;
+            if (cached is null || cached.Source != expectedKey)
             {
-                _cachedKeySource = expectedKey;
-                _cachedKeyBytes = System.Text.Encoding.UTF8.GetBytes(expectedKey);
+                cached = new CachedKeyData(expectedKey, System.Text.Encoding.UTF8.GetBytes(expectedKey));
+                _cachedKey = cached;
             }
 
             var providedBytes = System.Text.Encoding.UTF8.GetBytes(providedKey);
-            if (_cachedKeyBytes == null)
-                return false;
-
-            // No length pre-check — FixedTimeEquals handles mismatched lengths
-            // without leaking key length via timing.
-            return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(providedBytes, _cachedKeyBytes);
+            // FixedTimeEquals returns false immediately for different-length spans.
+            // This leaks key length, which is acceptable for API keys (length is not secret).
+            return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+                providedBytes, cached.Bytes);
         }
         catch
         {

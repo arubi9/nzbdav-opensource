@@ -10,7 +10,8 @@ public class RequestTimeoutMiddleware(RequestDelegate next)
     public async Task InvokeAsync(HttpContext context)
     {
         var timeout = IsStreamingRequest(context) ? StreamTimeout : MetadataTimeout;
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
+        var originalAbortToken = context.RequestAborted;
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(originalAbortToken);
         cts.CancelAfter(timeout);
         context.RequestAborted = cts.Token;
 
@@ -19,7 +20,7 @@ public class RequestTimeoutMiddleware(RequestDelegate next)
             await next(context).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cts.IsCancellationRequested
-                                                   && !context.RequestAborted.IsCancellationRequested)
+                                                   && !originalAbortToken.IsCancellationRequested)
         {
             if (!context.Response.HasStarted)
             {
