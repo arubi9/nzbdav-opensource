@@ -176,6 +176,28 @@ public sealed class ReadAheadWarmingServiceTests
     }
 
     [Fact]
+    public void ActiveSessionCount_TracksOpenSessions()
+    {
+        var configManager = new ConfigManager();
+        configManager.UpdateValues(
+        [
+            new ConfigItem { ConfigName = "cache.read-ahead-enable", ConfigValue = "true" }
+        ]);
+
+        using var liveCache = new LiveSegmentCache(System.IO.Path.Combine(System.IO.Path.GetTempPath(), Guid.NewGuid().ToString("N")));
+        using var fakeNntpClient = new FakeNntpClient();
+        using var cachingClient = new LiveSegmentCachingNntpClient(fakeNntpClient, liveCache);
+        using var warmingService = new ReadAheadWarmingService(cachingClient, liveCache, configManager);
+        using var cts = new CancellationTokenSource();
+
+        var sessionId = warmingService.CreateSession(["segment-0"], cts.Token);
+        Assert.Equal(1, warmingService.ActiveSessionCount);
+
+        warmingService.StopSession(sessionId);
+        Assert.Equal(0, warmingService.ActiveSessionCount);
+    }
+
+    [Fact]
     public async Task StopSession_DoesNotFaultBackgroundWarmingTask()
     {
         await using var cacheScope = new TempCacheScope();

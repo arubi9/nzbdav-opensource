@@ -13,6 +13,8 @@ public class ReadAheadWarmingService : IDisposable
     private readonly ConfigManager _configManager;
     private readonly ConcurrentDictionary<string, WarmingSession> _sessions = new();
 
+    public int ActiveSessionCount => _sessions.Count;
+
     public ReadAheadWarmingService(
         UsenetStreamingClient usenetClient,
         LiveSegmentCache liveSegmentCache,
