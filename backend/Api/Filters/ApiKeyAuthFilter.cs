@@ -5,7 +5,7 @@ using NzbWebDAV.Services;
 
 namespace NzbWebDAV.Api.Filters;
 
-public class ApiKeyAuthFilter(ConfigManager configManager) : IAsyncActionFilter
+public class ApiKeyAuthFilter(ConfigManager configManager, AuthFailureTracker failureTracker) : IAsyncActionFilter
 {
     // Thread-safe: immutable record swapped atomically via volatile reference.
     // Singleton filter accessed by concurrent requests.
@@ -15,6 +15,19 @@ public class ApiKeyAuthFilter(ConfigManager configManager) : IAsyncActionFilter
     public async Task OnActionExecutionAsync(ActionExecutingContext context, ActionExecutionDelegate next)
     {
         var request = context.HttpContext.Request;
+        var ip = context.HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+
+        // Check if this IP is blocked from too many failed attempts
+        if (failureTracker.IsBlocked(ip))
+        {
+            context.HttpContext.Response.Headers.RetryAfter = "60";
+            context.Result = new ObjectResult(new { error = "Too many failed attempts. Retry after 60 seconds." })
+            {
+                StatusCode = 429
+            };
+            return;
+        }
+
         var providedKey = request.Headers["X-Api-Key"].FirstOrDefault()
                           ?? request.Query["apikey"].FirstOrDefault();
 
@@ -31,6 +44,7 @@ public class ApiKeyAuthFilter(ConfigManager configManager) : IAsyncActionFilter
 
         if (string.IsNullOrEmpty(providedKey) || !ValidateApiKey(providedKey))
         {
+            failureTracker.RecordFailure(ip);
             context.Result = new UnauthorizedObjectResult(new { error = "Invalid or missing API key" });
             return;
         }

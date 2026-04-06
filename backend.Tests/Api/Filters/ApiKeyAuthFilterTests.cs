@@ -65,7 +65,7 @@ public class ApiKeyAuthFilterTests
     public async Task OnActionExecutionAsync_AllowsValidSignedToken()
     {
         var configManager = CreateConfigManager();
-        var filter = new ApiKeyAuthFilter(configManager);
+        var filter = new ApiKeyAuthFilter(configManager, new AuthFailureTracker());
         var context = CreateContext();
         context.HttpContext.Request.Method = "GET";
         context.HttpContext.Request.Path = "/api/stream/11111111-1111-1111-1111-111111111111";
@@ -84,7 +84,7 @@ public class ApiKeyAuthFilterTests
     }
 
     private static ApiKeyAuthFilter CreateFilter()
-        => new(CreateConfigManager());
+        => new(CreateConfigManager(), new AuthFailureTracker());
 
     private static ConfigManager CreateConfigManager()
     {

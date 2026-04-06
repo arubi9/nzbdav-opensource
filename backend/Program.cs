@@ -20,8 +20,6 @@ using NzbWebDAV.Services;
 using NzbWebDAV.Utils;
 using NzbWebDAV.WebDav;
 using NzbWebDAV.WebDav.Base;
-using System.Threading.RateLimiting;
-using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.Hosting;
 using NzbWebDAV.Websocket;
@@ -104,22 +102,9 @@ public partial class Program
         builder.Services.Configure<HostOptions>(opts => opts.ShutdownTimeout = TimeSpan.FromSeconds(30));
         builder.Host.UseSerilog();
         builder.Services.AddControllers();
-        builder.Services.AddRateLimiter(options =>
-        {
-            options.RejectionStatusCode = 429;
-            options.AddFixedWindowLimiter("auth", limiterOptions =>
-            {
-                limiterOptions.PermitLimit = 10;
-                limiterOptions.Window = TimeSpan.FromSeconds(60);
-                limiterOptions.QueueLimit = 0;
-            });
-            options.OnRejected = async (context, ct) =>
-            {
-                context.HttpContext.Response.Headers.RetryAfter = "60";
-                await context.HttpContext.Response.Body.WriteAsync(
-                    System.Text.Encoding.UTF8.GetBytes("Too many requests. Retry after 60 seconds."), ct).ConfigureAwait(false);
-            };
-        });
+        // Rate limiting: track failed auth attempts per IP, not all requests.
+        // The limiter is NOT applied globally — it's invoked manually by auth
+        // filters only when credentials are invalid.
         builder.Services.AddHealthChecks()
             .AddCheck<NzbdavHealthCheck>("nzbdav");
         builder.Services
@@ -137,6 +122,7 @@ public partial class Program
             .AddScoped<DatabaseStore>()
             .AddScoped<IStore, DatabaseStore>()
             .AddScoped<GetAndHeadHandlerPatch>()
+            .AddSingleton<AuthFailureTracker>()
             .AddSingleton<ApiKeyAuthFilter>()
             .AddScoped<SabApiController>();
 
@@ -171,7 +157,6 @@ public partial class Program
         {
             ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
         });
-        app.UseRateLimiter();
         app.UseRouting();
         app.UseHttpMetrics();
         app.UseMetricServer("/metrics");
@@ -200,7 +185,7 @@ public partial class Program
             }
         }).AllowAnonymous();
         app.Map("/ws", websocketManager.HandleRoute);
-        app.MapControllers().RequireRateLimiting("auth");
+        app.MapControllers();
         app.UseWebdavBasicAuthentication();
         if (NodeRoleConfig.RunsStreaming)
             app.UseNWebDav();
