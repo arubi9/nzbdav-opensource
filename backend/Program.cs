@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using NzbWebDAV.Api.Filters;
 using NWebDav.Server;
 using NWebDav.Server.Stores;
 using NzbWebDAV.Api.SabControllers;
@@ -106,6 +107,7 @@ class Program
             .AddScoped<DatabaseStore>()
             .AddScoped<IStore, DatabaseStore>()
             .AddScoped<GetAndHeadHandlerPatch>()
+            .AddScoped<ApiKeyAuthFilter>()
             .AddScoped<SabApiController>()
             .AddNWebDav(opts =>
             {
