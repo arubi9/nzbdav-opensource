@@ -29,7 +29,7 @@ using Serilog.Sinks.SystemConsole.Themes;
 
 namespace NzbWebDAV;
 
-class Program
+public partial class Program
 {
     static async Task Main(string[] args)
     {

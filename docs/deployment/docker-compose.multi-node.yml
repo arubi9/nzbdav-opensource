@@ -1,0 +1,68 @@
+version: "3.9"
+
+services:
+  nzbdav-stream-1:
+    image: nzbdav:latest
+    environment:
+      NZBDAV_ROLE: streaming
+      DATABASE_URL: Host=postgres;Database=nzbdav;Username=nzbdav;Password=nzbdav
+      FRONTEND_BACKEND_API_KEY: ${FRONTEND_BACKEND_API_KEY}
+      CONFIG_PATH: /config
+      ASPNETCORE_URLS: http://0.0.0.0:8080
+    volumes:
+      - nzbdav-stream-1-config:/config
+    depends_on:
+      - postgres
+
+  nzbdav-stream-2:
+    image: nzbdav:latest
+    environment:
+      NZBDAV_ROLE: streaming
+      DATABASE_URL: Host=postgres;Database=nzbdav;Username=nzbdav;Password=nzbdav
+      FRONTEND_BACKEND_API_KEY: ${FRONTEND_BACKEND_API_KEY}
+      CONFIG_PATH: /config
+      ASPNETCORE_URLS: http://0.0.0.0:8080
+    volumes:
+      - nzbdav-stream-2-config:/config
+    depends_on:
+      - postgres
+
+  nzbdav-ingest:
+    image: nzbdav:latest
+    environment:
+      NZBDAV_ROLE: ingest
+      DATABASE_URL: Host=postgres;Database=nzbdav;Username=nzbdav;Password=nzbdav
+      FRONTEND_BACKEND_API_KEY: ${FRONTEND_BACKEND_API_KEY}
+      CONFIG_PATH: /config
+      ASPNETCORE_URLS: http://0.0.0.0:8080
+    volumes:
+      - nzbdav-ingest-config:/config
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: nzbdav
+      POSTGRES_USER: nzbdav
+      POSTGRES_PASSWORD: nzbdav
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  haproxy:
+    image: haproxy:3.1
+    ports:
+      - "8080:8080"
+      - "8404:8404"
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      - nzbdav-stream-1
+      - nzbdav-stream-2
+      - nzbdav-ingest
+
+volumes:
+  nzbdav-stream-1-config:
+  nzbdav-stream-2-config:
+  nzbdav-ingest-config:
+  postgres-data:
