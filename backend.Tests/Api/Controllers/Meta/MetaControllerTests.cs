@@ -60,8 +60,8 @@ public sealed class MetaControllerTests
         configManager.UpdateValues([
             new ConfigItem
             {
-                ConfigName = "api.strm-key",
-                ConfigValue = "unit-test-strm-key"
+                ConfigName = "api.key",
+                ConfigValue = "unit-test-api-key"
             }
         ]);
 

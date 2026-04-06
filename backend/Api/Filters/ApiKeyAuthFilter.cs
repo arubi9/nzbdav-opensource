@@ -1,47 +1,61 @@
-using System.Security.Cryptography;
-using System.Text;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
-using NzbWebDAV.Api.Controllers;
 using NzbWebDAV.Config;
-using NzbWebDAV.Extensions;
+using NzbWebDAV.Services;
 
 namespace NzbWebDAV.Api.Filters;
 
-public sealed class ApiKeyAuthFilter(ConfigManager configManager) : IAsyncAuthorizationFilter
+public class ApiKeyAuthFilter(ConfigManager configManager) : IAsyncActionFilter
 {
-    public Task OnAuthorizationAsync(AuthorizationFilterContext context)
+    private byte[]? _cachedKeyBytes;
+    private string? _cachedKeySource;
+
+    public async Task OnActionExecutionAsync(ActionExecutingContext context, ActionExecutionDelegate next)
     {
-        var requestApiKey = context.HttpContext.GetRequestApiKey();
-        if (requestApiKey == null)
+        var request = context.HttpContext.Request;
+        var providedKey = request.Headers["X-Api-Key"].FirstOrDefault()
+                          ?? request.Query["apikey"].FirstOrDefault();
+
+        if (string.IsNullOrEmpty(providedKey))
         {
-            context.Result = new UnauthorizedObjectResult(new BaseApiResponse
+            var token = request.Query["token"].FirstOrDefault();
+            if (!string.IsNullOrEmpty(token)
+                && StreamTokenService.ValidateToken(token, request.Path, configManager))
             {
-                Status = false,
-                Error = "API Key Required"
-            });
-            return Task.CompletedTask;
+                await next().ConfigureAwait(false);
+                return;
+            }
         }
 
-        if (!IsValidApiKey(requestApiKey))
+        if (string.IsNullOrEmpty(providedKey) || !ValidateApiKey(providedKey))
         {
-            context.Result = new UnauthorizedObjectResult(new BaseApiResponse
-            {
-                Status = false,
-                Error = "API Key Incorrect"
-            });
+            context.Result = new UnauthorizedObjectResult(new { error = "Invalid or missing API key" });
+            return;
         }
 
-        return Task.CompletedTask;
+        await next().ConfigureAwait(false);
     }
 
-    private bool IsValidApiKey(string requestApiKey)
+    private bool ValidateApiKey(string providedKey)
     {
-        var expectedApiKey = configManager.GetApiKey();
-        var expectedBytes = Encoding.UTF8.GetBytes(expectedApiKey);
-        var requestBytes = Encoding.UTF8.GetBytes(requestApiKey);
+        try
+        {
+            var expectedKey = configManager.GetApiKey();
+            if (_cachedKeySource != expectedKey)
+            {
+                _cachedKeySource = expectedKey;
+                _cachedKeyBytes = System.Text.Encoding.UTF8.GetBytes(expectedKey);
+            }
 
-        return expectedBytes.Length == requestBytes.Length
-               && CryptographicOperations.FixedTimeEquals(expectedBytes, requestBytes);
+            var providedBytes = System.Text.Encoding.UTF8.GetBytes(providedKey);
+            if (_cachedKeyBytes == null || providedBytes.Length != _cachedKeyBytes.Length)
+                return false;
+
+            return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(providedBytes, _cachedKeyBytes);
+        }
+        catch
+        {
+            return false;
+        }
     }
 }

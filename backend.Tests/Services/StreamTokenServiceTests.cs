@@ -9,47 +9,42 @@ public sealed class StreamTokenServiceTests
     [Fact]
     public void GenerateTokenAndValidateToken_RoundTripForMatchingPath()
     {
-        var service = CreateService();
+        var configManager = CreateConfigManager();
 
-        var token = service.GenerateToken("/api/stream/abc123");
+        var token = StreamTokenService.GenerateToken("/api/stream/abc123", configManager);
 
-        Assert.True(service.ValidateToken(token, "/api/stream/abc123"));
+        Assert.True(StreamTokenService.ValidateToken(token, "/api/stream/abc123", configManager));
     }
 
     [Fact]
     public void ValidateToken_ReturnsFalseForDifferentPath()
     {
-        var service = CreateService();
+        var configManager = CreateConfigManager();
 
-        var token = service.GenerateToken("/api/stream/abc123");
+        var token = StreamTokenService.GenerateToken("/api/stream/abc123", configManager);
 
-        Assert.False(service.ValidateToken(token, "/api/stream/xyz789"));
-    }
-
-    [Fact]
-    public void ValidateToken_ReturnsFalseWhenTokenIsExpired()
-    {
-        var currentUtc = new DateTimeOffset(2026, 4, 6, 12, 0, 0, TimeSpan.Zero);
-        var service = CreateService(() => currentUtc);
-
-        var token = service.GenerateToken("/api/stream/abc123", TimeSpan.FromMinutes(1));
-        currentUtc = currentUtc.AddMinutes(2);
-
-        Assert.False(service.ValidateToken(token, "/api/stream/abc123"));
+        Assert.False(StreamTokenService.ValidateToken(token, "/api/stream/xyz789", configManager));
     }
 
     [Fact]
     public void ValidateToken_ReturnsFalseWhenTokenIsTampered()
     {
-        var service = CreateService();
+        var configManager = CreateConfigManager();
 
-        var token = service.GenerateToken("/api/stream/abc123");
-        var tamperedToken = token[..^1] + (token.EndsWith('A') ? 'B' : 'A');
+        var token = StreamTokenService.GenerateToken("/api/stream/abc123", configManager);
+        var tamperedToken = token[..^1] + (token.EndsWith('a') ? 'b' : 'a');
 
-        Assert.False(service.ValidateToken(tamperedToken, "/api/stream/abc123"));
+        Assert.False(StreamTokenService.ValidateToken(tamperedToken, "/api/stream/abc123", configManager));
     }
 
-    private static StreamTokenService CreateService(Func<DateTimeOffset>? utcNow = null)
+    [Fact]
+    public void ValidateToken_ReturnsFalseWhenTokenIsMalformed()
+    {
+        var configManager = CreateConfigManager();
+        Assert.False(StreamTokenService.ValidateToken("not-a-token", "/api/stream/abc123", configManager));
+    }
+
+    private static ConfigManager CreateConfigManager()
     {
         var configManager = new ConfigManager();
         configManager.UpdateValues(
@@ -61,7 +56,6 @@ public sealed class StreamTokenServiceTests
                 }
             ]
         );
-
-        return new StreamTokenService(configManager, utcNow);
+        return configManager;
     }
 }

@@ -1,125 +1,129 @@
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.StaticFiles;
-using NWebDav.Server;
-using NWebDav.Server.Helpers;
 using NzbWebDAV.Extensions;
+using NzbWebDAV.Metrics;
 
 namespace NzbWebDAV.Services;
 
-public sealed class StreamExecutionService
+public class StreamExecutionService
 {
     private static readonly FileExtensionContentTypeProvider MimeTypeProvider = new();
 
-    private int _activeStreams;
-
-    public int ActiveStreamCount => Volatile.Read(ref _activeStreams);
-
-    public IDisposable BeginActiveStream()
-    {
-        Interlocked.Increment(ref _activeStreams);
-        return new ActiveStreamLease(this);
-    }
-
-    public string ResolveContentType(string fileName, string? explicitContentType = null)
-    {
-        if (!string.IsNullOrWhiteSpace(explicitContentType))
-            return explicitContentType;
-
-        var normalizedFileName = Path.GetFileName(fileName);
-        if (string.Equals(normalizedFileName, "README", StringComparison.OrdinalIgnoreCase))
-            return "text/plain";
-
-        return Path.GetExtension(normalizedFileName).ToLowerInvariant() switch
-        {
-            ".mkv" => "video/webm",
-            ".rclonelink" => "text/plain",
-            ".nfo" => "text/plain",
-            _ when MimeTypeProvider.TryGetContentType(normalizedFileName, out var mimeType) => mimeType,
-            _ => "application/octet-stream",
-        };
-    }
-
-    public async Task ExecuteAsync(
-        HttpContext httpContext,
-        Func<CancellationToken, Task<Stream>> openStreamAsync,
+    public async Task ServeStreamAsync(
+        Stream stream,
         string fileName,
-        string? explicitContentType = null)
+        HttpResponse response,
+        HttpRequest request,
+        CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(httpContext);
-        ArgumentNullException.ThrowIfNull(openStreamAsync);
+        response.ContentType = GetContentType(fileName);
+        response.Headers.AcceptRanges = "bytes";
 
-        using var activeStreamLease = BeginActiveStream();
-
-        var request = httpContext.Request;
-        var response = httpContext.Response;
-        var isHeadRequest = request.Method == HttpMethods.Head;
-        var range = request.GetRange();
-
-        var stream = await openStreamAsync(httpContext.RequestAborted).ConfigureAwait(false);
-        await using (stream.ConfigureAwait(false))
+        if (!stream.CanSeek)
         {
-            if (stream == Stream.Null)
-            {
-                response.SetStatus(DavStatusCode.NoContent);
-                return;
-            }
-
-            response.SetStatus(DavStatusCode.Ok);
-            response.ContentType = ResolveContentType(fileName, explicitContentType);
-
+            NzbdavMetricsCollector.IncrementActiveStreams();
             try
             {
-                if (stream.CanSeek)
-                {
-                    response.Headers.AcceptRanges = "bytes";
-
-                    var length = stream.Length;
-                    if (range != null)
-                    {
-                        var start = range.Start ?? 0;
-                        var end = Math.Min(range.End ?? long.MaxValue, length - 1);
-                        length = end - start + 1;
-
-                        response.Headers.ContentRange = $"bytes {start}-{end} / {stream.Length}";
-                        if (length < stream.Length)
-                            response.SetStatus(DavStatusCode.PartialContent);
-                    }
-
-                    response.ContentLength = length;
-                }
+                await stream.CopyToPooledAsync(response.Body, cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
             }
-            catch (NotSupportedException)
+            finally
             {
-                // If the content length is not supported, then we just skip it.
+                NzbdavMetricsCollector.DecrementActiveStreams();
             }
+            return;
+        }
 
-            if (isHeadRequest)
-                return;
+        var totalLength = stream.Length;
+        var rangeHeader = request.Headers.Range.FirstOrDefault();
+        long start = 0;
+        long? end = null;
 
+        if (!string.IsNullOrEmpty(rangeHeader) && TryParseRange(rangeHeader, totalLength, out var parsedStart, out var parsedEnd))
+        {
+            start = parsedStart;
+            end = parsedEnd;
+            var length = end.Value - start + 1;
+
+            response.StatusCode = StatusCodes.Status206PartialContent;
+            response.ContentLength = length;
+            response.Headers.ContentRange = $"bytes {start}-{end}/{totalLength}";
+        }
+        else
+        {
+            response.StatusCode = StatusCodes.Status200OK;
+            response.ContentLength = totalLength;
+        }
+
+        if (HttpMethods.IsHead(request.Method))
+            return;
+
+        NzbdavMetricsCollector.IncrementActiveStreams();
+        try
+        {
             await stream.CopyRangeToPooledAsync(
                 response.Body,
-                range?.Start ?? 0,
-                range?.End,
-                cancellationToken: httpContext.RequestAborted
+                start,
+                end,
+                cancellationToken: cancellationToken
             ).ConfigureAwait(false);
         }
-    }
-
-    private void ReleaseActiveStream()
-    {
-        Interlocked.Decrement(ref _activeStreams);
-    }
-
-    private sealed class ActiveStreamLease(StreamExecutionService owner) : IDisposable
-    {
-        private int _disposed;
-
-        public void Dispose()
+        finally
         {
-            if (Interlocked.Exchange(ref _disposed, 1) == 1)
-                return;
-
-            owner.ReleaseActiveStream();
+            NzbdavMetricsCollector.DecrementActiveStreams();
         }
+    }
+
+    public void SetFileHeaders(string fileName, long? fileSize, HttpResponse response)
+    {
+        response.ContentType = GetContentType(fileName);
+        response.Headers.AcceptRanges = "bytes";
+        if (fileSize.HasValue)
+            response.ContentLength = fileSize.Value;
+    }
+
+    private static bool TryParseRange(string rangeHeader, long totalLength, out long start, out long end)
+    {
+        start = 0;
+        end = totalLength - 1;
+
+        if (!rangeHeader.StartsWith("bytes=", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        var rangeSpec = rangeHeader["bytes=".Length..];
+        var parts = rangeSpec.Split('-', 2);
+        if (parts.Length != 2) return false;
+
+        if (!string.IsNullOrEmpty(parts[0]))
+            start = long.TryParse(parts[0], out var parsedStart) ? parsedStart : 0;
+        else
+        {
+            if (long.TryParse(parts[1], out var suffix))
+            {
+                start = Math.Max(0, totalLength - suffix);
+                end = totalLength - 1;
+                return true;
+            }
+            return false;
+        }
+
+        if (!string.IsNullOrEmpty(parts[1]))
+            end = long.TryParse(parts[1], out var parsedEnd) ? Math.Min(parsedEnd, totalLength - 1) : totalLength - 1;
+
+        return start <= end && start < totalLength;
+    }
+
+    public static string GetContentType(string fileName)
+    {
+        if (MimeTypeProvider.TryGetContentType(fileName, out var contentType))
+            return contentType;
+        var ext = Path.GetExtension(fileName)?.ToLowerInvariant();
+        return ext switch
+        {
+            ".mkv" => "video/x-matroska",
+            ".nfo" => "text/plain",
+            ".rclonelink" => "text/plain",
+            _ => "application/octet-stream"
+        };
     }
 }
