@@ -6,7 +6,9 @@ namespace NzbWebDAV.Services;
 
 public static class StreamTokenService
 {
-    private const int DefaultExpiryMinutes = 60;
+    // 24h expiry: Jellyfin caches MediaSourceInfo for the entire playback session.
+    // A 60-minute token would break 3-hour movies on seek after the first hour.
+    private const int DefaultExpiryMinutes = 1440;
 
     public static string GenerateToken(
         string path,

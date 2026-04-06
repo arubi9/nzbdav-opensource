@@ -150,7 +150,27 @@ public partial class Program
         app.UseMiddleware<RequestTimeoutMiddleware>();
         app.UseMiddleware<ExceptionMiddleware>();
         app.UseWebSockets();
-        app.MapHealthChecks("/health").AllowAnonymous();
+        app.MapHealthChecks("/health", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+        {
+            ResponseWriter = async (context, report) =>
+            {
+                context.Response.ContentType = "application/json";
+                var result = new
+                {
+                    status = report.Status.ToString(),
+                    checks = report.Entries.Select(e => new
+                    {
+                        name = e.Key,
+                        status = e.Value.Status.ToString(),
+                        description = e.Value.Description,
+                        data = e.Value.Data
+                    })
+                };
+                await System.Text.Json.JsonSerializer.SerializeAsync(
+                    context.Response.Body, result, cancellationToken: context.RequestAborted
+                ).ConfigureAwait(false);
+            }
+        }).AllowAnonymous();
         app.Map("/ws", websocketManager.HandleRoute);
         app.MapControllers();
         app.UseWebdavBasicAuthentication();
