@@ -23,8 +23,6 @@ public class HealthCheckService : BackgroundService
     private readonly INntpClient _usenetClient;
     private readonly WebsocketManager _websocketManager;
 
-    private static readonly HashSet<string> _missingSegmentIds = [];
-
     public HealthCheckService
     (
         ConfigManager configManager,
@@ -38,9 +36,20 @@ public class HealthCheckService : BackgroundService
 
         _configManager.OnConfigChanged += (_, configEventArgs) =>
         {
-            // when usenet host changes, clear the missing segments cache
             if (!configEventArgs.ChangedConfig.ContainsKey("usenet.host")) return;
-            lock (_missingSegmentIds) _missingSegmentIds.Clear();
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await using var dbContext = new DavDatabaseContext();
+                    dbContext.MissingSegmentIds.RemoveRange(dbContext.MissingSegmentIds);
+                    await dbContext.SaveChangesAsync().ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    Log.Warning(ex, "Failed clearing missing segment ids after usenet host change.");
+                }
+            });
         };
     }
 
@@ -153,9 +162,7 @@ public class HealthCheckService : BackgroundService
             _ = _websocketManager.SendMessage(WebsocketTopic.HealthItemProgress, $"{davItem.Id}|100");
             _ = _websocketManager.SendMessage(WebsocketTopic.HealthItemProgress, $"{davItem.Id}|done");
             if (FilenameUtil.IsImportantFileType(davItem.Name))
-                lock (_missingSegmentIds)
-                    foreach (var segmentId in NzbSegmentIdSet.Decode(e.SegmentId))
-                        _missingSegmentIds.Add(segmentId);
+                await RecordMissingSegmentIdsAsync(dbClient.Ctx, e.SegmentId, ct).ConfigureAwait(false);
 
             // when usenet article is missing, perform repairs
             await Repair(davItem, dbClient, ct).ConfigureAwait(false);
@@ -340,13 +347,56 @@ public class HealthCheckService : BackgroundService
         return result;
     }
 
-    public static void CheckCachedMissingSegmentIds(IEnumerable<string> segmentIds)
+    public static async Task CheckMissingSegmentIdsAsync(
+        DavDatabaseContext dbContext,
+        IEnumerable<string> segmentIds,
+        CancellationToken ct)
     {
-        lock (_missingSegmentIds)
+        var encodedIds = segmentIds.ToList();
+        if (encodedIds.Count == 0) return;
+
+        var candidateIds = encodedIds
+            .SelectMany(NzbSegmentIdSet.Decode)
+            .Distinct()
+            .ToList();
+
+        var existingIds = await dbContext.Set<MissingSegmentId>()
+            .Where(m => candidateIds.Contains(m.SegmentId))
+            .Select(m => m.SegmentId)
+            .ToListAsync(ct)
+            .ConfigureAwait(false);
+
+        var existingSet = existingIds.ToHashSet();
+        foreach (var segmentId in encodedIds)
         {
-            foreach (var segmentId in segmentIds)
-                if (NzbSegmentIdSet.Decode(segmentId).All(candidateSegmentId => _missingSegmentIds.Contains(candidateSegmentId)))
-                    throw new UsenetArticleNotFoundException(segmentId);
+            if (NzbSegmentIdSet.Decode(segmentId).All(existingSet.Contains))
+                throw new UsenetArticleNotFoundException(segmentId);
         }
+    }
+
+    private static async Task RecordMissingSegmentIdsAsync(
+        DavDatabaseContext dbContext,
+        string encodedSegmentId,
+        CancellationToken ct)
+    {
+        var decodedIds = NzbSegmentIdSet.Decode(encodedSegmentId).Distinct().ToList();
+        var existingIds = await dbContext.Set<MissingSegmentId>()
+            .Where(m => decodedIds.Contains(m.SegmentId))
+            .Select(m => m.SegmentId)
+            .ToListAsync(ct)
+            .ConfigureAwait(false);
+
+        var missingIds = decodedIds.Except(existingIds).ToList();
+        if (missingIds.Count == 0) return;
+
+        var detectedAt = DateTimeOffset.UtcNow;
+        dbContext.Set<MissingSegmentId>().AddRange(
+            missingIds.Select(segmentId => new MissingSegmentId
+            {
+                SegmentId = segmentId,
+                DetectedAt = detectedAt
+            })
+        );
+        await dbContext.SaveChangesAsync(ct).ConfigureAwait(false);
     }
 }

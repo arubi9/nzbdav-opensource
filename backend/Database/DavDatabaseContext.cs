@@ -56,6 +56,7 @@ public sealed class DavDatabaseContext() : DbContext(CreateOptions())
     public DbSet<HealthCheckStat> HealthCheckStats => Set<HealthCheckStat>();
     public DbSet<ConfigItem> ConfigItems => Set<ConfigItem>();
     public DbSet<BlobCleanupItem> BlobCleanupItems => Set<BlobCleanupItem>();
+    public DbSet<MissingSegmentId> MissingSegmentIds => Set<MissingSegmentId>();
 
     // tables
     protected override void OnModelCreating(ModelBuilder b)
@@ -440,6 +441,23 @@ public sealed class DavDatabaseContext() : DbContext(CreateOptions())
 
             e.Property(i => i.Id)
                 .ValueGeneratedNever();
+        });
+
+        b.Entity<MissingSegmentId>(e =>
+        {
+            e.ToTable("MissingSegmentIds");
+            e.HasKey(i => i.SegmentId);
+
+            e.Property(i => i.SegmentId)
+                .HasMaxLength(512)
+                .IsRequired();
+
+            e.Property(i => i.DetectedAt)
+                .IsRequired()
+                .HasConversion(
+                    x => x.ToUnixTimeSeconds(),
+                    x => DateTimeOffset.FromUnixTimeSeconds(x)
+                );
         });
     }
 }
