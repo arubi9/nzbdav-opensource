@@ -7,7 +7,7 @@ using Prometheus;
 
 namespace NzbWebDAV.Metrics;
 
-public sealed class NzbdavMetricsCollector : IDisposable
+public sealed class NzbdavMetricsCollector
 {
     private readonly Func<LiveSegmentCacheStats> _getCacheStats;
     private readonly Func<ConnectionPoolStats?> _getPoolStats;
@@ -160,8 +160,6 @@ public sealed class NzbdavMetricsCollector : IDisposable
     public static void IncrementActiveStreams() => ActiveStreamsGauge.Inc();
     public static void DecrementActiveStreams() => ActiveStreamsGauge.Dec();
 
-    public void Dispose()
-    {
-        GC.SuppressFinalize(this);
-    }
+    // No IDisposable — this is a singleton that lives for the app lifetime.
+    // The AddBeforeCollectCallback registration is never removed.
 }

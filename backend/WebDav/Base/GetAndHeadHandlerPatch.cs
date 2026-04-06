@@ -5,8 +5,7 @@ using NWebDav.Server.Helpers;
 using NWebDav.Server.Props;
 using NWebDav.Server.Stores;
 using NzbWebDAV.Clients.Usenet.Caching;
-using NzbWebDAV.Extensions;
-using NzbWebDAV.Metrics;
+using NzbWebDAV.Services;
 
 namespace NzbWebDAV.WebDav.Base;
 
@@ -23,10 +22,12 @@ namespace NzbWebDAV.WebDav.Base;
 public class GetAndHeadHandlerPatch : IRequestHandler
 {
     private readonly IStore _store;
+    private readonly StreamExecutionService _streamService;
 
-    public GetAndHeadHandlerPatch(IStore store)
+    public GetAndHeadHandlerPatch(IStore store, StreamExecutionService streamService)
     {
         _store = store;
+        _streamService = streamService;
     }
     
     /// <summary>
@@ -44,12 +45,6 @@ public class GetAndHeadHandlerPatch : IRequestHandler
         // Obtain request and response
         var request = httpContext.Request;
         var response = httpContext.Response;
-
-        // Determine if we are invoked as HEAD
-        var isHeadRequest = request.Method == HttpMethods.Head;
-
-        // Determine the requested range
-        var range = request.GetRange();
 
         // Obtain the WebDAV collection
         var entry = await _store.GetItemAsync(request.GetUri(), httpContext.RequestAborted).ConfigureAwait(false);
@@ -96,46 +91,6 @@ public class GetAndHeadHandlerPatch : IRequestHandler
             {
                 if (stream != Stream.Null)
                 {
-                    // Set the response
-                    response.SetStatus(DavStatusCode.Ok);
-
-                    // Set the expected content length
-                    try
-                    {
-                        // We can only specify the Content-Length header if the
-                        // length is known (this is typically true for seekable streams)
-                        if (stream.CanSeek)
-                        {
-                            // Add a header that we accept ranges (bytes only)
-                            response.Headers.AcceptRanges = "bytes";
-
-                            // Determine the total length
-                            var length = stream.Length;
-
-                            // Check if a range was specified
-                            if (range != null)
-                            {
-                                var start = range.Start ?? 0;
-                                var end = Math.Min(range.End ?? long.MaxValue, length-1);
-                                length = end - start + 1;
-
-                                // Write the range
-                                response.Headers.ContentRange = $"bytes {start}-{end} / {stream.Length}";
-
-                                // Set status to partial result if not all data can be sent
-                                if (length < stream.Length)
-                                    response.SetStatus(DavStatusCode.PartialContent);
-                            }
-
-                            // Set the header, so the client knows how much data is required
-                            response.ContentLength = length;
-                        }
-                    }
-                    catch (NotSupportedException)
-                    {
-                        // If the content length is not supported, then we just skip it
-                    }
-
                     // Do not return the actual item data if ETag matches
                     if (etag != null && request.Headers.IfNoneMatch == etag)
                     {
@@ -144,24 +99,13 @@ public class GetAndHeadHandlerPatch : IRequestHandler
                         return true;
                     }
 
-                    // HEAD method doesn't require the actual item data
-                    if (!isHeadRequest)
-                    {
-                        NzbdavMetricsCollector.IncrementActiveStreams();
-                        try
-                        {
-                            await stream.CopyRangeToPooledAsync(
-                                response.Body,
-                                range?.Start ?? 0,
-                                range?.End,
-                                cancellationToken: httpContext.RequestAborted
-                            ).ConfigureAwait(false);
-                        }
-                        finally
-                        {
-                            NzbdavMetricsCollector.DecrementActiveStreams();
-                        }
-                    }
+                    await _streamService.ServeStreamAsync(
+                        stream,
+                        entry.Name,
+                        response,
+                        request,
+                        httpContext.RequestAborted
+                    ).ConfigureAwait(false);
                 }
                 else
                 {

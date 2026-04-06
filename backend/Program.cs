@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using NzbWebDAV.Api.Filters;
 using NWebDav.Server;
 using NWebDav.Server.Stores;
 using NzbWebDAV.Api.SabControllers;
@@ -98,6 +99,7 @@ class Program
             .AddSingleton<UsenetStreamingClient>()
             .AddSingleton<QueueManager>()
             .AddSingleton<ReadAheadWarmingService>()
+            .AddSingleton<StreamExecutionService>()
             .AddSingleton<NzbdavMetricsCollector>()
             .AddHostedService<ContentIndexRecoveryService>()
             .AddHostedService<HealthCheckService>()
@@ -109,6 +111,7 @@ class Program
             .AddScoped<DatabaseStore>()
             .AddScoped<IStore, DatabaseStore>()
             .AddScoped<GetAndHeadHandlerPatch>()
+            .AddSingleton<ApiKeyAuthFilter>()
             .AddScoped<SabApiController>()
             .AddNWebDav(opts =>
             {
