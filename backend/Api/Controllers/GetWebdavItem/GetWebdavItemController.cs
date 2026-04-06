@@ -100,7 +100,7 @@ public class GetWebdavItemController(DatabaseStore store, ConfigManager configMa
     {
         if (item == "README") return "text/plain";
         var extension = Path.GetExtension(item).ToLower();
-        return extension == ".mkv" ? "video/webm"
+        return extension == ".mkv" ? "video/x-matroska"
             : extension == ".rclonelink" ? "text/plain"
             : extension == ".nfo" ? "text/plain"
             : MimeTypeProvider.TryGetContentType(Path.GetFileName(item), out var mimeType) ? mimeType

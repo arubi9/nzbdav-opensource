@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using NWebDav.Server.Stores;
 using NzbWebDAV.Api.Filters;
+using NzbWebDAV.Clients.Usenet.Caching;
 using NzbWebDAV.Database;
 using NzbWebDAV.Services;
 using NzbWebDAV.WebDav;
@@ -35,11 +36,24 @@ public class StreamFileController(
             return;
         }
 
-        var stream = await storeItem.GetReadableStreamAsync(ct).ConfigureAwait(false);
-        await using (stream.ConfigureAwait(false))
+        try
         {
-            await streamService.ServeStreamAsync(stream, davItem.Name, Response, Request, ct)
-                .ConfigureAwait(false);
+            var stream = await storeItem.GetReadableStreamAsync(ct).ConfigureAwait(false);
+            await using (stream.ConfigureAwait(false))
+            {
+                await streamService.ServeStreamAsync(stream, davItem.Name, Response, Request, ct)
+                    .ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            // Dispose SegmentFetchContext set by WebDAV store during stream creation
+            if (HttpContext.Items.TryGetValue(SegmentFetchContext.HttpContextItemKey, out var ctx)
+                && ctx is IDisposable disposable)
+            {
+                disposable.Dispose();
+                HttpContext.Items.Remove(SegmentFetchContext.HttpContextItemKey);
+            }
         }
     }
 }
