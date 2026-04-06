@@ -27,7 +27,7 @@ public class NzbdavMediaSourceProvider : IMediaSourceProvider
 
         try
         {
-            using var client = new NzbdavApiClient(config);
+            var client = new NzbdavApiClient(config);
             var meta = await client.GetMetaAsync(nzbdavId, ct).ConfigureAwait(false);
             if (meta is null)
                 return [];

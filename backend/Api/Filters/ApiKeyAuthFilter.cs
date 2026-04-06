@@ -20,7 +20,7 @@ public class ApiKeyAuthFilter(ConfigManager configManager) : IAsyncActionFilter
         {
             var token = request.Query["token"].FirstOrDefault();
             if (!string.IsNullOrEmpty(token)
-                && StreamTokenService.ValidateToken(token, request.Path, configManager))
+                && StreamTokenService.ValidateToken(token, request.Path, configManager, request.Method))
             {
                 await next().ConfigureAwait(false);
                 return;
@@ -48,9 +48,11 @@ public class ApiKeyAuthFilter(ConfigManager configManager) : IAsyncActionFilter
             }
 
             var providedBytes = System.Text.Encoding.UTF8.GetBytes(providedKey);
-            if (_cachedKeyBytes == null || providedBytes.Length != _cachedKeyBytes.Length)
+            if (_cachedKeyBytes == null)
                 return false;
 
+            // No length pre-check — FixedTimeEquals handles mismatched lengths
+            // without leaking key length via timing.
             return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(providedBytes, _cachedKeyBytes);
         }
         catch

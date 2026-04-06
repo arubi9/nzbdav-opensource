@@ -111,7 +111,7 @@ class Program
             .AddScoped<DatabaseStore>()
             .AddScoped<IStore, DatabaseStore>()
             .AddScoped<GetAndHeadHandlerPatch>()
-            .AddScoped<ApiKeyAuthFilter>()
+            .AddSingleton<ApiKeyAuthFilter>()
             .AddScoped<SabApiController>()
             .AddNWebDav(opts =>
             {

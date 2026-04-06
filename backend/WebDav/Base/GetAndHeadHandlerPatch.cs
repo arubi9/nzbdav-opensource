@@ -91,8 +91,6 @@ public class GetAndHeadHandlerPatch : IRequestHandler
             {
                 if (stream != Stream.Null)
                 {
-                    response.SetStatus(DavStatusCode.Ok);
-
                     // Do not return the actual item data if ETag matches
                     if (etag != null && request.Headers.IfNoneMatch == etag)
                     {

@@ -67,8 +67,9 @@ public class ApiKeyAuthFilterTests
         var configManager = CreateConfigManager();
         var filter = new ApiKeyAuthFilter(configManager);
         var context = CreateContext();
+        context.HttpContext.Request.Method = "GET";
         context.HttpContext.Request.Path = "/api/stream/11111111-1111-1111-1111-111111111111";
-        var token = StreamTokenService.GenerateToken(context.HttpContext.Request.Path, configManager);
+        var token = StreamTokenService.GenerateToken(context.HttpContext.Request.Path, configManager, method: "GET");
         context.HttpContext.Request.QueryString = new QueryString($"?token={token}");
 
         var nextCalled = false;

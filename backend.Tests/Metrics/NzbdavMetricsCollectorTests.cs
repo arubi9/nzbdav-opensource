@@ -20,7 +20,7 @@ public sealed class NzbdavMetricsCollectorTests
         var factory = Prometheus.Metrics.WithCustomRegistry(registry);
         var poolStats = CreatePoolStats(maxConnections: 5, live: 4, idle: 1);
 
-        using var collector = new NzbdavMetricsCollector(
+        var collector = new NzbdavMetricsCollector(
             () => new LiveSegmentCacheStats(
                 CachedSegmentCount: 6,
                 CachedBytes: 1234,

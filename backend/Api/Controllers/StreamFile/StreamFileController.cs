@@ -28,12 +28,6 @@ public class StreamFileController(
             return;
         }
 
-        if (HttpMethods.IsHead(Request.Method))
-        {
-            streamService.SetFileHeaders(davItem.Name, davItem.FileSize, Response);
-            return;
-        }
-
         var storeItem = await store.GetItemAsync(davItem.Path, ct).ConfigureAwait(false);
         if (storeItem is null || storeItem is IStoreCollection)
         {

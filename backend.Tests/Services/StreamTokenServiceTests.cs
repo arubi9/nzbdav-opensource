@@ -44,6 +44,22 @@ public sealed class StreamTokenServiceTests
         Assert.False(StreamTokenService.ValidateToken("not-a-token", "/api/stream/abc123", configManager));
     }
 
+    [Fact]
+    public void ValidateToken_ReturnsFalseWhenTokenIsExpired()
+    {
+        var configManager = CreateConfigManager();
+        var token = StreamTokenService.GenerateToken("/api/stream/abc123", configManager, expiryMinutes: -1);
+        Assert.False(StreamTokenService.ValidateToken(token, "/api/stream/abc123", configManager));
+    }
+
+    [Fact]
+    public void ValidateToken_ReturnsFalseWhenMethodMismatches()
+    {
+        var configManager = CreateConfigManager();
+        var token = StreamTokenService.GenerateToken("/api/stream/abc123", configManager, method: "GET");
+        Assert.False(StreamTokenService.ValidateToken(token, "/api/stream/abc123", configManager, method: "DELETE"));
+    }
+
     private static ConfigManager CreateConfigManager()
     {
         var configManager = new ConfigManager();
