@@ -1,4 +1,5 @@
-﻿using NzbWebDAV.Clients.Usenet.Models;
+using NzbWebDAV.Clients.Usenet.Models;
+using NzbWebDAV.Models;
 using NzbWebDAV.Models.Nzb;
 using NzbWebDAV.Streams;
 using UsenetSharp.Models;
@@ -55,11 +56,32 @@ public interface INntpClient : IDisposable
     Task<NzbFileStream> GetFileStream(
         NzbFile nzbFile, int articleBufferSize, CancellationToken ct);
 
+    Task<NzbFileStream> GetFileStream(
+        NzbFile nzbFile, StreamingBufferSettings streamingBufferSettings, CancellationToken ct);
+
     NzbFileStream GetFileStream(
         NzbFile nzbFile, long fileSize, int articleBufferSize);
 
     NzbFileStream GetFileStream(
+        NzbFile nzbFile, long fileSize, StreamingBufferSettings streamingBufferSettings);
+
+    NzbFileStream GetFileStream(
+        NzbFile nzbFile,
+        long fileSize,
+        StreamingBufferSettings streamingBufferSettings,
+        Action<int>? onSegmentIndexChanged);
+
+    NzbFileStream GetFileStream(
         string[] segmentIds, long fileSize, int articleBufferSize);
+
+    NzbFileStream GetFileStream(
+        string[] segmentIds, long fileSize, StreamingBufferSettings streamingBufferSettings);
+
+    NzbFileStream GetFileStream(
+        string[] segmentIds,
+        long fileSize,
+        StreamingBufferSettings streamingBufferSettings,
+        Action<int>? onSegmentIndexChanged);
 
     Task CheckAllSegmentsAsync(
         IEnumerable<string> segmentIds, int concurrency, IProgress<int>? progress, CancellationToken cancellationToken);

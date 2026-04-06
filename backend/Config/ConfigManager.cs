@@ -247,6 +247,36 @@ public class ConfigManager
                ?? defaultValue;
     }
 
+    public int GetCacheMaxSizeGb()
+        => int.Parse(StringUtil.EmptyToNull(GetConfigValue("cache.max-size-gb")) ?? "10");
+
+    public int GetCacheMaxAgeHours()
+        => int.Parse(StringUtil.EmptyToNull(GetConfigValue("cache.max-age-hours")) ?? "6");
+
+    public string? GetCacheDirectory()
+        => StringUtil.EmptyToNull(GetConfigValue("cache.directory"));
+
+    public bool IsPrecacheEnabled()
+    {
+        var val = StringUtil.EmptyToNull(GetConfigValue("cache.precache-enable"));
+        return val != null ? bool.Parse(val) : true;
+    }
+
+    public long GetPrecacheMaxFileSize()
+        => long.Parse(StringUtil.EmptyToNull(GetConfigValue("cache.precache-max-file-size-mb")) ?? "5") * 1024 * 1024;
+
+    public int GetReadAheadSegments()
+        => int.Parse(StringUtil.EmptyToNull(GetConfigValue("cache.read-ahead-segments")) ?? "200");
+
+    public bool IsReadAheadEnabled()
+    {
+        var val = StringUtil.EmptyToNull(GetConfigValue("cache.read-ahead-enable"));
+        return val != null ? bool.Parse(val) : true;
+    }
+
+    public int GetSnapshotDebounceSeconds()
+        => int.Parse(StringUtil.EmptyToNull(GetConfigValue("cache.snapshot-debounce-seconds")) ?? "5");
+
     public class ConfigEventArgs : EventArgs
     {
         public required Dictionary<string, string> ChangedConfig { get; init; }

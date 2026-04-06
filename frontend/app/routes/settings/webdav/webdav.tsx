@@ -91,6 +91,108 @@ export function WebdavSettings({ config, setNewConfig }: SabnzbdSettingsProps) {
             </Form.Group>
             <hr />
             <Form.Group>
+                <Form.Label htmlFor="cache-max-size-input">Cache Max Size (GB)</Form.Label>
+                <Form.Control
+                    {...className([styles.input, !isPositiveInteger(config["cache.max-size-gb"]) && styles.error])}
+                    type="text"
+                    id="cache-max-size-input"
+                    aria-describedby="cache-max-size-help"
+                    placeholder="10"
+                    value={config["cache.max-size-gb"]}
+                    onChange={e => setNewConfig({ ...config, "cache.max-size-gb": e.target.value })} />
+                <Form.Text id="cache-max-size-help" muted>
+                    Maximum disk space used by the streaming segment cache.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
+                <Form.Label htmlFor="cache-max-age-input">Cache Max Age (Hours)</Form.Label>
+                <Form.Control
+                    {...className([styles.input, !isPositiveInteger(config["cache.max-age-hours"]) && styles.error])}
+                    type="text"
+                    id="cache-max-age-input"
+                    aria-describedby="cache-max-age-help"
+                    placeholder="6"
+                    value={config["cache.max-age-hours"]}
+                    onChange={e => setNewConfig({ ...config, "cache.max-age-hours": e.target.value })} />
+                <Form.Text id="cache-max-age-help" muted>
+                    Cached segments older than this are eligible for eviction.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
+                <Form.Label htmlFor="cache-directory-input">Cache Directory (Optional)</Form.Label>
+                <Form.Control
+                    className={styles.input}
+                    type="text"
+                    id="cache-directory-input"
+                    aria-describedby="cache-directory-help"
+                    value={config["cache.directory"]}
+                    onChange={e => setNewConfig({ ...config, "cache.directory": e.target.value })} />
+                <Form.Text id="cache-directory-help" muted>
+                    Leave empty for default location. Changing this requires a restart.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
+                <Form.Check
+                    className={styles.input}
+                    type="checkbox"
+                    id="precache-checkbox"
+                    aria-describedby="precache-help"
+                    label="Pre-cache Small Files"
+                    checked={config["cache.precache-enable"] === "true"}
+                    onChange={e => setNewConfig({ ...config, "cache.precache-enable": "" + e.target.checked })} />
+                <Form.Text id="precache-help" muted>
+                    Automatically cache small files (posters, subtitles, NFOs) after NZB processing for instant playback.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
+                <Form.Label htmlFor="precache-max-file-size-input">Pre-cache Max File Size (MB)</Form.Label>
+                <Form.Control
+                    {...className([styles.input, !isPositiveInteger(config["cache.precache-max-file-size-mb"]) && styles.error])}
+                    type="text"
+                    id="precache-max-file-size-input"
+                    aria-describedby="precache-max-file-size-help"
+                    placeholder="5"
+                    value={config["cache.precache-max-file-size-mb"]}
+                    onChange={e => setNewConfig({ ...config, "cache.precache-max-file-size-mb": e.target.value })} />
+                <Form.Text id="precache-max-file-size-help" muted>
+                    Files at or below this size are eligible for post-download pre-caching.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
+                <Form.Check
+                    className={styles.input}
+                    type="checkbox"
+                    id="read-ahead-checkbox"
+                    aria-describedby="read-ahead-help"
+                    label="Read-ahead Warming"
+                    checked={config["cache.read-ahead-enable"] === "true"}
+                    onChange={e => setNewConfig({ ...config, "cache.read-ahead-enable": "" + e.target.checked })} />
+                <Form.Text id="read-ahead-help" muted>
+                    Pre-fetch video segments ahead of playback into the cache, freeing connections for other users.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
+                <Form.Label htmlFor="read-ahead-segments-input">Read-ahead Segments</Form.Label>
+                <Form.Control
+                    {...className([styles.input, !isPositiveInteger(config["cache.read-ahead-segments"]) && styles.error])}
+                    type="text"
+                    id="read-ahead-segments-input"
+                    aria-describedby="read-ahead-segments-help"
+                    placeholder="200"
+                    value={config["cache.read-ahead-segments"]}
+                    onChange={e => setNewConfig({ ...config, "cache.read-ahead-segments": e.target.value })} />
+                <Form.Text id="read-ahead-segments-help" muted>
+                    The maximum number of upcoming segments to warm into cache for an active stream.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
                 <Form.Check
                     className={styles.input}
                     type="checkbox"
@@ -144,13 +246,24 @@ export function isWebdavSettingsUpdated(config: Record<string, string>, newConfi
         || config["webdav.show-hidden-files"] !== newConfig["webdav.show-hidden-files"]
         || config["webdav.enforce-readonly"] !== newConfig["webdav.enforce-readonly"]
         || config["webdav.preview-par2-files"] !== newConfig["webdav.preview-par2-files"]
+        || config["cache.max-size-gb"] !== newConfig["cache.max-size-gb"]
+        || config["cache.max-age-hours"] !== newConfig["cache.max-age-hours"]
+        || config["cache.directory"] !== newConfig["cache.directory"]
+        || config["cache.precache-enable"] !== newConfig["cache.precache-enable"]
+        || config["cache.precache-max-file-size-mb"] !== newConfig["cache.precache-max-file-size-mb"]
+        || config["cache.read-ahead-enable"] !== newConfig["cache.read-ahead-enable"]
+        || config["cache.read-ahead-segments"] !== newConfig["cache.read-ahead-segments"]
 }
 
 export function isWebdavSettingsValid(newConfig: Record<string, string>) {
     return isValidUser(newConfig["webdav.user"])
         && isValidMaxDownloadConnections(newConfig["usenet.max-download-connections"])
         && isValidStreamingPriority(newConfig["usenet.streaming-priority"])
-        && isValidArticleBufferSize(newConfig["usenet.article-buffer-size"]);
+        && isValidArticleBufferSize(newConfig["usenet.article-buffer-size"])
+        && isPositiveInteger(newConfig["cache.max-size-gb"])
+        && isPositiveInteger(newConfig["cache.max-age-hours"])
+        && isPositiveInteger(newConfig["cache.precache-max-file-size-mb"])
+        && isPositiveInteger(newConfig["cache.read-ahead-segments"]);
 }
 
 function isValidUser(user: string): boolean {

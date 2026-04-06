@@ -1,4 +1,4 @@
-﻿using System.Buffers;
+using System.Buffers;
 using NzbWebDAV.Streams;
 
 namespace NzbWebDAV.Extensions;
@@ -28,6 +28,87 @@ public static class StreamExtensions
         finally
         {
             ArrayPool<byte>.Shared.Return(throwaway);
+        }
+    }
+
+    public static async Task CopyToPooledAsync
+    (
+        this Stream source,
+        Stream destination,
+        int bufferSize = 81_920,
+        CancellationToken cancellationToken = default
+    )
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(destination);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bufferSize);
+
+        var buffer = ArrayPool<byte>.Shared.Rent(bufferSize);
+        try
+        {
+            while (true)
+            {
+                var bytesRead = await source
+                    .ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken)
+                    .ConfigureAwait(false);
+                if (bytesRead == 0) return;
+
+                await destination
+                    .WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    public static async Task CopyRangeToPooledAsync
+    (
+        this Stream source,
+        Stream destination,
+        long start,
+        long? end,
+        int bufferSize = 64 * 1024,
+        CancellationToken cancellationToken = default
+    )
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(destination);
+        ArgumentOutOfRangeException.ThrowIfNegative(start);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bufferSize);
+
+        if (start > 0)
+        {
+            if (!source.CanSeek)
+                throw new IOException("Cannot use range, because the source stream isn't seekable");
+
+            source.Seek(start, SeekOrigin.Begin);
+        }
+
+        var bytesToRead = end - start + 1 ?? long.MaxValue;
+        var buffer = ArrayPool<byte>.Shared.Rent(bufferSize);
+        try
+        {
+            while (bytesToRead > 0)
+            {
+                var requestedBytes = (int)Math.Min(bytesToRead, buffer.Length);
+                var bytesRead = await source
+                    .ReadAsync(buffer.AsMemory(0, requestedBytes), cancellationToken)
+                    .ConfigureAwait(false);
+                if (bytesRead == 0) return;
+
+                await destination
+                    .WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken)
+                    .ConfigureAwait(false);
+
+                bytesToRead -= bytesRead;
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
         }
     }
 

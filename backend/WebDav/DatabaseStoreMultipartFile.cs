@@ -1,10 +1,14 @@
-﻿using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Clients.Usenet.Caching;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
+using NzbWebDAV.Models;
+using NzbWebDAV.Services;
 using NzbWebDAV.Streams;
+using NzbWebDAV.Utils;
 using NzbWebDAV.WebDav.Base;
 
 namespace NzbWebDAV.WebDav;
@@ -14,7 +18,8 @@ public class DatabaseStoreMultipartFile(
     HttpContext httpContext,
     DavDatabaseClient dbClient,
     UsenetStreamingClient usenetClient,
-    ConfigManager configManager
+    ConfigManager configManager,
+    ReadAheadWarmingService? warmingService = null
 ) : BaseStoreStreamFile(httpContext)
 {
     public DavItem DavItem => davMultipartFile;
@@ -28,6 +33,11 @@ public class DatabaseStoreMultipartFile(
         // store the DavItem being accessed in the http context
         httpContext.Items["DavItem"] = davMultipartFile;
 
+        // Set segment fetch context for tiered eviction
+        var category = SegmentCategoryClassifier.Classify(davMultipartFile.Name);
+        var ownerId = davMultipartFile.ParentId ?? davMultipartFile.Id;
+        httpContext.Items[SegmentFetchContext.HttpContextItemKey] = SegmentFetchContext.Set(category, ownerId);
+
         // return the stream
         var id = davMultipartFile.Id;
         var multipartFile = await dbClient.Ctx.MultipartFiles.Where(x => x.Id == id).FirstOrDefaultAsync(ct).ConfigureAwait(false);
@@ -35,10 +45,37 @@ public class DatabaseStoreMultipartFile(
         var packedStream = new DavMultipartFileStream(
             multipartFile.Metadata.FileParts,
             usenetClient,
-            configManager.GetArticleBufferSize()
+            StreamingBufferSettings.LiveDefault(configManager.GetArticleBufferSize())
         );
-        return multipartFile.Metadata.AesParams != null
+        Stream stream = multipartFile.Metadata.AesParams != null
             ? new AesDecoderStream(packedStream, multipartFile.Metadata.AesParams)
             : packedStream;
+
+        // Start read-ahead warming for video files
+        if (warmingService != null && FilenameUtil.IsVideoFile(davMultipartFile.Name))
+        {
+            var segmentIds = multipartFile.Metadata.FileParts
+                .SelectMany(p => p.SegmentIds)
+                .ToArray();
+            var sessionId = warmingService.CreateSession(segmentIds, ct);
+            packedStream = new DavMultipartFileStream(
+                multipartFile.Metadata.FileParts,
+                usenetClient,
+                StreamingBufferSettings.LiveDefault(configManager.GetArticleBufferSize()),
+                index => warmingService.UpdatePosition(sessionId, index)
+            );
+            stream = multipartFile.Metadata.AesParams != null
+                ? new AesDecoderStream(packedStream, multipartFile.Metadata.AesParams)
+                : packedStream;
+            return new DisposableCallbackStream(stream,
+                onDispose: () => warmingService.StopSession(sessionId),
+                onDisposeAsync: () =>
+                {
+                    warmingService.StopSession(sessionId);
+                    return ValueTask.CompletedTask;
+                });
+        }
+
+        return stream;
     }
 }

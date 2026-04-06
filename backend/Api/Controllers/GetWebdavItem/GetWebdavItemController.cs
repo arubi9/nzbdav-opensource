@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.StaticFiles;
@@ -72,7 +72,7 @@ public class GetWebdavItemController(DatabaseStore store, ConfigManager configMa
             HttpContext.Items["configManager"] = configManager;
             var request = new GetWebdavItemRequest(HttpContext);
             await using var response = await GetWebdavItem(request).ConfigureAwait(false);
-            await response.CopyToAsync(Response.Body, bufferSize: 1024, HttpContext.RequestAborted).ConfigureAwait(false);
+            await response.CopyToPooledAsync(Response.Body, 64 * 1024, HttpContext.RequestAborted).ConfigureAwait(false);
         }
         catch (UnauthorizedAccessException)
         {

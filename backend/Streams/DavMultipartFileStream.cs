@@ -1,14 +1,16 @@
-﻿using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Exceptions;
 using NzbWebDAV.Extensions;
+using NzbWebDAV.Models;
 
 namespace NzbWebDAV.Streams;
 
 public class DavMultipartFileStream(
     DavMultipartFile.FilePart[] fileParts,
     INntpClient usenetClient,
-    int articleBufferSize
+    StreamingBufferSettings streamingBufferSettings,
+    Action<int>? onSegmentIndexChanged = null
 ) : Stream
 {
     private long _position = 0;
@@ -23,6 +25,7 @@ public class DavMultipartFileStream(
 
     public override int Read(byte[] buffer, int offset, int count)
     {
+        // Keep the sync bridge until WebDAV clients are confirmed to stay on ReadAsync only.
         return ReadAsync(buffer, offset, count).GetAwaiter().GetResult();
     }
 
@@ -93,11 +96,26 @@ public class DavMultipartFileStream(
 
     private CombinedStream GetCombinedStream(int firstFilePartIndex, long additionalOffset)
     {
+        var initialSegmentOffset = fileParts
+            .Take(firstFilePartIndex)
+            .Sum(part => part.SegmentIds.Length);
+        onSegmentIndexChanged?.Invoke(initialSegmentOffset);
+
         var streams = fileParts[firstFilePartIndex..]
             .Select((x, i) =>
             {
                 var offset = (i == 0) ? additionalOffset : 0;
-                var stream = usenetClient.GetFileStream(x.SegmentIds, x.SegmentIdByteRange.Count, articleBufferSize);
+                var segmentOffset = initialSegmentOffset
+                                    + fileParts
+                                        .Skip(firstFilePartIndex)
+                                        .Take(i)
+                                        .Sum(part => part.SegmentIds.Length);
+                var stream = usenetClient.GetFileStream(
+                    x.SegmentIds,
+                    x.SegmentIdByteRange.Count,
+                    streamingBufferSettings,
+                    consumedSegments => onSegmentIndexChanged?.Invoke(segmentOffset + consumedSegments)
+                );
                 stream.Seek(x.FilePartByteRange.StartInclusive + offset, SeekOrigin.Begin);
                 return Task.FromResult(stream.LimitLength(x.FilePartByteRange.Count - offset));
             });

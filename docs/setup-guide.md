@@ -137,6 +137,14 @@ You can find the optimal **Max Download Connections** for your network (`Setting
 
 ## Phase 3: The Full Stack (Rclone Sidecar)
 
+### Live Playback Cache
+
+NzbDav now keeps a backend live-stream cache at `/config/stream-cache` during active playback.
+
+* The cache is **runtime-only** in v1. NzbDav clears stale live-stream cache files on restart.
+* If multiple viewers are watching the same file, NzbDav can reuse already-fetched segments from this cache instead of fetching the same segment body again.
+* Make sure your `/config` volume has free **SSD/NVMe** space available. Slow or nearly-full storage will hurt streaming performance.
+
 Now we mount the NzbDav web dav to the host file system using a sidecar container.
 
 ### 1. Prepare Host Directory
@@ -349,5 +357,4 @@ In the AIOStreams UI:
 ### 3. Install to Stremio
 
 Go to the **Save & Install** tab, click **Save**, and then install the addon to Stremio.
-
 

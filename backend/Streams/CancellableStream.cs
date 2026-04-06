@@ -32,6 +32,8 @@ public class CancellableStream(Stream innerStream, CancellationToken token) : Fa
     public override int Read(byte[] buffer, int offset, int count)
     {
         CheckDisposed();
+        // Archive readers still exercise synchronous reads, so preserve this bridge
+        // instead of breaking those call sites while the broader pipeline is upgraded.
         return ReadAsync(buffer, offset, count, token)
             .GetAwaiter()
             .GetResult();
@@ -40,6 +42,7 @@ public class CancellableStream(Stream innerStream, CancellationToken token) : Fa
     public override int Read(Span<byte> buffer)
     {
         CheckDisposed();
+        // Span-based sync reads are still required by some consumers of wrapped archive streams.
         var array = ArrayPool<byte>.Shared.Rent(buffer.Length);
         try
         {

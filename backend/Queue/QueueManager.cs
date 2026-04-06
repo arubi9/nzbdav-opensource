@@ -22,6 +22,10 @@ public class QueueManager : IDisposable
     private CancellationTokenSource _sleepingQueueToken = new();
     private readonly Lock _sleepingQueueLock = new();
 
+    public event EventHandler<NzbProcessedEventArgs>? OnNzbProcessed;
+
+    public record NzbProcessedEventArgs(Guid QueueItemId, string JobName, string Category);
+
     public QueueManager(
         UsenetStreamingClient usenetClient,
         ConfigManager configManager,
@@ -121,7 +125,25 @@ public class QueueManager : IDisposable
                     _inProgressQueueItem = BeginProcessingQueueItem(dbClient, cachingUsenetClient,
                         topItem.queueItem, queueNzbStream, queueItemCancellationTokenSource);
                 }).ConfigureAwait(false);
-                await (_inProgressQueueItem?.ProcessingTask ?? Task.CompletedTask).ConfigureAwait(false);
+                var processedSuccessfully = await (_inProgressQueueItem?.ProcessingTask ?? Task.FromResult(false))
+                    .ConfigureAwait(false);
+
+                // Fire event after successful processing
+                if (processedSuccessfully)
+                {
+                    try
+                    {
+                        OnNzbProcessed?.Invoke(this, new NzbProcessedEventArgs(
+                            topItem.queueItem.Id,
+                            topItem.queueItem.JobName,
+                            topItem.queueItem.Category
+                        ));
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Debug($"Error in NzbProcessed event handler: {ex.Message}");
+                    }
+                }
             }
             catch (Exception e)
             {
@@ -215,7 +237,7 @@ public class QueueManager : IDisposable
     {
         public QueueItem QueueItem { get; init; }
         public int ProgressPercentage { get; set; }
-        public Task ProcessingTask { get; init; }
+        public Task<bool> ProcessingTask { get; init; }
         public CancellationTokenSource CancellationTokenSource { get; init; }
     }
 }

@@ -1,9 +1,11 @@
-﻿using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http;
 using NWebDav.Server;
 using NWebDav.Server.Handlers;
 using NWebDav.Server.Helpers;
 using NWebDav.Server.Props;
 using NWebDav.Server.Stores;
+using NzbWebDAV.Clients.Usenet.Caching;
+using NzbWebDAV.Extensions;
 
 namespace NzbWebDAV.WebDav.Base;
 
@@ -86,106 +88,89 @@ public class GetAndHeadHandlerPatch : IRequestHandler
         }
 
         // Stream the actual entry
-        var stream = await entry.GetReadableStreamAsync(httpContext.RequestAborted).ConfigureAwait(false);
-        await using (stream.ConfigureAwait(false))
+        try
         {
-            if (stream != Stream.Null)
+            var stream = await entry.GetReadableStreamAsync(httpContext.RequestAborted).ConfigureAwait(false);
+            await using (stream.ConfigureAwait(false))
             {
-                // Set the response
-                response.SetStatus(DavStatusCode.Ok);
-
-                // Set the expected content length
-                try
+                if (stream != Stream.Null)
                 {
-                    // We can only specify the Content-Length header if the
-                    // length is known (this is typically true for seekable streams)
-                    if (stream.CanSeek)
+                    // Set the response
+                    response.SetStatus(DavStatusCode.Ok);
+
+                    // Set the expected content length
+                    try
                     {
-                        // Add a header that we accept ranges (bytes only)
-                        response.Headers.AcceptRanges = "bytes";
-
-                        // Determine the total length
-                        var length = stream.Length;
-
-                        // Check if a range was specified
-                        if (range != null)
+                        // We can only specify the Content-Length header if the
+                        // length is known (this is typically true for seekable streams)
+                        if (stream.CanSeek)
                         {
-                            var start = range.Start ?? 0;
-                            var end = Math.Min(range.End ?? long.MaxValue, length-1);
-                            length = end - start + 1;
+                            // Add a header that we accept ranges (bytes only)
+                            response.Headers.AcceptRanges = "bytes";
 
-                            // Write the range
-                            response.Headers.ContentRange = $"bytes {start}-{end} / {stream.Length}";
+                            // Determine the total length
+                            var length = stream.Length;
 
-                            // Set status to partial result if not all data can be sent
-                            if (length < stream.Length)
-                                response.SetStatus(DavStatusCode.PartialContent);
+                            // Check if a range was specified
+                            if (range != null)
+                            {
+                                var start = range.Start ?? 0;
+                                var end = Math.Min(range.End ?? long.MaxValue, length-1);
+                                length = end - start + 1;
+
+                                // Write the range
+                                response.Headers.ContentRange = $"bytes {start}-{end} / {stream.Length}";
+
+                                // Set status to partial result if not all data can be sent
+                                if (length < stream.Length)
+                                    response.SetStatus(DavStatusCode.PartialContent);
+                            }
+
+                            // Set the header, so the client knows how much data is required
+                            response.ContentLength = length;
                         }
+                    }
+                    catch (NotSupportedException)
+                    {
+                        // If the content length is not supported, then we just skip it
+                    }
 
-                        // Set the header, so the client knows how much data is required
-                        response.ContentLength = length;
+                    // Do not return the actual item data if ETag matches
+                    if (etag != null && request.Headers.IfNoneMatch == etag)
+                    {
+                        response.ContentLength = 0;
+                        response.SetStatus(DavStatusCode.NotModified);
+                        return true;
+                    }
+
+                    // HEAD method doesn't require the actual item data
+                    if (!isHeadRequest)
+                    {
+                        await stream.CopyRangeToPooledAsync(
+                            response.Body,
+                            range?.Start ?? 0,
+                            range?.End,
+                            cancellationToken: httpContext.RequestAborted
+                        ).ConfigureAwait(false);
                     }
                 }
-                catch (NotSupportedException)
+                else
                 {
-                    // If the content length is not supported, then we just skip it
+                    // Set the response
+                    response.SetStatus(DavStatusCode.NoContent);
                 }
-
-                // Do not return the actual item data if ETag matches
-                if (etag != null && request.Headers.IfNoneMatch == etag)
-                {
-                    response.ContentLength = 0;
-                    response.SetStatus(DavStatusCode.NotModified);
-                    return true;
-                }
-
-                // HEAD method doesn't require the actual item data
-                if (!isHeadRequest)
-                    await CopyToAsync(stream, response.Body, range?.Start ?? 0, range?.End, httpContext.RequestAborted).ConfigureAwait(false);
             }
-            else
+        }
+        finally
+        {
+            if (httpContext.Items.TryGetValue(SegmentFetchContext.HttpContextItemKey, out var fetchContextScope)
+                && fetchContextScope is IDisposable disposable)
             {
-                // Set the response
-                response.SetStatus(DavStatusCode.NoContent);
+                disposable.Dispose();
+                httpContext.Items.Remove(SegmentFetchContext.HttpContextItemKey);
             }
         }
+
         return true;
-    }
-
-    private async Task CopyToAsync(Stream src, Stream dest, long start, long? end, CancellationToken cancellationToken)
-    {
-        // Skip to the first offset
-        if (start > 0)
-        {
-            // We prefer seeking instead of draining data
-            if (!src.CanSeek)
-                throw new IOException("Cannot use range, because the source stream isn't seekable");
-            
-            src.Seek(start, SeekOrigin.Begin);
-        }
-
-        // Determine the number of bytes to read
-        var bytesToRead = end - start + 1 ?? long.MaxValue;
-
-        // Read in 64KB blocks
-        var buffer = new byte[64 * 1024];
-
-        // Copy, until we don't get any data anymore
-        while (bytesToRead > 0)
-        {
-            // Read the requested bytes into memory
-            var requestedBytes = (int)Math.Min(bytesToRead, buffer.Length);
-            var bytesRead = await src.ReadAsync(buffer, 0, requestedBytes, cancellationToken).ConfigureAwait(false);
-
-            // We're done, if we cannot read any data anymore
-            if (bytesRead == 0)
-                return;
-            
-            // Write the data to the destination stream
-            await dest.WriteAsync(buffer, 0, bytesRead, cancellationToken).ConfigureAwait(false);
-
-            // Decrement the number of bytes left to read
-            bytesToRead -= bytesRead;
-        }
     }
 }

@@ -3,6 +3,8 @@ using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Api.SabControllers.GetHistory;
 using NzbWebDAV.Clients.RadarrSonarr;
 using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Clients.Usenet.Concurrency;
+using NzbWebDAV.Clients.Usenet.Contexts;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
@@ -32,7 +34,7 @@ public class QueueItemProcessor(
     CancellationToken ct
 )
 {
-    public async Task ProcessAsync()
+    public async Task<bool> ProcessAsync()
     {
         // initialize
         var startTime = DateTime.Now;
@@ -41,7 +43,7 @@ public class QueueItemProcessor(
         // process the job
         try
         {
-            await ProcessQueueItemAsync(startTime).ConfigureAwait(false);
+            return await ProcessQueueItemAsync(startTime).ConfigureAwait(false);
         }
 
         // When a queue-item is removed while processing,
@@ -50,6 +52,7 @@ public class QueueItemProcessor(
         {
             Log.Information($"Processing of queue item `{queueItem.JobName}` was cancelled.");
             dbClient.Ctx.ChangeTracker.Clear();
+            return false;
         }
 
         // when a retryable error is encountered
@@ -72,6 +75,8 @@ public class QueueItemProcessor(
             {
                 Log.Error(ex, ex.Message);
             }
+
+            return false;
         }
 
         // when any other error is encountered,
@@ -87,11 +92,17 @@ public class QueueItemProcessor(
             {
                 Log.Error(e, ex.Message);
             }
+
+            return false;
         }
     }
 
-    private async Task ProcessQueueItemAsync(DateTime startTime)
+    private async Task<bool> ProcessQueueItemAsync(DateTime startTime)
     {
+        using var lowPriorityDownloadScope = ct.SetContext(
+            new DownloadPriorityContext { Priority = SemaphorePriority.Low }
+        );
+
         var existingMountFolder = await GetMountFolder().ConfigureAwait(false);
         var duplicateNzbBehavior = configManager.GetDuplicateNzbBehavior();
 
@@ -103,7 +114,7 @@ public class QueueItemProcessor(
             const string error = "Duplicate nzb: the download folder for this nzb already exists.";
             await MarkQueueItemCompleted(startTime, error, () => Task.FromResult(existingMountFolder))
                 .ConfigureAwait(false);
-            return;
+            return false;
         }
 
         // read the nzb document
@@ -117,7 +128,7 @@ public class QueueItemProcessor(
 
         // step 0 -- perform article existence pre-check against cache
         // https://github.com/nzbdav-dev/nzbdav/issues/101
-        var articlesToPrecheck = nzbFiles.SelectMany(x => x.Segments).Select(x => x.MessageId);
+        var articlesToPrecheck = nzbFiles.SelectMany(x => x.GetSegmentIds());
         HealthCheckService.CheckCachedMissingSegmentIds(articlesToPrecheck);
 
         // step 1 -- get name and size of each nzb file
@@ -193,6 +204,8 @@ public class QueueItemProcessor(
 
             return mountFolder;
         }).ConfigureAwait(false);
+
+        return true;
     }
 
     private IEnumerable<BaseProcessor> GetFileProcessors

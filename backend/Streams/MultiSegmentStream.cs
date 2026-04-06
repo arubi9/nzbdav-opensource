@@ -1,8 +1,8 @@
-﻿using System.Threading.Channels;
+using System.Threading.Channels;
 using NzbWebDAV.Clients.Usenet;
-using NzbWebDAV.Clients.Usenet.Concurrency;
 using NzbWebDAV.Clients.Usenet.Contexts;
 using NzbWebDAV.Clients.Usenet.Models;
+using NzbWebDAV.Models;
 using UsenetSharp.Streams;
 
 namespace NzbWebDAV.Streams;
@@ -13,7 +13,15 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
     private readonly INntpClient _usenetClient;
     private readonly Channel<Task<Stream>> _streamTasks;
     private readonly ContextualCancellationTokenSource _cts;
+    private readonly StreamingBufferSettings _streamingBufferSettings;
+    private readonly Action<int>? _onSegmentConsumedCallback;
+    private readonly SemaphoreSlim _prefetchWindow;
+    private readonly object _disposeLock = new();
+    private readonly Task _downloadSegmentsTask;
+    private Task? _disposeTask;
     private Stream? _stream;
+    private int _consumedSegments;
+    private int _windowExpanded;
     private bool _disposed;
 
     public static Stream Create
@@ -24,24 +32,70 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
         CancellationToken cancellationToken
     )
     {
-        return articleBufferSize == 0
+        return Create(segmentIds, usenetClient, StreamingBufferSettings.Fixed(articleBufferSize), cancellationToken);
+    }
+
+    public static Stream Create
+    (
+        Memory<string> segmentIds,
+        INntpClient usenetClient,
+        StreamingBufferSettings streamingBufferSettings,
+        Action<int>? onSegmentConsumedCallback,
+        CancellationToken cancellationToken
+    )
+    {
+        return streamingBufferSettings.MaxBufferedSegments == 0
             ? new UnbufferedMultiSegmentStream(segmentIds, usenetClient)
-            : new MultiSegmentStream(segmentIds, usenetClient, articleBufferSize, cancellationToken);
+            : new MultiSegmentStream(
+                segmentIds,
+                usenetClient,
+                streamingBufferSettings,
+                onSegmentConsumedCallback,
+                cancellationToken
+            );
+    }
+
+    public static Stream Create
+    (
+        Memory<string> segmentIds,
+        INntpClient usenetClient,
+        StreamingBufferSettings streamingBufferSettings,
+        CancellationToken cancellationToken
+    )
+    {
+        return Create(
+            segmentIds,
+            usenetClient,
+            streamingBufferSettings,
+            onSegmentConsumedCallback: null,
+            cancellationToken
+        );
     }
 
     private MultiSegmentStream
     (
         Memory<string> segmentIds,
         INntpClient usenetClient,
-        int articleBufferSize,
+        StreamingBufferSettings streamingBufferSettings,
+        Action<int>? onSegmentConsumedCallback,
         CancellationToken cancellationToken
     )
     {
         _segmentIds = segmentIds;
         _usenetClient = usenetClient;
-        _streamTasks = Channel.CreateBounded<Task<Stream>>(articleBufferSize);
+        _streamingBufferSettings = streamingBufferSettings;
+        _onSegmentConsumedCallback = onSegmentConsumedCallback;
+        _streamTasks = Channel.CreateBounded<Task<Stream>>(streamingBufferSettings.MaxBufferedSegments);
         _cts = ContextualCancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        _ = DownloadSegments(_cts.Token);
+        _prefetchWindow = new SemaphoreSlim(
+            streamingBufferSettings.StartupBufferedSegments,
+            streamingBufferSettings.MaxBufferedSegments
+        );
+
+        if (streamingBufferSettings.RampAfterConsumedSegments == 0)
+            ExpandWindowToMax();
+
+        _downloadSegmentsTask = DownloadSegments(_cts.Token);
     }
 
     private async Task DownloadSegments(CancellationToken cancellationToken)
@@ -50,36 +104,56 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
         {
             for (var i = 0; i < _segmentIds.Length; i++)
             {
-                var segmentId = _segmentIds.Span[i];
+                await _prefetchWindow.WaitAsync(cancellationToken).ConfigureAwait(false);
+                var permitTransferred = false;
 
-                await _streamTasks.Writer.WaitToWriteAsync(cancellationToken);
-                var connection = await _usenetClient.AcquireExclusiveConnectionAsync(segmentId, cancellationToken);
-                var streamTask = DownloadSegment(segmentId, connection, cancellationToken);
-                if (_streamTasks.Writer.TryWrite(streamTask)) continue;
+                try
+                {
+                    if (!await _streamTasks.Writer.WaitToWriteAsync(cancellationToken).ConfigureAwait(false))
+                    {
+                        ReleaseWindowPermit();
+                        break;
+                    }
 
-                // if we never get a chance to write the stream to the writer
-                // then make sure the stream gets disposed.
-                _ = Task.Run(async () => await (await streamTask).DisposeAsync(), CancellationToken.None);
-                break;
+                    var segmentId = _segmentIds.Span[i];
+                    var streamTask = DownloadSegment(segmentId, cancellationToken);
+
+                    if (_streamTasks.Writer.TryWrite(streamTask))
+                    {
+                        permitTransferred = true;
+                        continue;
+                    }
+
+                    await DisposePendingStreamAsync(streamTask).ConfigureAwait(false);
+                    ReleaseWindowPermit();
+                    break;
+                }
+                catch
+                {
+                    if (!permitTransferred)
+                        ReleaseWindowPermit();
+                    throw;
+                }
             }
         }
         finally
         {
             _streamTasks.Writer.TryComplete();
         }
-
-        return;
     }
 
     private async Task<Stream> DownloadSegment
     (
         string segmentId,
-        UsenetExclusiveConnection exclusiveConnection,
         CancellationToken cancellationToken
     )
     {
         var bodyResponse = await _usenetClient
-            .DecodedBodyAsync(segmentId, exclusiveConnection, cancellationToken)
+            .DecodedBodyWithFallbackAsync(
+                segmentId,
+                cancellationToken,
+                (candidateSegmentId, ct) => _usenetClient.AcquireExclusiveConnectionAsync(candidateSegmentId, ct)
+            )
             .ConfigureAwait(false);
         return bodyResponse.Stream;
     }
@@ -93,21 +167,55 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
             // if the stream is null, get the next stream.
             if (_stream == null)
             {
-                if (!await _streamTasks.Reader.WaitToReadAsync(cancellationToken)) return 0;
+                if (!await _streamTasks.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false)) return 0;
                 if (!_streamTasks.Reader.TryRead(out var streamTask)) return 0;
-                _stream = await streamTask;
+                _stream = await streamTask.ConfigureAwait(false);
             }
 
             // read from the stream
-            var read = await _stream.ReadAsync(buffer, cancellationToken);
+            var read = await _stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
             if (read > 0) return read;
 
             // if the stream ended, continue to the next stream.
-            await _stream.DisposeAsync();
+            await _stream.DisposeAsync().ConfigureAwait(false);
             _stream = null;
+            OnSegmentConsumed();
         }
 
         return 0;
+    }
+
+    private void OnSegmentConsumed()
+    {
+        ReleaseWindowPermit();
+        var consumedSegments = Interlocked.Increment(ref _consumedSegments);
+        _onSegmentConsumedCallback?.Invoke(consumedSegments);
+
+        if (_windowExpanded == 1) return;
+        if (consumedSegments < _streamingBufferSettings.RampAfterConsumedSegments) return;
+        ExpandWindowToMax();
+    }
+
+    private void ExpandWindowToMax()
+    {
+        if (Interlocked.Exchange(ref _windowExpanded, 1) == 1) return;
+
+        var additionalPermits = _streamingBufferSettings.MaxBufferedSegments
+                                - _streamingBufferSettings.StartupBufferedSegments;
+        if (additionalPermits > 0)
+            _prefetchWindow.Release(additionalPermits);
+    }
+
+    private void ReleaseWindowPermit()
+    {
+        try
+        {
+            _prefetchWindow.Release();
+        }
+        catch (SemaphoreFullException)
+        {
+            // Disposal can release more permits than remain useful; ignore that.
+        }
     }
 
     private void ThrowIfDisposed()
@@ -117,18 +225,79 @@ public class MultiSegmentStream : FastReadOnlyNonSeekableStream
 
     protected override void Dispose(bool disposing)
     {
-        if (_disposed) return;
         if (!disposing) return;
-        _disposed = true;
-        _cts.Cancel();
-        _cts.Dispose();
-        _stream?.Dispose();
-        _streamTasks.Writer.TryComplete();
+        _ = DisposeAsyncCore(disposeCurrentStreamSynchronously: true);
+        base.Dispose(disposing);
+    }
 
-        // ensure that streams that were never read from the channel get disposed
+    public override async ValueTask DisposeAsync()
+    {
+        await DisposeAsyncCore(disposeCurrentStreamSynchronously: false).ConfigureAwait(false);
+        await base.DisposeAsync().ConfigureAwait(false);
+    }
+
+    private Task DisposeAsyncCore(bool disposeCurrentStreamSynchronously)
+    {
+        lock (_disposeLock)
+        {
+            if (_disposeTask != null) return _disposeTask;
+
+            if (_disposed)
+            {
+                _disposeTask = Task.CompletedTask;
+                return _disposeTask;
+            }
+
+            _disposed = true;
+            _cts.Cancel();
+            _streamTasks.Writer.TryComplete();
+
+            if (disposeCurrentStreamSynchronously)
+            {
+                _stream?.Dispose();
+                _stream = null;
+            }
+
+            _disposeTask = DisposeAsyncCoreInternal();
+            return _disposeTask;
+        }
+    }
+
+    private async Task DisposeAsyncCoreInternal()
+    {
+        try
+        {
+            await _downloadSegmentsTask.ConfigureAwait(false);
+        }
+        catch
+        {
+            // Cancellation or failed in-flight downloads should not block cleanup.
+        }
+
+        if (_stream != null)
+        {
+            await _stream.DisposeAsync().ConfigureAwait(false);
+            _stream = null;
+        }
+
         while (_streamTasks.Reader.TryRead(out var streamTask))
-            _ = Task.Run(async () => await (await streamTask).DisposeAsync(), CancellationToken.None);
+            await DisposePendingStreamAsync(streamTask).ConfigureAwait(false);
 
-        base.Dispose();
+        _prefetchWindow.Dispose();
+        _cts.Dispose();
+        GC.SuppressFinalize(this);
+    }
+
+    private static async Task DisposePendingStreamAsync(Task<Stream> streamTask)
+    {
+        try
+        {
+            var stream = await streamTask.ConfigureAwait(false);
+            await stream.DisposeAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            // Ignore failed/cancelled segment downloads during cleanup.
+        }
     }
 }

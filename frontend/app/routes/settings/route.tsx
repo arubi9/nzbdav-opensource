@@ -38,6 +38,13 @@ const defaultConfig = {
     "media.library-dir": "",
     "arr.instances": "{\"RadarrInstances\":[],\"SonarrInstances\":[],\"QueueRules\":[]}",
     "repair.enable": "false",
+    "cache.max-size-gb": "10",
+    "cache.max-age-hours": "6",
+    "cache.directory": "",
+    "cache.precache-enable": "true",
+    "cache.precache-max-file-size-mb": "5",
+    "cache.read-ahead-enable": "true",
+    "cache.read-ahead-segments": "200",
 }
 
 export async function loader({ request }: Route.LoaderArgs) {

@@ -1,4 +1,5 @@
-﻿using NzbWebDAV.Clients.Usenet.Connections;
+using NzbWebDAV.Clients.Usenet.Caching;
+using NzbWebDAV.Clients.Usenet.Connections;
 using NzbWebDAV.Config;
 using NzbWebDAV.Websocket;
 
@@ -6,8 +7,13 @@ namespace NzbWebDAV.Clients.Usenet;
 
 public class UsenetStreamingClient : WrappingNntpClient
 {
-    public UsenetStreamingClient(ConfigManager configManager, WebsocketManager websocketManager)
-        : base(CreateDownloadingNntpClient(configManager, websocketManager))
+    public UsenetStreamingClient
+    (
+        ConfigManager configManager,
+        WebsocketManager websocketManager,
+        LiveSegmentCache liveSegmentCache
+    )
+        : base(CreateLiveStreamingClient(configManager, websocketManager, liveSegmentCache))
     {
         // when config changes, create a new MultiProviderClient to use instead.
         configManager.OnConfigChanged += (_, configEventArgs) =>
@@ -16,19 +22,21 @@ public class UsenetStreamingClient : WrappingNntpClient
             if (!configEventArgs.ChangedConfig.ContainsKey("usenet.providers")) return;
 
             // update the connection-pool according to the new config
-            var newUsenetClient = CreateDownloadingNntpClient(configManager, websocketManager);
+            var newUsenetClient = CreateLiveStreamingClient(configManager, websocketManager, liveSegmentCache);
             ReplaceUnderlyingClient(newUsenetClient);
         };
     }
 
-    private static DownloadingNntpClient CreateDownloadingNntpClient
+    private static LiveSegmentCachingNntpClient CreateLiveStreamingClient
     (
         ConfigManager configManager,
-        WebsocketManager websocketManager
+        WebsocketManager websocketManager,
+        LiveSegmentCache liveSegmentCache
     )
     {
         var multiProviderClient = CreateMultiProviderClient(configManager, websocketManager);
-        return new DownloadingNntpClient(multiProviderClient, configManager);
+        var downloadingClient = new DownloadingNntpClient(multiProviderClient, configManager);
+        return new LiveSegmentCachingNntpClient(downloadingClient, liveSegmentCache);
     }
 
     private static MultiProviderNntpClient CreateMultiProviderClient

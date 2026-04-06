@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -7,8 +7,10 @@ using NWebDav.Server.Stores;
 using NzbWebDAV.Api.SabControllers;
 using NzbWebDAV.Auth;
 using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Clients.Usenet.Caching;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
+using NzbWebDAV.Database.Interceptors;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Middlewares;
 using NzbWebDAV.Queue;
@@ -66,6 +68,15 @@ class Program
         // initialize the config-manager
         var configManager = new ConfigManager();
         await configManager.LoadConfig().ConfigureAwait(false);
+        ContentIndexSnapshotInterceptor.SnapshotWriter
+            .SetDebounceInterval(TimeSpan.FromSeconds(configManager.GetSnapshotDebounceSeconds()));
+        configManager.OnConfigChanged += (_, eventArgs) =>
+        {
+            if (!eventArgs.ChangedConfig.ContainsKey("cache.snapshot-debounce-seconds")) return;
+
+            ContentIndexSnapshotInterceptor.SnapshotWriter
+                .SetDebounceInterval(TimeSpan.FromSeconds(configManager.GetSnapshotDebounceSeconds()));
+        };
 
         // initialize websocket-manager
         var websocketManager = new WebsocketManager();
@@ -81,11 +92,15 @@ class Program
             .AddWebdavBasicAuthentication(configManager)
             .AddSingleton(configManager)
             .AddSingleton(websocketManager)
+            .AddSingleton<LiveSegmentCache>()
             .AddSingleton<UsenetStreamingClient>()
             .AddSingleton<QueueManager>()
+            .AddSingleton<ReadAheadWarmingService>()
+            .AddHostedService<ContentIndexRecoveryService>()
             .AddHostedService<HealthCheckService>()
             .AddHostedService<ArrMonitoringService>()
             .AddHostedService<BlobCleanupService>()
+            .AddHostedService<SmallFilePrecacheService>()
             .AddScoped<DavDatabaseContext>()
             .AddScoped<DavDatabaseClient>()
             .AddScoped<DatabaseStore>()
@@ -110,7 +125,14 @@ class Program
         app.MapControllers();
         app.UseWebdavBasicAuthentication();
         app.UseNWebDav();
-        app.Lifetime.ApplicationStopping.Register(SigtermUtil.Cancel);
+        app.Lifetime.ApplicationStopping.Register(() =>
+        {
+            SigtermUtil.Cancel();
+            ContentIndexSnapshotInterceptor.SnapshotWriter
+                .FlushAsync(CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
+        });
         await app.RunAsync().ConfigureAwait(false);
     }
 }

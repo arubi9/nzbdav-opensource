@@ -1,4 +1,7 @@
-﻿using NzbWebDAV.Clients.Usenet.Models;
+using NzbWebDAV.Clients.Usenet.Models;
+using NzbWebDAV.Models;
+using NzbWebDAV.Models.Nzb;
+using NzbWebDAV.Streams;
 using UsenetSharp.Models;
 
 namespace NzbWebDAV.Clients.Usenet;
@@ -55,6 +58,22 @@ public class WrappingNntpClient(INntpClient usenetClient) : NntpClient
         SegmentId segmentId, UsenetExclusiveConnection exclusiveConnection, CancellationToken cancellationToken) =>
         _usenetClient.DecodedArticleAsync(segmentId, exclusiveConnection, cancellationToken);
 
+    public override Task<UsenetYencHeader> GetYencHeadersAsync(string segmentId, CancellationToken ct) =>
+        _usenetClient.GetYencHeadersAsync(segmentId, ct);
+
+    public override NzbFileStream GetFileStream(
+        NzbFile nzbFile,
+        long fileSize,
+        StreamingBufferSettings streamingBufferSettings,
+        Action<int>? onSegmentIndexChanged
+    ) => _usenetClient.GetFileStream(nzbFile, fileSize, streamingBufferSettings, onSegmentIndexChanged);
+
+    public override NzbFileStream GetFileStream(
+        string[] segmentIds,
+        long fileSize,
+        StreamingBufferSettings streamingBufferSettings,
+        Action<int>? onSegmentIndexChanged
+    ) => _usenetClient.GetFileStream(segmentIds, fileSize, streamingBufferSettings, onSegmentIndexChanged);
 
     protected void ReplaceUnderlyingClient(INntpClient usenetClient)
     {

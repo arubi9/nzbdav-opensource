@@ -39,7 +39,7 @@ public class DavItem
             Name = name,
             FileSize = fileSize,
             Type = type,
-            Path = System.IO.Path.Join(parent.Path, name),
+            Path = $"{parent.Path.TrimEnd('/')}/{name}",
             ReleaseDate = releaseDate,
             LastHealthCheck = lastHealthCheck,
             NextHealthCheck = releaseDate != null && lastHealthCheck != null

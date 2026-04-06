@@ -5,10 +5,12 @@ using NWebDav.Server.Stores;
 using NzbWebDAV.Api.SabControllers.AddFile;
 using NzbWebDAV.Api.SabControllers.RemoveFromQueue;
 using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Clients.Usenet.Caching;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Queue;
+using NzbWebDAV.Services;
 using NzbWebDAV.WebDav.Requests;
 using NzbWebDAV.Websocket;
 
@@ -21,7 +23,9 @@ public class DatabaseStoreWatchFolder(
     ConfigManager configManager,
     UsenetStreamingClient usenetClient,
     QueueManager queueManager,
-    WebsocketManager websocketManager
+    WebsocketManager websocketManager,
+    LiveSegmentCache? liveSegmentCache = null,
+    ReadAheadWarmingService? warmingService = null
 ) : DatabaseStoreCollection(
     davDirectory,
     httpContext,
@@ -29,7 +33,9 @@ public class DatabaseStoreWatchFolder(
     configManager,
     usenetClient,
     queueManager,
-    websocketManager
+    websocketManager,
+    liveSegmentCache,
+    warmingService
 )
 {
     protected override async Task<IStoreItem?> GetItemAsync(GetItemRequest request)

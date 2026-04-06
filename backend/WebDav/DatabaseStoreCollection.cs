@@ -1,12 +1,14 @@
-﻿using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http;
 using NWebDav.Server;
 using NWebDav.Server.Stores;
 using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Clients.Usenet.Caching;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Queue;
+using NzbWebDAV.Services;
 using NzbWebDAV.WebDav.Base;
 using NzbWebDAV.WebDav.Requests;
 using NzbWebDAV.Websocket;
@@ -20,7 +22,9 @@ public class DatabaseStoreCollection(
     ConfigManager configManager,
     UsenetStreamingClient usenetClient,
     QueueManager queueManager,
-    WebsocketManager websocketManager
+    WebsocketManager websocketManager,
+    LiveSegmentCache? liveSegmentCache = null,
+    ReadAheadWarmingService? warmingService = null
 ) : BaseStoreReadonlyCollection
 {
     public override string Name => davDirectory.Name;
@@ -105,12 +109,20 @@ public class DatabaseStoreCollection(
         {
             dbClient.Ctx.Items.Remove(davItem);
             await dbClient.Ctx.SaveChangesAsync().ConfigureAwait(false);
+
+            // Evict cached segments for this file's owner
+            var ownerId = davItem.ParentId ?? davItem.Id;
+            liveSegmentCache?.EvictByOwner(ownerId);
+
             return DavStatusCode.Ok;
         }
 
         // If the item is a directory and it not a protected directory, simply delete it.
         if (davItem.Type == DavItem.ItemType.Directory && !davItem.IsProtected())
         {
+            // Evict cached segments owned by this directory
+            liveSegmentCache?.EvictByOwner(davItem.Id);
+
             dbClient.Ctx.Items.Remove(davItem);
             await dbClient.Ctx.SaveChangesAsync().ConfigureAwait(false);
             return DavStatusCode.Ok;
@@ -126,25 +138,27 @@ public class DatabaseStoreCollection(
         {
             DavItem.ItemType.IdsRoot =>
                 new DatabaseStoreIdsCollection(
-                    davItem.Name, "", httpContext, dbClient, usenetClient, configManager),
+                    davItem.Name, "", httpContext, dbClient, usenetClient, configManager, warmingService),
             DavItem.ItemType.Directory when davItem.Id == DavItem.NzbFolder.Id =>
                 new DatabaseStoreWatchFolder(
-                    davItem, httpContext, dbClient, configManager, usenetClient, queueManager, websocketManager),
+                    davItem, httpContext, dbClient, configManager, usenetClient, queueManager, websocketManager,
+                    liveSegmentCache, warmingService),
             DavItem.ItemType.Directory =>
                 new DatabaseStoreCollection(
-                    davItem, httpContext, dbClient, configManager, usenetClient, queueManager, websocketManager),
+                    davItem, httpContext, dbClient, configManager, usenetClient, queueManager, websocketManager,
+                    liveSegmentCache, warmingService),
             DavItem.ItemType.SymlinkRoot =>
                 new DatabaseStoreSymlinkCollection(
                     davItem, dbClient, configManager),
             DavItem.ItemType.NzbFile =>
                 new DatabaseStoreNzbFile(
-                    davItem, httpContext, dbClient, usenetClient, configManager),
+                    davItem, httpContext, dbClient, usenetClient, configManager, warmingService),
             DavItem.ItemType.RarFile =>
                 new DatabaseStoreRarFile(
-                    davItem, httpContext, dbClient, usenetClient, configManager),
+                    davItem, httpContext, dbClient, usenetClient, configManager, warmingService),
             DavItem.ItemType.MultipartFile =>
                 new DatabaseStoreMultipartFile(
-                    davItem, httpContext, dbClient, usenetClient, configManager),
+                    davItem, httpContext, dbClient, usenetClient, configManager, warmingService),
             _ => throw new ArgumentException("Unrecognized directory child type.")
         };
     }
