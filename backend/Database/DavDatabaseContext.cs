@@ -7,17 +7,41 @@ using NzbWebDAV.Utils;
 
 namespace NzbWebDAV.Database;
 
-public sealed class DavDatabaseContext() : DbContext(Options.Value)
+public sealed class DavDatabaseContext() : DbContext(CreateOptions())
 {
     public static string ConfigPath => EnvironmentUtil.GetEnvironmentVariable("CONFIG_PATH") ?? "/config";
     public static string DatabaseFilePath => Path.Join(ConfigPath, "db.sqlite");
 
-    private static readonly Lazy<DbContextOptions<DavDatabaseContext>> Options = new(
-        () => new DbContextOptionsBuilder<DavDatabaseContext>()
-            .UseSqlite($"Data Source={DatabaseFilePath}")
-            .AddInterceptors(new SqliteForeignKeyEnabler(), new ContentIndexSnapshotInterceptor())
-            .Options
-    );
+    private static DbContextOptions<DavDatabaseContext> CreateOptions()
+    {
+        var builder = new DbContextOptionsBuilder<DavDatabaseContext>();
+        var databaseUrl = EnvironmentUtil.GetEnvironmentVariable("DATABASE_URL");
+
+        if (!string.IsNullOrEmpty(databaseUrl))
+        {
+            var connectionString = databaseUrl.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase)
+                ? ConvertPostgresUrl(databaseUrl)
+                : databaseUrl;
+            builder.UseNpgsql(connectionString);
+        }
+        else
+        {
+            builder.UseSqlite($"Data Source={DatabaseFilePath}")
+                .AddInterceptors(new SqliteForeignKeyEnabler());
+        }
+
+        builder.AddInterceptors(new ContentIndexSnapshotInterceptor());
+        return builder.Options;
+    }
+
+    private static string ConvertPostgresUrl(string url)
+    {
+        var uri = new Uri(url);
+        var userInfo = uri.UserInfo.Split(':', 2);
+        var username = userInfo.Length > 0 ? Uri.UnescapeDataString(userInfo[0]) : string.Empty;
+        var password = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : string.Empty;
+        return $"Host={uri.Host};Port={uri.Port};Database={uri.AbsolutePath.TrimStart('/')};Username={username};Password={password};Pooling=true;MinPoolSize=5;MaxPoolSize=50";
+    }
 
     // database sets
     public DbSet<Account> Accounts => Set<Account>();
