@@ -68,6 +68,13 @@ class Program
             return;
         }
 
+        if (!string.IsNullOrEmpty(EnvironmentUtil.GetEnvironmentVariable("DATABASE_URL")))
+        {
+            await databaseContext.Database
+                .EnsureCreatedAsync(SigtermUtil.GetCancellationToken())
+                .ConfigureAwait(false);
+        }
+
         // initialize the config-manager
         var configManager = new ConfigManager();
         await configManager.LoadConfig().ConfigureAwait(false);
