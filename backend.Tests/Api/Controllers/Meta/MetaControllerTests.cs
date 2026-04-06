@@ -39,22 +39,34 @@ public sealed class MetaControllerTests
     {
         using var scope = CreateTempConfigScope();
         await using var dbContext = new DavDatabaseContext();
-        await dbContext.Database.EnsureCreatedAsync().ConfigureAwait(false);
+        await dbContext.Database.EnsureCreatedAsync();
+
+        var parent = new DavItem
+        {
+            Id = Guid.Parse("22222222-2222-2222-2222-222222222222"),
+            IdPrefix = "22222",
+            CreatedAt = new DateTime(2026, 4, 6, 12, 0, 0, DateTimeKind.Utc),
+            ParentId = null,
+            Name = "content",
+            FileSize = null,
+            Type = DavItem.ItemType.Directory,
+            Path = "/content",
+        };
 
         var item = new DavItem
         {
             Id = Guid.Parse("11111111-1111-1111-1111-111111111111"),
             IdPrefix = "11111",
             CreatedAt = new DateTime(2026, 4, 6, 12, 30, 0, DateTimeKind.Utc),
-            ParentId = Guid.Parse("22222222-2222-2222-2222-222222222222"),
+            ParentId = parent.Id,
             Name = "example.mkv",
             FileSize = 4242,
             Type = DavItem.ItemType.MultipartFile,
             Path = "/content/example.mkv",
         };
 
-        dbContext.Items.Add(item);
-        await dbContext.SaveChangesAsync().ConfigureAwait(false);
+        dbContext.Items.AddRange(parent, item);
+        await dbContext.SaveChangesAsync();
 
         var configManager = new ConfigManager();
         configManager.UpdateValues([
@@ -67,7 +79,7 @@ public sealed class MetaControllerTests
 
         var controller = new MetaController(new DavDatabaseClient(dbContext), configManager);
 
-        var result = await controller.GetMeta(item.Id, CancellationToken.None).ConfigureAwait(false);
+        var result = await controller.GetMeta(item.Id, CancellationToken.None);
         var ok = Assert.IsType<OkObjectResult>(result);
         var response = Assert.IsType<MetaResponse>(ok.Value);
 
@@ -87,11 +99,11 @@ public sealed class MetaControllerTests
     {
         using var scope = CreateTempConfigScope();
         await using var dbContext = new DavDatabaseContext();
-        await dbContext.Database.EnsureCreatedAsync().ConfigureAwait(false);
+        await dbContext.Database.EnsureCreatedAsync();
 
         var controller = new MetaController(new DavDatabaseClient(dbContext), new ConfigManager());
 
-        var result = await controller.GetMeta(Guid.NewGuid(), CancellationToken.None).ConfigureAwait(false);
+        var result = await controller.GetMeta(Guid.NewGuid(), CancellationToken.None);
         var notFound = Assert.IsType<NotFoundObjectResult>(result);
         var error = notFound.Value!.GetType().GetProperty("error", BindingFlags.Instance | BindingFlags.Public)!.GetValue(notFound.Value);
 
@@ -108,10 +120,14 @@ public sealed class MetaControllerTests
     private sealed class TempConfigScope : IDisposable
     {
         private readonly string _configPath;
+        private readonly string? _previousConfigPath;
+        private readonly string? _previousApiKey;
 
         public TempConfigScope(string configPath)
         {
             _configPath = configPath;
+            _previousConfigPath = Environment.GetEnvironmentVariable("CONFIG_PATH");
+            _previousApiKey = Environment.GetEnvironmentVariable("FRONTEND_BACKEND_API_KEY");
             Environment.SetEnvironmentVariable("CONFIG_PATH", configPath);
             Environment.SetEnvironmentVariable("FRONTEND_BACKEND_API_KEY", "unit-test-api-key");
         }
@@ -126,6 +142,9 @@ public sealed class MetaControllerTests
             {
                 // best effort cleanup for temp test data
             }
+
+            Environment.SetEnvironmentVariable("CONFIG_PATH", _previousConfigPath);
+            Environment.SetEnvironmentVariable("FRONTEND_BACKEND_API_KEY", _previousApiKey);
         }
     }
 }

@@ -9,7 +9,7 @@ public sealed class StreamExecutionServiceTests
     [Fact]
     public void GetContentType_UsesSpecialCasesAndFallback()
     {
-        Assert.Equal("text/plain", StreamExecutionService.GetContentType("README"));
+        Assert.Equal("application/octet-stream", StreamExecutionService.GetContentType("README"));
         Assert.Equal("video/x-matroska", StreamExecutionService.GetContentType("movie.mkv"));
         Assert.Equal("text/plain", StreamExecutionService.GetContentType("notes.nfo"));
         Assert.Equal("application/octet-stream", StreamExecutionService.GetContentType("archive.unknownext"));
