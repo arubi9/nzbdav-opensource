@@ -123,10 +123,10 @@ class Program
         var app = builder.Build();
         app.UseRouting();
         app.UseHttpMetrics();
+        app.UseMetricServer("/metrics");
         app.UseMiddleware<ExceptionMiddleware>();
         app.UseWebSockets();
-        app.MapHealthChecks("/health");
-        app.MapMetrics();
+        app.MapHealthChecks("/health").AllowAnonymous();
         app.Map("/ws", websocketManager.HandleRoute);
         app.MapControllers();
         app.UseWebdavBasicAuthentication();
