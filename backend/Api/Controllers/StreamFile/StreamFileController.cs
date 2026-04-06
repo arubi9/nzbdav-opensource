@@ -29,6 +29,14 @@ public class StreamFileController(
             return;
         }
 
+        // HEAD shortcut: return headers from DB without opening the stream pipeline.
+        // Avoids creating NzbFileStream, MultiSegmentStream, warming session just to discard them.
+        if (HttpMethods.IsHead(Request.Method))
+        {
+            streamService.SetFileHeaders(davItem.Name, davItem.FileSize, Response);
+            return;
+        }
+
         var storeItem = await store.GetItemAsync(davItem.Path, ct).ConfigureAwait(false);
         if (storeItem is null || storeItem is IStoreCollection)
         {

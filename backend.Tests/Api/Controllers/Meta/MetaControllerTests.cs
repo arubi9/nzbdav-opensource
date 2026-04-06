@@ -86,7 +86,7 @@ public sealed class MetaControllerTests
         Assert.Equal(item.Id, response.Id);
         Assert.Equal(item.Name, response.Name);
         Assert.Equal(item.Path, response.Path);
-        Assert.Equal(item.Type.ToString(), response.Type);
+        Assert.Equal("multipart_file", response.Type);
         Assert.Equal(item.FileSize, response.FileSize);
         Assert.Equal(item.CreatedAt, response.CreatedAt);
         Assert.Equal(item.ParentId, response.ParentId);

@@ -14,6 +14,9 @@ public class BrowseController(DavDatabaseClient dbClient) : ControllerBase
     public async Task<IActionResult> Browse(string? path, CancellationToken ct)
     {
         var normalizedPath = "/" + (path?.Trim('/') ?? "");
+        // Collapse double slashes from malformed paths like "content//movies"
+        while (normalizedPath.Contains("//"))
+            normalizedPath = normalizedPath.Replace("//", "/");
 
         var directory = normalizedPath == "/"
             ? DavItem.Root

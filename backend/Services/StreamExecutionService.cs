@@ -65,6 +65,7 @@ public class StreamExecutionService
                 response.Body,
                 start,
                 end,
+                bufferSize: 256 * 1024,
                 cancellationToken: cancellationToken
             ).ConfigureAwait(false);
         }

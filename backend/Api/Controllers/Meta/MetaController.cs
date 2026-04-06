@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using NzbWebDAV.Api.Filters;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
+using NzbWebDAV.Database.Models;
 using NzbWebDAV.Services;
 
 namespace NzbWebDAV.Api.Controllers.Meta;
@@ -25,7 +26,14 @@ public class MetaController(DavDatabaseClient dbClient, ConfigManager configMana
             Id = item.Id,
             Name = item.Name,
             Path = item.Path,
-            Type = item.Type.ToString(),
+            Type = item.Type switch
+            {
+                DavItem.ItemType.Directory => "directory",
+                DavItem.ItemType.NzbFile => "nzb_file",
+                DavItem.ItemType.RarFile => "rar_file",
+                DavItem.ItemType.MultipartFile => "multipart_file",
+                _ => "unknown"
+            },
             FileSize = item.FileSize,
             CreatedAt = item.CreatedAt,
             ParentId = item.ParentId,
