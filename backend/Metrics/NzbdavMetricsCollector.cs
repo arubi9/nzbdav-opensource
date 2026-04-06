@@ -39,6 +39,11 @@ public sealed class NzbdavMetricsCollector
         "nzbdav_streams_active",
         "Active video streams");
 
+    static NzbdavMetricsCollector()
+    {
+        ActiveStreamsGauge.Set(0);
+    }
+
     public NzbdavMetricsCollector(
         LiveSegmentCache cache,
         UsenetStreamingClient usenetClient,
