@@ -15,7 +15,6 @@ public sealed class NzbdavMetricsCollector
     private readonly Func<int> _getHealthyProviders;
     private readonly Func<int> _getWarmingSessions;
     private readonly Func<int> _getQueueProcessing;
-<<<<<<< HEAD
     private readonly Func<ObjectStorageSegmentCache?> _getL2Cache;
     private readonly Func<SharedHeaderCache?> _getSharedHeaderCache;
 

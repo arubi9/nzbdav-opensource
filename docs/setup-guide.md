@@ -173,6 +173,17 @@ Notes:
 mc ilm rule add --expire-days 30 nzbdav-minio/nzbdav-segments
 ```
 
+### Shared Header Cache
+
+In multi-node Postgres deployments, NZBDAV can also store yEnc header metadata in Postgres so cold streaming nodes do not re-fetch header metadata from NNTP after restarts.
+
+* `cache.metadata-shared-enabled` defaults to on in multi-node mode.
+* `cache.metadata-retention-days` defaults to `90`.
+* The shared cache only applies when NZBDAV is running against Postgres (`DATABASE_URL`) in a multi-node deployment. Single-node SQLite installs continue using the existing in-memory header cache only.
+* The ingest node runs a periodic sweeper that removes expired rows from `yenc_header_cache`.
+
+This cache is tiny compared to the segment-body cache: it only stores flattened `UsenetYencHeader` fields used for listings and seek planning.
+
 Now we mount the NzbDav web dav to the host file system using a sidecar container.
 
 ### 1. Prepare Host Directory

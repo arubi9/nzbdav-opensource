@@ -282,6 +282,35 @@ export function WebdavSettings({ config, setNewConfig }: SabnzbdSettingsProps) {
                 <Form.Check
                     className={styles.input}
                     type="checkbox"
+                    id="metadata-cache-enabled-checkbox"
+                    aria-describedby="metadata-cache-enabled-help"
+                    label="Share Header Cache Across Nodes"
+                    checked={config["cache.metadata-shared-enabled"] === "true"}
+                    onChange={e => setNewConfig({ ...config, "cache.metadata-shared-enabled": "" + e.target.checked })} />
+                <Form.Text id="metadata-cache-enabled-help" muted>
+                    Stores yEnc header metadata in Postgres so cold streaming nodes reuse header lookups across restarts in multi-node mode.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
+                <Form.Label htmlFor="metadata-retention-days-input">Header Cache Retention (Days)</Form.Label>
+                <Form.Control
+                    {...className([styles.input, !isPositiveInteger(config["cache.metadata-retention-days"]) && styles.error])}
+                    type="text"
+                    id="metadata-retention-days-input"
+                    aria-describedby="metadata-retention-days-help"
+                    placeholder="90"
+                    value={config["cache.metadata-retention-days"]}
+                    onChange={e => setNewConfig({ ...config, "cache.metadata-retention-days": e.target.value })} />
+                <Form.Text id="metadata-retention-days-help" muted>
+                    Applies to multi-node Postgres deployments. Expired shared yEnc header rows are removed by the ingest-node sweeper.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
+                <Form.Check
+                    className={styles.input}
+                    type="checkbox"
                     id="readonly-checkbox"
                     aria-describedby="readonly-help"
                     label={`Enforce Read-Only`}
@@ -345,6 +374,8 @@ export function isWebdavSettingsUpdated(config: Record<string, string>, newConfi
         || config["cache.precache-max-file-size-mb"] !== newConfig["cache.precache-max-file-size-mb"]
         || config["cache.read-ahead-enable"] !== newConfig["cache.read-ahead-enable"]
         || config["cache.read-ahead-segments"] !== newConfig["cache.read-ahead-segments"]
+        || config["cache.metadata-shared-enabled"] !== newConfig["cache.metadata-shared-enabled"]
+        || config["cache.metadata-retention-days"] !== newConfig["cache.metadata-retention-days"]
 }
 
 export function isWebdavSettingsValid(newConfig: Record<string, string>) {
@@ -359,7 +390,8 @@ export function isWebdavSettingsValid(newConfig: Record<string, string>) {
         && isValidL2AccessKey(newConfig)
         && isValidL2SecretKey(newConfig)
         && isPositiveInteger(newConfig["cache.precache-max-file-size-mb"])
-        && isPositiveInteger(newConfig["cache.read-ahead-segments"]);
+        && isPositiveInteger(newConfig["cache.read-ahead-segments"])
+        && isPositiveInteger(newConfig["cache.metadata-retention-days"]);
 }
 
 function isValidUser(user: string): boolean {
