@@ -136,15 +136,23 @@ New class owns the crypto primitives. One instance, singleton-scoped.
 ```csharp
 // backend/Services/ConfigEncryptionService.cs
 
-public sealed class ConfigEncryptionService
+public sealed class ConfigEncryptionService : IDisposable
 {
     private const string FormatPrefix = "v1:";
     private const int NonceSize = 12;   // AES-GCM standard
     private const int TagSize = 16;     // AES-GCM standard
     private const int KeySize = 32;     // AES-256
 
+    // Key bytes kept as fields. They are NOT zeroed on disposal — the
+    // GC owns byte[] memory and CryptographicOperations.ZeroMemory on a
+    // managed array only scrubs that one reference, not any copies the
+    // runtime may have made during JIT or GC compaction. The stated
+    // threat model is stolen files, not memory scraping, so this is
+    // acceptable. If the threat model ever expands to in-process
+    // attackers, switch to SecureString or a native memory buffer.
     private readonly byte[]? _primaryKey;
     private readonly byte[]? _oldKey;
+    private bool _disposed;
 
     public bool IsKeyConfigured => _primaryKey != null;
 
@@ -154,45 +162,122 @@ public sealed class ConfigEncryptionService
         _oldKey = LoadKey("NZBDAV_MASTER_KEY_OLD");
     }
 
-    /// <summary>Encrypts plaintext using the primary key.</summary>
-    public string Encrypt(string plaintext) { ... }
+    public string Encrypt(string plaintext)
+    {
+        if (_disposed) throw new ObjectDisposedException(nameof(ConfigEncryptionService));
+        if (_primaryKey is null)
+            throw new InvalidOperationException(
+                "Cannot encrypt: NZBDAV_MASTER_KEY is not set.");
+
+        var plaintextBytes = System.Text.Encoding.UTF8.GetBytes(plaintext);
+        var nonce = new byte[NonceSize];
+        System.Security.Cryptography.RandomNumberGenerator.Fill(nonce);
+        var ciphertext = new byte[plaintextBytes.Length];
+        var tag = new byte[TagSize];
+
+        // AesGcm is IDisposable. Create per-call — avoids long-lived
+        // native handles, and AES-GCM setup is cheap compared to the
+        // database round-trip we're already paying for.
+        using (var aes = new System.Security.Cryptography.AesGcm(_primaryKey, TagSize))
+        {
+            aes.Encrypt(nonce, plaintextBytes, ciphertext, tag);
+        }
+
+        // Pack nonce || ciphertext || tag into one buffer, base64url-encode.
+        var packed = new byte[NonceSize + ciphertext.Length + TagSize];
+        Buffer.BlockCopy(nonce, 0, packed, 0, NonceSize);
+        Buffer.BlockCopy(ciphertext, 0, packed, NonceSize, ciphertext.Length);
+        Buffer.BlockCopy(tag, 0, packed, NonceSize + ciphertext.Length, TagSize);
+
+        return FormatPrefix + Base64UrlEncode(packed);
+    }
 
     /// <summary>
     /// Decrypts ciphertext. Tries the primary key first, then the old key
     /// (if present) on tag mismatch. Returns (plaintext, usedOldKey) so
     /// the caller can trigger rotation.
     /// </summary>
-    public (string plaintext, bool usedOldKey) Decrypt(string ciphertext) { ... }
+    public (string plaintext, bool usedOldKey) Decrypt(string ciphertext)
+    {
+        if (_disposed) throw new ObjectDisposedException(nameof(ConfigEncryptionService));
+        if (!IsEncryptedFormat(ciphertext))
+            throw new InvalidOperationException(
+                "Cannot decrypt value without the v1: prefix.");
+
+        var packed = Base64UrlDecode(ciphertext.AsSpan(FormatPrefix.Length));
+        if (packed.Length < NonceSize + TagSize)
+            throw new System.Security.Cryptography.CryptographicException(
+                "Ciphertext too short to contain nonce and tag.");
+
+        var nonce = packed.AsSpan(0, NonceSize);
+        var cipherBody = packed.AsSpan(NonceSize, packed.Length - NonceSize - TagSize);
+        var tag = packed.AsSpan(packed.Length - TagSize, TagSize);
+        var plaintextBytes = new byte[cipherBody.Length];
+
+        // Try primary key first.
+        if (_primaryKey is not null && TryDecrypt(_primaryKey, nonce, cipherBody, tag, plaintextBytes))
+            return (System.Text.Encoding.UTF8.GetString(plaintextBytes), usedOldKey: false);
+
+        // Fall back to old key on authentication tag mismatch.
+        if (_oldKey is not null && TryDecrypt(_oldKey, nonce, cipherBody, tag, plaintextBytes))
+            return (System.Text.Encoding.UTF8.GetString(plaintextBytes), usedOldKey: true);
+
+        throw new System.Security.Cryptography.CryptographicException(
+            "Failed to decrypt config value with any configured master key. " +
+            "If this row was encrypted with an older key, set NZBDAV_MASTER_KEY_OLD " +
+            "alongside the current NZBDAV_MASTER_KEY and restart to rotate.");
+    }
+
+    private static bool TryDecrypt(
+        byte[] key, ReadOnlySpan<byte> nonce, ReadOnlySpan<byte> ciphertext,
+        ReadOnlySpan<byte> tag, Span<byte> plaintext)
+    {
+        try
+        {
+            using var aes = new System.Security.Cryptography.AesGcm(key, TagSize);
+            aes.Decrypt(nonce, ciphertext, tag, plaintext);
+            return true;
+        }
+        catch (System.Security.Cryptography.CryptographicException)
+        {
+            return false;
+        }
+    }
 
     /// <summary>True if the value matches the v1 format marker.</summary>
     public static bool IsEncryptedFormat(string value)
         => value.StartsWith(FormatPrefix, StringComparison.Ordinal);
 
-    private static byte[]? LoadKey(string envVarName)
+    public void Dispose()
     {
-        var raw = Environment.GetEnvironmentVariable(envVarName);
-        if (string.IsNullOrEmpty(raw)) return null;
+        if (_disposed) return;
+        _disposed = true;
+        // Best-effort key scrubbing. See comment on the key fields.
+        if (_primaryKey is not null) Array.Clear(_primaryKey);
+        if (_oldKey is not null) Array.Clear(_oldKey);
+    }
 
-        try
+    private static byte[]? LoadKey(string envVarName) { /* unchanged from above */ }
+
+    private static string Base64UrlEncode(byte[] bytes) =>
+        Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    private static byte[] Base64UrlDecode(ReadOnlySpan<char> s)
+    {
+        var padded = new string(s).Replace('-', '+').Replace('_', '/');
+        switch (padded.Length % 4)
         {
-            var decoded = Convert.FromBase64String(raw);
-            if (decoded.Length != KeySize)
-                throw new InvalidOperationException(
-                    $"{envVarName} must decode to exactly {KeySize} bytes (got {decoded.Length}). " +
-                    $"Generate with: openssl rand -base64 {KeySize}");
-            return decoded;
+            case 2: padded += "=="; break;
+            case 3: padded += "="; break;
         }
-        catch (FormatException)
-        {
-            throw new InvalidOperationException(
-                $"{envVarName} is not valid base64. " +
-                $"Generate with: openssl rand -base64 {KeySize}");
-        }
+        return Convert.FromBase64String(padded);
     }
 }
 ```
 
 **Why a dedicated service, not a value converter?** EF Core value converters run on every load/save regardless of whether the row should be encrypted. With an explicit `IsEncrypted` flag, we need branching logic ("encrypt iff sensitive on save", "decrypt iff flag on load") that doesn't fit the converter model cleanly. A service called explicitly from `ConfigManager.LoadConfig` and `ConfigManager.UpdateValues` is simpler.
+
+**Disposal note.** `AesGcm` instances are created per-call inside `using` blocks — they hold native handles that need prompt release. The `ConfigEncryptionService` itself implements `IDisposable` to best-effort-scrub the key byte arrays on shutdown; this is defense-in-depth, not a guarantee (see the comment on the key fields). DI registers the service as a singleton, so disposal happens during host shutdown.
 
 ---
 
@@ -293,12 +378,46 @@ public static class StartupEncryptionCheck
                 }
             }
 
+            if (migrated > 0)
+            {
+                // Write the post-migration marker so the UI can prompt the
+                // operator to rotate historical-backup credentials. Only set
+                // it on the FIRST migration — subsequent startups where
+                // migrated is 0 leave it alone. Presence of the row is the
+                // signal the banner keys off.
+                var alreadyHasMarker = await db.ConfigItems
+                    .AnyAsync(c => c.ConfigName == "encryption.migration-completed-at");
+                if (!alreadyHasMarker)
+                {
+                    db.ConfigItems.Add(new ConfigItem
+                    {
+                        ConfigName = "encryption.migration-completed-at",
+                        ConfigValue = DateTime.UtcNow.ToString("O"),
+                        IsEncrypted = false,
+                    });
+                }
+            }
+
             if (migrated > 0 || rotated > 0)
                 await db.SaveChangesAsync();
             await transaction.CommitAsync();
 
             if (migrated > 0)
+            {
                 Log.Information("Encrypted {Count} existing config secrets on startup", migrated);
+                Log.Warning(
+                    "===========================================================");
+                Log.Warning(
+                    "  Historical backups of your config database (if any) are");
+                Log.Warning(
+                    "  still PLAINTEXT. Rotate usenet provider passwords,");
+                Log.Warning(
+                    "  Radarr/Sonarr API keys, and the NZBDAV API key NOW if");
+                Log.Warning(
+                    "  there is any chance a pre-migration backup is exposed.");
+                Log.Warning(
+                    "===========================================================");
+            }
             if (rotated > 0)
                 Log.Information(
                     "Key rotation complete: {Count} rows re-encrypted with primary key. " +
@@ -373,9 +492,31 @@ public class ConfigManager
             _config.Clear();
             foreach (var configItem in configItems)
             {
-                var value = configItem.IsEncrypted
-                    ? _encryption.Decrypt(configItem.ConfigValue).plaintext
-                    : configItem.ConfigValue;
+                string value;
+                if (configItem.IsEncrypted)
+                {
+                    var (plaintext, usedOldKey) = _encryption.Decrypt(configItem.ConfigValue);
+                    value = plaintext;
+
+                    // If LoadConfig is called again at runtime (e.g. hot-reload
+                    // after OnConfigChanged), the StartupEncryptionCheck rotation
+                    // pass has already completed and won't run again until the
+                    // next restart. Log loudly so the operator knows rotation
+                    // isn't complete and NZBDAV_MASTER_KEY_OLD still needs to
+                    // stay set until they can restart.
+                    if (usedOldKey)
+                    {
+                        Log.Warning(
+                            "Config key '{Name}' was decrypted with NZBDAV_MASTER_KEY_OLD " +
+                            "outside the startup rotation pass. A full rotation requires " +
+                            "a restart; keep NZBDAV_MASTER_KEY_OLD set until then.",
+                            configItem.ConfigName);
+                    }
+                }
+                else
+                {
+                    value = configItem.ConfigValue;
+                }
                 _config[configItem.ConfigName] = value;
             }
         }
@@ -386,17 +527,28 @@ public class ConfigManager
         // Mark and encrypt sensitive rows before handing them to storage.
         foreach (var item in configItems)
         {
-            if (SensitiveConfigKeys.IsSensitive(item.ConfigName) && _encryption.IsKeyConfigured)
+            if (!SensitiveConfigKeys.IsSensitive(item.ConfigName) || !_encryption.IsKeyConfigured)
+                continue;
+
+            // Double-encryption defense. If the caller hands us a value that
+            // already looks encrypted (has the v1: prefix), something has
+            // gone wrong — either the caller double-wrapped, or a legitimate
+            // plaintext value starts with v1: and would get misclassified.
+            // Either way, silently skipping encryption leaves the data in
+            // an inconsistent state (IsEncrypted=true with undetectable
+            // plaintext-or-ciphertext contents). Fail loudly instead.
+            if (ConfigEncryptionService.IsEncryptedFormat(item.ConfigValue))
             {
-                // Defensive: if the caller somehow passed an already-encrypted
-                // value (double-encryption would make the data unrecoverable),
-                // detect via the format prefix and skip re-encryption.
-                if (!ConfigEncryptionService.IsEncryptedFormat(item.ConfigValue))
-                {
-                    item.ConfigValue = _encryption.Encrypt(item.ConfigValue);
-                    item.IsEncrypted = true;
-                }
+                throw new InvalidOperationException(
+                    $"Double-encryption detected for config key '{item.ConfigName}'. " +
+                    $"Value already has the v1: prefix before the encryption pass. " +
+                    $"This usually means the caller wrapped the value twice, or a " +
+                    $"plaintext value happens to start with 'v1:' and cannot be " +
+                    $"distinguished from ciphertext. Reject the write.");
             }
+
+            item.ConfigValue = _encryption.Encrypt(item.ConfigValue);
+            item.IsEncrypted = true;
         }
 
         // ... existing in-memory cache update logic ...
@@ -429,17 +581,27 @@ public class EncryptionStatusController(
     [HttpGet]
     public async Task<IActionResult> Get()
     {
-        var plaintextCount = await dbClient.Ctx.ConfigItems
-            .Where(c => !c.IsEncrypted)
-            .CountAsync();
+        // Materialize the sensitive-keys set into a List<string> BEFORE the
+        // query. EF Core translates List<string>.Contains to SQL IN (...);
+        // HashSet<string>.Contains may fall back to client evaluation or
+        // throw depending on provider version. Local variable forces the
+        // parameterized IN clause. See:
+        // https://learn.microsoft.com/en-us/ef/core/querying/client-eval
+        var sensitiveKeys = SensitiveConfigKeys.Keys.ToList();
 
         // Count only plaintext rows that SHOULD be encrypted —
         // "unencrypted plaintext secrets in the DB".
         var plaintextSecretsCount = await dbClient.Ctx.ConfigItems
-            .Where(c => !c.IsEncrypted)
-            .Select(c => c.ConfigName)
-            .Where(name => SensitiveConfigKeys.Keys.Contains(name))
+            .Where(c => !c.IsEncrypted && sensitiveKeys.Contains(c.ConfigName))
             .CountAsync();
+
+        var migrationCompletedAt = await dbClient.Ctx.ConfigItems
+            .Where(c => c.ConfigName == "encryption.migration-completed-at")
+            .Select(c => c.ConfigValue)
+            .FirstOrDefaultAsync();
+
+        var postMigrationAcknowledged = await dbClient.Ctx.ConfigItems
+            .AnyAsync(c => c.ConfigName == "encryption.post-migration-acknowledged");
 
         return Ok(new
         {
@@ -447,7 +609,27 @@ public class EncryptionStatusController(
             plaintextSecretsCount,
             bannerSeverity = encryption.IsKeyConfigured ? "none"
                            : plaintextSecretsCount > 0 ? "warning" : "info",
+            migrationCompletedAt,
+            postMigrationAcknowledged,
         });
+    }
+
+    [HttpPost("acknowledge-post-migration")]
+    public async Task<IActionResult> AcknowledgePostMigration()
+    {
+        var existing = await dbClient.Ctx.ConfigItems
+            .FirstOrDefaultAsync(c => c.ConfigName == "encryption.post-migration-acknowledged");
+        if (existing is null)
+        {
+            dbClient.Ctx.ConfigItems.Add(new ConfigItem
+            {
+                ConfigName = "encryption.post-migration-acknowledged",
+                ConfigValue = DateTime.UtcNow.ToString("O"),
+                IsEncrypted = false,
+            });
+            await dbClient.Ctx.SaveChangesAsync();
+        }
+        return NoContent();
     }
 }
 ```
@@ -530,6 +712,30 @@ is opt-in for upgrades. To enable:
 
        Encrypted N existing config secrets on startup
 
+**CRITICAL: Rotate your credentials after enabling encryption.**
+If you have ANY backup of your config database (cloud backup,
+volume snapshot, local copy) taken before you set
+`NZBDAV_MASTER_KEY`, that backup still contains your secrets in
+plaintext. Enabling encryption does not retroactively protect
+historical backups. After step 4, immediately:
+
+1. Change your usenet provider password (on the provider's website)
+2. Regenerate your Radarr API key (Radarr → Settings → General →
+   Security → API Key → "Show" → Generate new)
+3. Regenerate your Sonarr API key (same path)
+4. Regenerate your NZBDAV SABnzbd API key (NZBDAV Settings →
+   SABnzbd → Regenerate)
+5. Update Radarr/Sonarr's download client settings with the new
+   NZBDAV API key
+6. Update any `.strm` files Jellyfin uses — the stream-signing
+   key rotates too, which invalidates old tokens. The Jellyfin
+   library scan task will regenerate them automatically on next
+   run.
+
+NZBDAV shows a persistent warning banner in the settings UI until
+you dismiss it, confirming the credential rotation is complete.
+**Do not dismiss until you have actually rotated.**
+
 ### Rotating the Master Key
 
 1. Generate a new key.
@@ -567,10 +773,10 @@ without it, so could an attacker.
 
 | File | Purpose |
 |---|---|
-| `backend/Config/SensitiveConfigKeys.cs` | Allowlist of sensitive config keys (5 entries) |
-| `backend/Services/ConfigEncryptionService.cs` | AES-GCM primitives, key loading, encrypt/decrypt |
-| `backend/Services/StartupEncryptionCheck.cs` | Startup decision table + migration/rotation pass |
-| `backend/Api/Controllers/EncryptionStatus/EncryptionStatusController.cs` | Status endpoint for UI banner |
+| `backend/Config/SensitiveConfigKeys.cs` | Allowlist of sensitive config keys (5 entries) with rationale comment |
+| `backend/Services/ConfigEncryptionService.cs` | AES-GCM primitives, key loading, encrypt/decrypt, `IDisposable` with best-effort key scrubbing |
+| `backend/Services/StartupEncryptionCheck.cs` | Startup decision table + migration/rotation pass + first-migration marker |
+| `backend/Api/Controllers/EncryptionStatus/EncryptionStatusController.cs` | GET `/api/encryption-status` + POST `/api/encryption-status/acknowledge-post-migration` |
 | `backend/Database/Migrations/NNNNNNNNNNN_AddIsEncryptedToConfigItems.cs` | EF Core migration adding `IsEncrypted` column |
 
 ### Modified
@@ -579,10 +785,10 @@ without it, so could an attacker.
 |---|---|
 | `backend/Database/Models/ConfigItem.cs` | Add `IsEncrypted` property |
 | `backend/Database/DavDatabaseContext.cs` | Configure `IsEncrypted` column (default false) |
-| `backend/Config/ConfigManager.cs` | Inject `ConfigEncryptionService`; decrypt on load, encrypt on save; comment on `GetApiKey` fallback dependency |
+| `backend/Config/ConfigManager.cs` | Inject `ConfigEncryptionService`; decrypt on load, encrypt on save; log warning on runtime old-key decryption; **throw** on double-encryption; comment on `GetApiKey` fallback dependency |
 | `backend/Program.cs` | Register `ConfigEncryptionService` singleton; call `StartupEncryptionCheck.RunAsync` before the web host starts |
-| `frontend/app/routes/settings/route.tsx` | Fetch `/api/encryption-status`, render banner when `keySet === false` |
-| `docs/setup-guide.md` | New "Encryption at Rest" section |
+| `frontend/app/routes/settings/route.tsx` | Fetch `/api/encryption-status`; render plaintext-warning banner when `keySet === false`; render post-migration banner when `migrationCompletedAt && !postMigrationAcknowledged`; wire dismiss button to the acknowledge endpoint |
+| `docs/setup-guide.md` | New "Encryption at Rest" section with upgrade checklist that leads with credential rotation |
 
 ---
 
@@ -598,6 +804,9 @@ without it, so could an attacker.
 5. Format prefix: `IsEncryptedFormat("v1:...")` is true, `IsEncryptedFormat("hello")` is false
 6. Invalid base64 in env var: throws `InvalidOperationException` with actionable message
 7. Wrong key length in env var: throws `InvalidOperationException` with actionable message
+8. Truncated ciphertext (< NonceSize + TagSize bytes) throws `CryptographicException`
+9. Tampered ciphertext (flip one byte in the body) fails tag verification under both keys
+10. `Dispose()` is idempotent and subsequent calls throw `ObjectDisposedException`
 
 **`SensitiveConfigKeys`:**
 1. `IsSensitive("usenet.providers")` → true
@@ -613,6 +822,24 @@ without it, so could an attacker.
 6. DB with rows encrypted by old key + primary key set → throws (rotation not possible without old key)
 7. DB with rows encrypted by old key + both keys set → rotates to primary, updates rows
 8. Mid-rotation simulated crash → transaction rollback, DB unchanged
+9. First successful migration writes `encryption.migration-completed-at` row
+10. Second startup after migration does NOT overwrite `encryption.migration-completed-at`
+11. Key rotation on an already-migrated DB does NOT write or update the migration-completed-at marker
+
+**`ConfigManager`:**
+1. `UpdateValues` called with a sensitive-keyed plaintext value → row is encrypted + flagged
+2. `UpdateValues` called with a non-sensitive key → row stays plaintext + not flagged
+3. `UpdateValues` called with a sensitive-keyed value that already has the `v1:` prefix → **throws `InvalidOperationException`** (double-encryption guard regression test)
+4. `LoadConfig` run after a partial rotation (some rows encrypted with primary, some with old) → logs a warning for each row decrypted with the old key
+5. `LoadConfig` on a DB with encrypted rows and no key configured → throws (consistent with `StartupEncryptionCheck`)
+
+**`EncryptionStatusController`:**
+1. GET with key set → `keySet: true`, `plaintextSecretsCount: 0` after migration
+2. GET with key unset and plaintext secrets present → `keySet: false`, `plaintextSecretsCount > 0`, `bannerSeverity: "warning"`
+3. GET after migration but before acknowledgment → `migrationCompletedAt` populated, `postMigrationAcknowledged: false`
+4. POST `/acknowledge-post-migration` → writes the ack row, subsequent GET returns `postMigrationAcknowledged: true`
+5. POST `/acknowledge-post-migration` twice → second call is a no-op (idempotent)
+6. Query uses `List<string>.Contains` → regression test that verifies the generated SQL contains `IN (...)` (can use EF Core's `ToQueryString()` to inspect)
 
 ### Integration tests
 
@@ -638,5 +865,54 @@ without it, so could an attacker.
 
 - **Breaking change for new installs only.** Anyone installing NZBDAV after this change must set `NZBDAV_MASTER_KEY`. The setup guide leads with this.
 - **Non-breaking for existing installs.** Upgrades see the warning banner and log warnings but continue operating. No data migration runs until the operator opts in by setting the key.
-- **Backups taken AFTER encryption is enabled are protected.** Backups taken BEFORE are still plaintext — operators should rotate provider passwords and API keys after opting in if they're concerned about historical backups.
+- **Historical backups remain plaintext — operators MUST rotate credentials after opting in.** This is the critical caveat. Backups captured before encryption was enabled still contain plaintext provider passwords, Radarr/Sonarr API keys, the SABnzbd API key, and the `.strm` HMAC signing key. If those backups are ever exposed, this entire feature provides zero protection for anything in them. The post-migration banner (see below) makes this explicit and un-ignorable, and the setup guide's "Upgrading an Existing Installation" section leads with the credential rotation checklist.
 - **PostgreSQL multi-node mode is supported unchanged.** The encryption happens in .NET before the value reaches the provider, so PostgreSQL sees the same ciphertext bytes SQLite does.
+
+### Post-Migration Banner (one-time)
+
+After `StartupEncryptionCheck.MigrateAndRotateAsync` successfully encrypts plaintext rows for the first time (the `migrated > 0` branch), it writes a `ConfigItem` row:
+
+```
+ConfigName = "encryption.migration-completed-at"
+ConfigValue = <ISO8601 UTC timestamp of the migration>
+IsEncrypted = false
+```
+
+The settings UI treats this row as the trigger for a **second banner** — separate from the "plaintext warning" banner — that is shown until the operator acknowledges:
+
+> ✅ **Encryption enabled on <date>.** Historical backups (if any) of your config database are still plaintext. If you have cloud backups, snapshots, or any copies of `/config` older than <date>, rotate the following credentials now:
+> - Usenet provider passwords (on the provider's website)
+> - Radarr/Sonarr API keys (Settings → General → Security → API Key → Generate New)
+> - The NZBDAV SABnzbd API key (Settings → SABnzbd → Regenerate)
+>
+> [I've rotated my credentials — dismiss]
+
+The dismiss button posts to a small endpoint that writes:
+
+```
+ConfigName = "encryption.post-migration-acknowledged"
+ConfigValue = <ISO8601 UTC timestamp>
+IsEncrypted = false
+```
+
+The banner stops rendering when `post-migration-acknowledged` exists. Neither row is encrypted — they're operational metadata, not secrets. If the operator never clicks dismiss, the banner stays visible forever; that's the desired behavior.
+
+**Why two separate banners?** The plaintext-warning banner and the post-migration banner warn about completely different things:
+- Plaintext-warning: "your *current* secrets are unencrypted — turn encryption on"
+- Post-migration: "your *historical backups* are unencrypted — rotate credentials"
+
+A user who opts in mid-upgrade should see the post-migration banner *after* the plaintext-warning banner goes away. Conflating them would let one warning suppress the other and miss the backup-rotation point entirely.
+
+The `/api/encryption-status` endpoint is extended to return both signals:
+
+```json
+{
+  "keySet": true,
+  "plaintextSecretsCount": 0,
+  "bannerSeverity": "none",
+  "migrationCompletedAt": "2026-04-06T12:00:00Z",
+  "postMigrationAcknowledged": false
+}
+```
+
+The UI renders the plaintext-warning banner when `keySet === false`, and renders the post-migration banner when `migrationCompletedAt !== null && !postMigrationAcknowledged`.
