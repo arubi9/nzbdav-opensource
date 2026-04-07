@@ -27,6 +27,7 @@ public sealed class ObjectStorageSegmentCacheTests
         using var cache = new ObjectStorageSegmentCache(
             bucketName: "bucket",
             queueCapacity: 4,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
             tryReadAsync: (segmentId, ct) =>
             {
                 var body = Encoding.ASCII.GetBytes($"body:{segmentId}");
@@ -50,6 +51,7 @@ public sealed class ObjectStorageSegmentCacheTests
         using var cache = new ObjectStorageSegmentCache(
             bucketName: "bucket",
             queueCapacity: 4,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
             tryReadAsync: (_, _) => Task.FromResult<byte[]?>(null),
             writeAsync: (_, _) => Task.CompletedTask);
 
@@ -61,6 +63,22 @@ public sealed class ObjectStorageSegmentCacheTests
     }
 
     [Fact]
+    public async Task TryReadAsync_ReturnsNullOnTransientError()
+    {
+        using var cache = new ObjectStorageSegmentCache(
+            bucketName: "bucket",
+            queueCapacity: 4,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
+            tryReadAsync: (_, _) => throw new IOException("boom"),
+            writeAsync: (_, _) => Task.CompletedTask);
+
+        var stream = await cache.TryReadAsync("segment-a", CancellationToken.None);
+
+        Assert.Null(stream);
+        Assert.Equal(1, cache.L2Misses);
+    }
+
+    [Fact]
     public async Task EnqueueWrite_DropsOnFullQueue()
     {
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -68,6 +86,7 @@ public sealed class ObjectStorageSegmentCacheTests
         using var cache = new ObjectStorageSegmentCache(
             bucketName: "bucket",
             queueCapacity: 1,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
             tryReadAsync: (_, _) => Task.FromResult<byte[]?>(null),
             writeAsync: async (_, _) => await gate.Task.ConfigureAwait(false),
             startWriter: false);
@@ -77,5 +96,66 @@ public sealed class ObjectStorageSegmentCacheTests
 
         Assert.Equal(1, cache.L2WritesDropped);
         gate.TrySetResult();
+    }
+
+    [Fact]
+    public async Task EnqueueWrite_CompletesAsynchronously()
+    {
+        var wrote = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        using var cache = new ObjectStorageSegmentCache(
+            bucketName: "bucket",
+            queueCapacity: 4,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
+            tryReadAsync: (_, _) => Task.FromResult<byte[]?>(null),
+            writeAsync: (_, _) =>
+            {
+                wrote.TrySetResult();
+                return Task.CompletedTask;
+            });
+
+        cache.EnqueueWrite("segment-a", [1, 2, 3], SegmentCategory.SmallFile, null, "a.bin");
+        await wrote.Task.WaitAsync(TimeSpan.FromSeconds(1));
+
+        Assert.Equal(1, cache.L2Writes);
+    }
+
+    [Fact]
+    public void Dispose_DrainsWriterWithinBudget()
+    {
+        var writes = 0;
+
+        var cache = new ObjectStorageSegmentCache(
+            bucketName: "bucket",
+            queueCapacity: 4,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
+            tryReadAsync: (_, _) => Task.FromResult<byte[]?>(null),
+            writeAsync: async (_, _) =>
+            {
+                await Task.Delay(50);
+                Interlocked.Increment(ref writes);
+            });
+
+        cache.EnqueueWrite("segment-a", [1], SegmentCategory.Unknown, null, "a.bin");
+        cache.EnqueueWrite("segment-b", [2], SegmentCategory.Unknown, null, "b.bin");
+        cache.EnqueueWrite("segment-c", [3], SegmentCategory.Unknown, null, "c.bin");
+
+        cache.Dispose();
+
+        Assert.Equal(3, writes);
+    }
+
+    [Fact]
+    public void Dispose_IsIdempotent()
+    {
+        using var cache = new ObjectStorageSegmentCache(
+            bucketName: "bucket",
+            queueCapacity: 4,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
+            tryReadAsync: (_, _) => Task.FromResult<byte[]?>(null),
+            writeAsync: (_, _) => Task.CompletedTask);
+
+        cache.Dispose();
+        cache.Dispose();
     }
 }

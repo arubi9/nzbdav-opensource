@@ -10,6 +10,7 @@ namespace NzbWebDAV.Clients.Usenet.Caching;
 
 public sealed class ObjectStorageSegmentCache : IDisposable
 {
+    private readonly Func<CancellationToken, Task> _ensureBucketExistsAsync;
     private readonly Func<string, CancellationToken, Task<byte[]?>> _tryReadAsync;
     private readonly Func<WriteRequest, CancellationToken, Task> _writeAsync;
     private readonly CancellationTokenSource _shutdownCts = new();
@@ -18,6 +19,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
     private readonly int _queueCapacity;
     private readonly Task _writerTask;
     private volatile int _queueCount;
+    private volatile bool _shutdownRequested;
     private bool _disposed;
 
     private long _l2Hits;
@@ -37,6 +39,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         : this(
             bucketName: configManager.GetL2BucketName(),
             queueCapacity: configManager.GetL2WriteQueueCapacity(),
+            ensureBucketExistsAsync: CreateEnsureBucketDelegate(configManager),
             tryReadAsync: CreateReadDelegate(configManager),
             writeAsync: CreateWriteDelegate(configManager))
     {
@@ -45,6 +48,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
     public ObjectStorageSegmentCache(
         string bucketName,
         int queueCapacity,
+        Func<CancellationToken, Task> ensureBucketExistsAsync,
         Func<string, CancellationToken, Task<byte[]?>> tryReadAsync,
         Func<WriteRequest, CancellationToken, Task> writeAsync,
         bool startWriter = true)
@@ -53,6 +57,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
 
         BucketName = bucketName;
         _queueCapacity = queueCapacity;
+        _ensureBucketExistsAsync = ensureBucketExistsAsync;
         _tryReadAsync = tryReadAsync;
         _writeAsync = writeAsync;
         _writerTask = startWriter ? Task.Run(WriterLoopAsync) : Task.CompletedTask;
@@ -70,10 +75,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         if (_disposed)
             return;
 
-        if (_tryReadAsync == null)
-            return;
-
-        await Task.CompletedTask.WaitAsync(ct).ConfigureAwait(false);
+        await _ensureBucketExistsAsync(ct).ConfigureAwait(false);
     }
 
     public async Task<Stream?> TryReadAsync(string segmentId, CancellationToken ct)
@@ -81,7 +83,17 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         if (_disposed)
             return null;
 
-        var body = await _tryReadAsync(segmentId, ct).ConfigureAwait(false);
+        byte[]? body;
+        try
+        {
+            body = await _tryReadAsync(segmentId, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "L2 read failed for segment {SegmentId}", segmentId);
+            body = null;
+        }
+
         if (body is null)
         {
             Interlocked.Increment(ref _l2Misses);
@@ -122,11 +134,16 @@ public sealed class ObjectStorageSegmentCache : IDisposable
             return;
 
         _disposed = true;
-        _shutdownCts.Cancel();
+        _shutdownRequested = true;
         _queueSignal.Release();
         try
         {
-            _writerTask.Wait(TimeSpan.FromSeconds(10));
+            if (!_writerTask.Wait(TimeSpan.FromSeconds(10)))
+            {
+                _shutdownCts.Cancel();
+                _queueSignal.Release();
+                _writerTask.Wait(TimeSpan.FromSeconds(1));
+            }
         }
         catch
         {
@@ -138,7 +155,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
 
     private async Task WriterLoopAsync()
     {
-        while (!_shutdownCts.IsCancellationRequested)
+        while (true)
         {
             try
             {
@@ -168,7 +185,29 @@ public sealed class ObjectStorageSegmentCache : IDisposable
                     Log.Warning(ex, "L2 write failed for segment {SegmentId}", request.SegmentId);
                 }
             }
+
+            if (_shutdownRequested && _writeQueue.IsEmpty)
+                break;
         }
+    }
+
+    private static Func<CancellationToken, Task> CreateEnsureBucketDelegate(ConfigManager configManager)
+    {
+        var client = CreateClient(configManager);
+        var bucketName = configManager.GetL2BucketName();
+
+        return async ct =>
+        {
+            var existsArgs = new BucketExistsArgs()
+                .WithBucket(bucketName);
+            var exists = await client.BucketExistsAsync(existsArgs, ct).ConfigureAwait(false);
+            if (exists)
+                return;
+
+            var makeArgs = new MakeBucketArgs()
+                .WithBucket(bucketName);
+            await client.MakeBucketAsync(makeArgs, ct).ConfigureAwait(false);
+        };
     }
 
     private static Func<string, CancellationToken, Task<byte[]?>> CreateReadDelegate(ConfigManager configManager)
@@ -204,12 +243,22 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         return async (request, ct) =>
         {
             using var stream = new MemoryStream(request.Body, writable: false);
+            var headers = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["x-amz-meta-segment-id"] = request.SegmentId,
+                ["x-amz-meta-yenc-filename"] = request.YencFileName,
+                ["x-amz-meta-category"] = request.Category.ToString().ToLowerInvariant()
+            };
+            if (request.OwnerNzbId.HasValue)
+                headers["x-amz-meta-owner-nzb-id"] = request.OwnerNzbId.Value.ToString();
+
             var args = new PutObjectArgs()
                 .WithBucket(bucketName)
                 .WithObject(GetObjectKey(request.SegmentId))
                 .WithStreamData(stream)
                 .WithObjectSize(request.Body.Length)
-                .WithContentType("application/octet-stream");
+                .WithContentType("application/octet-stream")
+                .WithHeaders(headers);
             await client.PutObjectAsync(args, ct).ConfigureAwait(false);
         };
     }
@@ -219,7 +268,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         return new MinioClient()
             .WithEndpoint(configManager.GetL2Endpoint())
             .WithCredentials(configManager.GetL2AccessKey(), configManager.GetL2SecretKey())
-            .WithSSL(configManager.GetL2UseSsl())
+            .WithSSL(configManager.IsL2SslEnabled())
             .Build();
     }
 

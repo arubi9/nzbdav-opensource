@@ -284,11 +284,11 @@ public class ConfigManager
     }
 
     public string GetL2Endpoint()
-        => GetConfigValue("cache.l2.endpoint")
+        => StringUtil.EmptyToNull(GetConfigValue("cache.l2.endpoint"))
            ?? throw new InvalidOperationException("cache.l2.endpoint is required when L2 is enabled.");
 
     public string GetL2BucketName()
-        => GetConfigValue("cache.l2.bucket-name") ?? "nzbdav-segments";
+        => StringUtil.EmptyToNull(GetConfigValue("cache.l2.bucket-name")) ?? "nzbdav-segments";
 
     public string GetL2AccessKey()
         => StringUtil.EmptyToNull(GetConfigValue("cache.l2.access-key"))
@@ -298,9 +298,9 @@ public class ConfigManager
         => StringUtil.EmptyToNull(GetConfigValue("cache.l2.secret-key"))
            ?? EnvironmentUtil.GetRequiredVariable("NZBDAV_L2_SECRET_KEY");
 
-    public bool GetL2UseSsl()
+    public bool IsL2SslEnabled()
     {
-        var val = StringUtil.EmptyToNull(GetConfigValue("cache.l2.use-ssl"));
+        var val = StringUtil.EmptyToNull(GetConfigValue("cache.l2.ssl"));
         return val != null ? bool.Parse(val) : false;
     }
 
