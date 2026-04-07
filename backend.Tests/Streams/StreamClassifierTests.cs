@@ -101,4 +101,84 @@ public class StreamClassifierTests
 
         Assert.Equal(StreamClassification.Unknown, classifier.Classification);
     }
+
+    // --- I7: sequentiality tracking ---
+
+    [Fact]
+    public void FiveNonSequentialReads_DoesNotCommitViaSequentialPath()
+    {
+        // Reads at widely-spaced offsets (well beyond the 4MB tolerance) — each
+        // one resets the sequential counter to 1. After 5 reads we should NOT
+        // have committed via the sequential path.
+        var classifier = new StreamClassifier(RequestHint.Unknown, FileSize);
+
+        classifier.ObserveRead(0, 1000);                  // run=1
+        classifier.ObserveRead(10_000_000, 1000);         // gap=10M → run=1
+        classifier.ObserveRead(20_000_000, 1000);         // gap=10M → run=1
+        classifier.ObserveRead(30_000_000, 1000);         // gap=10M → run=1
+        classifier.ObserveRead(40_000_000, 1000);         // gap=10M → run=1
+
+        // Still Unknown at 5 reads — fallback only kicks in at 10.
+        Assert.Equal(StreamClassification.Unknown, classifier.Classification);
+    }
+
+    [Fact]
+    public void NonSequentialReadAfterFourSequentialReads_ResetsCounter()
+    {
+        // The 5th read jumps backward — that breaks the sequential run, so we
+        // must do 5 more sequential reads before committing.
+        var classifier = new StreamClassifier(RequestHint.Unknown, FileSize);
+
+        classifier.ObserveRead(0, SegmentSize);           // seq=1
+        classifier.ObserveRead(SegmentSize, SegmentSize); // seq=2
+        classifier.ObserveRead(SegmentSize * 2, SegmentSize); // seq=3
+        classifier.ObserveRead(SegmentSize * 3, SegmentSize); // seq=4
+        classifier.ObserveRead(90_000_000, SegmentSize);  // huge jump → seq=1
+
+        // Not committed yet — run reset.
+        Assert.Equal(StreamClassification.Unknown, classifier.Classification);
+
+        classifier.ObserveRead(90_000_000 + SegmentSize, SegmentSize); // seq=2
+        classifier.ObserveRead(90_000_000 + SegmentSize * 2, SegmentSize); // seq=3
+        classifier.ObserveRead(90_000_000 + SegmentSize * 3, SegmentSize); // seq=4
+
+        // Total reads = 8 now, still under the 10-read fallback and not enough
+        // sequential reads (4) to commit.
+        Assert.Equal(StreamClassification.Unknown, classifier.Classification);
+
+        classifier.ObserveRead(90_000_000 + SegmentSize * 4, SegmentSize); // seq=5
+
+        // Now the sequential path fires.
+        Assert.Equal(StreamClassification.Playback, classifier.Classification);
+    }
+
+    [Fact]
+    public void SmallForwardSkip_StaysWithinSequentialTolerance()
+    {
+        // A 2MB forward skip is within the 4MB tolerance — subsequent reads
+        // should still count as part of the sequential run.
+        var classifier = new StreamClassifier(RequestHint.Unknown, FileSize);
+
+        classifier.ObserveRead(0, 1_000_000);             // end=1M, seq=1
+        classifier.ObserveRead(3_000_000, 1_000_000);     // gap=2M → seq=2
+        classifier.ObserveRead(4_000_000, 1_000_000);     // seq=3
+        classifier.ObserveRead(5_000_000, 1_000_000);     // seq=4
+        classifier.ObserveRead(6_000_000, 1_000_000);     // seq=5 → Playback
+
+        Assert.Equal(StreamClassification.Playback, classifier.Classification);
+    }
+
+    [Fact]
+    public void TenNonSequentialReads_StillFallsBackToPlayback()
+    {
+        // The fallback path should fire for high-volume readers even when
+        // every read is non-sequential — we assume they're a player that's
+        // seeking aggressively rather than a probe (which gives up sooner).
+        var classifier = new StreamClassifier(RequestHint.Unknown, FileSize);
+
+        for (var i = 0; i < 10; i++)
+            classifier.ObserveRead(i * 10_000_000L, 1000);
+
+        Assert.Equal(StreamClassification.Playback, classifier.Classification);
+    }
 }

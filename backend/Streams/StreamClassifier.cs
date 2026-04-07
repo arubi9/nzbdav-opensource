@@ -13,11 +13,18 @@ public struct StreamClassifier
     private const int SequentialReadsForPlayback = 5;
     private const int MaxReadsBeforeFallback = 10;
     private const double LargeSeekThreshold = 0.5; // 50% of file length
+    // Tolerance for "sequential" — reads that land within 4 MB past the end
+    // of the previous read still count as sequential. Players with buffered
+    // HTTP clients may skip ahead by a few chunks; we want to consider that
+    // sequential. Probe seeks are typically much larger (half the file).
+    private const long SequentialToleranceBytes = 4 * 1_048_576;
 
     private readonly long _fileSize;
     private readonly RequestHint _hint;
     private int _readCount;
-    private long _lastReadOffset;
+    private int _sequentialReadCount;
+    private long _lastReadEndOffset;
+    private bool _hasObservedRead;
     private StreamClassification _classification;
 
     public StreamClassifier(RequestHint hint, long fileSize)
@@ -25,7 +32,9 @@ public struct StreamClassifier
         _hint = hint;
         _fileSize = fileSize;
         _readCount = 0;
-        _lastReadOffset = 0;
+        _sequentialReadCount = 0;
+        _lastReadEndOffset = 0;
+        _hasObservedRead = false;
         _classification = StreamClassification.Unknown;
     }
 
@@ -36,14 +45,35 @@ public struct StreamClassifier
         if (_classification != StreamClassification.Unknown) return;
 
         _readCount++;
-        _lastReadOffset = offset + length;
 
-        // Fallback: 10 reads with no large seek → Playback
-        if (_readCount >= MaxReadsBeforeFallback)
+        // Check sequentiality: was this read at (or just past) the previous read's end?
+        if (!_hasObservedRead)
+        {
+            // First read — counts as sequential by convention.
+            _sequentialReadCount = 1;
+        }
+        else
+        {
+            var gap = offset - _lastReadEndOffset;
+            if (gap >= 0 && gap <= SequentialToleranceBytes)
+                _sequentialReadCount++;
+            else
+                _sequentialReadCount = 1; // Reset — this is a new sequential run.
+        }
+
+        _hasObservedRead = true;
+        _lastReadEndOffset = offset + length;
+
+        // 5 SEQUENTIAL reads → Playback
+        if (_sequentialReadCount >= SequentialReadsForPlayback)
+        {
             _classification = StreamClassification.Playback;
+            return;
+        }
 
-        // 5 sequential reads → Playback
-        else if (_readCount >= SequentialReadsForPlayback)
+        // Fallback: 10 total reads with no large seek → Playback
+        // (Non-sequential but high-volume readers are still likely players.)
+        if (_readCount >= MaxReadsBeforeFallback)
             _classification = StreamClassification.Playback;
     }
 

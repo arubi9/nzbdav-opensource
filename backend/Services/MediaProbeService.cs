@@ -186,12 +186,20 @@ public class MediaProbeService : BackgroundService
 
             process.Start();
 
-            var output = await process.StandardOutput.ReadToEndAsync(ct).ConfigureAwait(false);
-            await process.WaitForExitAsync(ct).ConfigureAwait(false);
+            // I5 fix: drain stdout + stderr concurrently with WaitForExit. The
+            // previous sequential read-then-wait could deadlock when ffprobe
+            // filled its stderr buffer (e.g. on a stream it can't decode) —
+            // WaitForExit would hang forever because stderr was never drained.
+            var stdoutTask = process.StandardOutput.ReadToEndAsync(ct);
+            var stderrTask = process.StandardError.ReadToEndAsync(ct);
+            var exitTask = process.WaitForExitAsync(ct);
+            await Task.WhenAll(stdoutTask, stderrTask, exitTask).ConfigureAwait(false);
+
+            var output = await stdoutTask.ConfigureAwait(false);
 
             if (process.ExitCode != 0)
             {
-                var error = await process.StandardError.ReadToEndAsync(ct).ConfigureAwait(false);
+                var error = await stderrTask.ConfigureAwait(false);
                 Log.Debug("ffprobe failed (exit {Code}): {Error}", process.ExitCode, error);
                 return null;
             }

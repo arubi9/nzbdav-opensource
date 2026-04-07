@@ -44,18 +44,31 @@ public class ManifestController(DavDatabaseClient dbClient, LiveSegmentCache liv
             .ToListAsync(ct)
             .ConfigureAwait(false);
 
-        // Mark items that have pre-generated probe data
+        // Mark items that have pre-generated probe data and accumulate the ETag
+        // components as we go. XOR-based hashing catches the events an ETag must
+        // distinguish:
+        //   - Add/delete:      XOR(Id.GetHashCode()) changes.
+        //   - Probe generation: XOR(Id.GetHashCode() for items where HasProbeData) changes.
+        //   - Count change:    included explicitly to break ties on XOR collisions.
+        //   - Name/path change: XOR(NameHash) covers renames.
+        // The combination is collision-resistant enough for the manifest cache;
+        // a collision only costs a spurious cache hit that will be corrected on
+        // the next real change.
+        int idXor = 0;
+        int probeXor = 0;
+        int nameXor = 0;
         foreach (var item in items)
         {
             var probePath = Path.Combine(liveSegmentCache.CacheDirectory, $"probe-{item.Id:N}.json");
             item.HasProbeData = System.IO.File.Exists(probePath);
+
+            var idHash = item.Id.GetHashCode();
+            idXor ^= idHash;
+            nameXor ^= StringComparer.Ordinal.GetHashCode(item.Name);
+            if (item.HasProbeData) probeXor ^= idHash;
         }
 
-        // ETag based on item count + latest creation date
-        var latestCreated = items.Count > 0
-            ? items.Max(x => x.CreatedAt).Ticks.ToString()
-            : "0";
-        var etag = $"\"{items.Count}-{latestCreated}\"";
+        var etag = $"\"{items.Count:x}-{idXor:x8}-{nameXor:x8}-{probeXor:x8}\"";
 
         // Check If-None-Match
         if (Request.Headers.IfNoneMatch.Contains(etag))

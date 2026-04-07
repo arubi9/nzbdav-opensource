@@ -31,12 +31,20 @@ public class DatabaseStoreNzbFile(
     {
         httpContext.Items["DavItem"] = davNzbFile;
 
-        // Set initial cache context — SmallFile for video files (pre-classification default).
-        // When StreamClassifier commits to Playback, the context updates to VideoSegment.
+        // Initial cache tier: videos start as SmallFile (cheap to keep around during
+        // the probe window). When the StreamClassifier commits to Playback, the
+        // NzbFileStream mutates this SAME instance's Category → VideoSegment via
+        // the reference we hand it below. This is the C2 fix — we mutate one
+        // AsyncLocal instance instead of re-assigning AsyncLocal.Value, which
+        // does not flow upward out of a child async frame.
         var isVideo = FilenameUtil.IsVideoFile(davNzbFile.Name);
-        var category = isVideo ? SegmentCategory.SmallFile : SegmentCategoryClassifier.Classify(davNzbFile.Name);
+        var initialCategory = isVideo
+            ? SegmentCategory.SmallFile
+            : SegmentCategoryClassifier.Classify(davNzbFile.Name);
         var ownerId = davNzbFile.ParentId ?? davNzbFile.Id;
-        httpContext.Items[SegmentFetchContext.HttpContextItemKey] = SegmentFetchContext.Set(category, ownerId);
+        var segmentContext = SegmentFetchContext.SetReturningContext(
+            initialCategory, ownerId, out var contextScope);
+        httpContext.Items[SegmentFetchContext.HttpContextItemKey] = contextScope;
 
         var id = davNzbFile.Id;
         var file = await dbClient.GetNzbFileAsync(id, cancellationToken).ConfigureAwait(false);
@@ -45,35 +53,41 @@ public class DatabaseStoreNzbFile(
         // Extract RequestHint from Range header
         var hint = GetRequestHint();
 
-        // Create stream with classifier — warming starts lazily when classified as Playback
+        // warmingSessionId is captured by both the onClassifiedAsPlayback callback
+        // (which writes it) and the onSegmentIndexChanged callback (which reads it
+        // to forward progress). Both run on the stream's read loop so we don't
+        // need thread-safety primitives.
         string? warmingSessionId = null;
+
         var stream = usenetClient.GetFileStream(
             file.SegmentIds,
             FileSize,
             StreamingBufferSettings.LiveDefault(configManager.GetArticleBufferSize()),
             onSegmentIndexChanged: index =>
             {
-                // Lazy warming: start when classifier commits to Playback
-                if (warmingService != null && isVideo && warmingSessionId == null)
-                {
-                    warmingSessionId = warmingService.CreateSession(file.SegmentIds, cancellationToken);
-                }
-
                 if (warmingSessionId != null)
-                    warmingService!.UpdatePosition(warmingSessionId, index);
-
-                // Update cache context when past the probe window
-                if (index >= 5 && isVideo)
-                    SegmentFetchContext.UpdateCurrentCategory(SegmentCategory.VideoSegment);
+                    warmingService?.UpdatePosition(warmingSessionId, index);
             },
             requestHint: hint
         );
 
-        // Clean up warming on dispose
+        // C1 fix: warming is now classifier-driven — starts exactly when
+        // NzbFileStream's classifier commits to Playback, not on the first
+        // segment read (which fires for probes too).
         if (warmingService != null && isVideo)
         {
+            stream.BindClassifierCallbacks(
+                segmentContext: segmentContext,
+                onClassifiedAsPlayback: () =>
+                {
+                    warmingSessionId = warmingService.CreateSession(file.SegmentIds, cancellationToken);
+                });
+
             return new DisposableCallbackStream(stream,
-                onDispose: () => { if (warmingSessionId != null) warmingService.StopSession(warmingSessionId); },
+                onDispose: () =>
+                {
+                    if (warmingSessionId != null) warmingService.StopSession(warmingSessionId);
+                },
                 onDisposeAsync: () =>
                 {
                     if (warmingSessionId != null) warmingService.StopSession(warmingSessionId);
@@ -81,6 +95,10 @@ public class DatabaseStoreNzbFile(
                 });
         }
 
+        // Non-video file: still bind the context so the classifier can upgrade
+        // tier if classification unexpectedly commits to Playback on, say, an
+        // image file that FFmpeg decides to fully decode.
+        stream.BindClassifierCallbacks(segmentContext, onClassifiedAsPlayback: null);
         return stream;
     }
 

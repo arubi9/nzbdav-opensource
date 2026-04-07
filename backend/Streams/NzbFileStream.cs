@@ -24,6 +24,14 @@ public class NzbFileStream(
     private Stream? _innerStream;
     private Stream? _seekOverlayStream;
 
+    // Classifier callbacks — populated by BindClassifierCallbacks. Fired exactly
+    // once when the classifier commits to Playback. These are owned by the stream
+    // (not the store file) to sidestep the closure-timing and AsyncLocal-upward-
+    // propagation problems that plagued the previous implementation.
+    private SegmentFetchContext? _segmentContext;
+    private Action? _onClassifiedAsPlayback;
+    private bool _playbackCallbacksFired;
+
     public StreamClassification Classification => _classifier.Classification;
 
     public override bool CanSeek => true;
@@ -33,6 +41,23 @@ public class NzbFileStream(
     {
         get => _position;
         set => Seek(value, SeekOrigin.Begin);
+    }
+
+    /// <summary>
+    /// Wire the classifier to the stream's ambient cache-tier context and a
+    /// one-shot playback callback. Both are invoked exactly once, at the moment
+    /// the classifier commits to Playback.
+    ///
+    /// Call this BEFORE the first ReadAsync. The stream captures the refs and
+    /// fires them inline when classification commits, so effects land in the
+    /// same async frame as the read that triggered them.
+    /// </summary>
+    public void BindClassifierCallbacks(
+        SegmentFetchContext? segmentContext,
+        Action? onClassifiedAsPlayback)
+    {
+        _segmentContext = segmentContext;
+        _onClassifiedAsPlayback = onClassifiedAsPlayback;
     }
 
     public override void Flush()
@@ -56,10 +81,15 @@ public class NzbFileStream(
 
         if (_seekOverlayStream != null)
         {
+            var overlayReadPosition = _position;
             var overlayRead = await _seekOverlayStream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
             if (overlayRead > 0)
             {
                 _position += overlayRead;
+                // I8 fix: observe cache-served reads too — otherwise the
+                // classifier never fires for content that hits the seek overlay.
+                _classifier.ObserveRead(overlayReadPosition, overlayRead);
+                MaybeFirePlaybackCallbacks();
                 return overlayRead;
             }
 
@@ -70,11 +100,40 @@ public class NzbFileStream(
         }
 
         _innerStream ??= await GetFileStream(_position, cancellationToken).ConfigureAwait(false);
+        var readPosition = _position;
         var read = await _innerStream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
         if (read > 0)
-            _classifier.ObserveRead(_position, read);
+        {
+            _classifier.ObserveRead(readPosition, read);
+            MaybeFirePlaybackCallbacks();
+        }
         _position += read;
         return read;
+    }
+
+    private void MaybeFirePlaybackCallbacks()
+    {
+        if (_playbackCallbacksFired) return;
+        if (_classifier.Classification != StreamClassification.Playback) return;
+
+        _playbackCallbacksFired = true;
+
+        // Upgrade cache tier. The SegmentFetchContext instance flows via AsyncLocal,
+        // so mutating its Category here propagates to all callers holding the same
+        // reference — no need to re-set AsyncLocal.Value (which would not flow
+        // upward out of the async frame we're currently on).
+        _segmentContext?.UpgradeCategory(SegmentCategory.VideoSegment);
+
+        // Fire user callback (e.g. start read-ahead warming). Swallow exceptions
+        // so a broken callback doesn't abort the stream.
+        try
+        {
+            _onClassifiedAsPlayback?.Invoke();
+        }
+        catch
+        {
+            // Intentionally ignored — callback failures must not break playback.
+        }
     }
 
     public override long Seek(long offset, SeekOrigin origin)
