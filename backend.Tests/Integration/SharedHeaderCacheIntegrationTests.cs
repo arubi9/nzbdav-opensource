@@ -29,7 +29,7 @@ public sealed class SharedHeaderCacheIntegrationTests : IClassFixture<PostgresHe
         await sharedCache.WriteAsync("segment-a", CreateHeader("cached.bin", 0), CancellationToken.None);
 
         var configManager = new ConfigManager();
-        using var liveCache = new LiveSegmentCache(configManager, sharedCache);
+        using var liveCache = new LiveSegmentCache(configManager, sharedHeaderCache: sharedCache);
         var called = false;
 
         var header = await liveCache.GetOrAddHeaderAsync(
