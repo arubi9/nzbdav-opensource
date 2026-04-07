@@ -15,7 +15,9 @@ public sealed class NzbdavMetricsCollector
     private readonly Func<int> _getHealthyProviders;
     private readonly Func<int> _getWarmingSessions;
     private readonly Func<int> _getQueueProcessing;
+<<<<<<< HEAD
     private readonly Func<ObjectStorageSegmentCache?> _getL2Cache;
+    private readonly Func<SharedHeaderCache?> _getSharedHeaderCache;
 
     private readonly Gauge _cachedBytes;
     private readonly Gauge _cacheMaxBytes;
@@ -31,6 +33,9 @@ public sealed class NzbdavMetricsCollector
     private readonly Counter _l2WriteFailures;
     private readonly Counter _l2WritesDropped;
     private readonly Gauge _l2Enabled;
+    private readonly Counter _sharedHeaderHits;
+    private readonly Counter _sharedHeaderMisses;
+    private readonly Counter _sharedHeaderWriteFailures;
     private readonly Gauge _nntpLive;
     private readonly Gauge _nntpIdle;
     private readonly Gauge _nntpActive;
@@ -48,6 +53,9 @@ public sealed class NzbdavMetricsCollector
     private long _previousL2Writes;
     private long _previousL2WriteFailures;
     private long _previousL2WritesDropped;
+    private long _previousSharedHeaderHits;
+    private long _previousSharedHeaderMisses;
+    private long _previousSharedHeaderWriteFailures;
 
     private static readonly Gauge ActiveStreamsGauge = Prometheus.Metrics.CreateGauge(
         "nzbdav_streams_active",
@@ -62,7 +70,8 @@ public sealed class NzbdavMetricsCollector
         LiveSegmentCache cache,
         UsenetStreamingClient usenetClient,
         ReadAheadWarmingService warming,
-        QueueManager queue
+        QueueManager queue,
+        SharedHeaderCache? sharedHeaderCache = null
     ) : this(
         () => cache.GetStats(),
         () => cache.MaxCacheSizeBytes,
@@ -70,7 +79,8 @@ public sealed class NzbdavMetricsCollector
         () => usenetClient.HealthyProviderCount,
         () => warming.ActiveSessionCount,
         () => queue.GetInProgressQueueItem().queueItem != null ? 1 : 0,
-        () => null,
+        () => TryGetL2Cache(cache),
+        () => sharedHeaderCache,
         Prometheus.Metrics.DefaultRegistry,
         Prometheus.Metrics.WithCustomRegistry(Prometheus.Metrics.DefaultRegistry)
     )
@@ -85,6 +95,7 @@ public sealed class NzbdavMetricsCollector
         Func<int> getWarmingSessions,
         Func<int> getQueueProcessing,
         Func<ObjectStorageSegmentCache?> getL2Cache,
+        Func<SharedHeaderCache?> getSharedHeaderCache,
         CollectorRegistry registry,
         IMetricFactory metricFactory
     )
@@ -96,6 +107,7 @@ public sealed class NzbdavMetricsCollector
         _getWarmingSessions = getWarmingSessions;
         _getQueueProcessing = getQueueProcessing;
         _getL2Cache = getL2Cache;
+        _getSharedHeaderCache = getSharedHeaderCache;
 
         _cachedBytes = metricFactory.CreateGauge(
             "nzbdav_cache_bytes",
@@ -140,6 +152,15 @@ public sealed class NzbdavMetricsCollector
         _l2Enabled = metricFactory.CreateGauge(
             "nzbdav_l2_cache_enabled",
             "1 if L2 cache is enabled, 0 otherwise");
+        _sharedHeaderHits = metricFactory.CreateCounter(
+            "nzbdav_shared_header_cache_hits_total",
+            "Shared (Postgres) header cache hits");
+        _sharedHeaderMisses = metricFactory.CreateCounter(
+            "nzbdav_shared_header_cache_misses_total",
+            "Shared (Postgres) header cache misses");
+        _sharedHeaderWriteFailures = metricFactory.CreateCounter(
+            "nzbdav_shared_header_cache_write_failures_total",
+            "Shared (Postgres) header cache write failures");
 
         _nntpLive = metricFactory.CreateGauge(
             "nzbdav_nntp_connections_live",
@@ -197,6 +218,14 @@ public sealed class NzbdavMetricsCollector
                 IncrementCounter(_l2WritesDropped, l2.L2WritesDropped, ref _previousL2WritesDropped);
             }
 
+            var sharedHeaderCache = _getSharedHeaderCache();
+            if (sharedHeaderCache != null)
+            {
+                IncrementCounter(_sharedHeaderHits, sharedHeaderCache.Hits, ref _previousSharedHeaderHits);
+                IncrementCounter(_sharedHeaderMisses, sharedHeaderCache.Misses, ref _previousSharedHeaderMisses);
+                IncrementCounter(_sharedHeaderWriteFailures, sharedHeaderCache.WriteFailures, ref _previousSharedHeaderWriteFailures);
+            }
+
             var poolStats = _getPoolStats();
             if (poolStats != null)
             {
@@ -223,6 +252,12 @@ public sealed class NzbdavMetricsCollector
         if (delta > 0)
             counter.Inc(delta);
         previousValue = currentValue;
+    }
+
+    private static ObjectStorageSegmentCache? TryGetL2Cache(LiveSegmentCache cache)
+    {
+        var field = typeof(LiveSegmentCache).GetField("_l2Cache", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        return field?.GetValue(cache) as ObjectStorageSegmentCache;
     }
 
     public static void IncrementActiveStreams() => ActiveStreamsGauge.Inc();

@@ -1,11 +1,15 @@
 using System.Text;
 using System.Text.Json;
+using System.Reflection;
+using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Clients.Usenet.Connections;
 using NzbWebDAV.Clients.Usenet.Caching;
 using NzbWebDAV.Config;
+using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Metrics;
 using NzbWebDAV.Models;
+using NzbWebDAV.Services;
 using NzbWebDAV.Websocket;
 using Prometheus;
 
@@ -36,6 +40,7 @@ public sealed class NzbdavMetricsCollectorTests
             () => 1,
             () => 7,
             () => 1,
+            () => null,
             () => null,
             registry,
             factory
@@ -97,6 +102,7 @@ public sealed class NzbdavMetricsCollectorTests
             () => 0,
             () => 0,
             () => l2,
+            () => null,
             registry,
             factory
         );
@@ -107,6 +113,113 @@ public sealed class NzbdavMetricsCollectorTests
 
         Assert.Contains("nzbdav_l2_cache_enabled 1", metricsText);
         Assert.Contains("nzbdav_l2_cache_misses_total 1", metricsText);
+    }
+
+    [Fact]
+    public async Task CollectMetrics_ExportsSharedHeaderCacheState()
+    {
+        var registry = Prometheus.Metrics.NewCustomRegistry();
+        var factory = Prometheus.Metrics.WithCustomRegistry(registry);
+        var poolStats = CreatePoolStats(maxConnections: 5, live: 4, idle: 1);
+        var sharedHeaderCache = new SharedHeaderCache();
+
+        SetPrivateField(sharedHeaderCache, "_hits", 1L);
+        SetPrivateField(sharedHeaderCache, "_misses", 1L);
+        SetPrivateField(sharedHeaderCache, "_writeFailures", 1L);
+
+        var collector = new NzbdavMetricsCollector(
+            () => new LiveSegmentCacheStats(0, 0, 0, 0, 0, 0, 0, 0, 0),
+            () => 0L,
+            () => poolStats,
+            () => 1,
+            () => 0,
+            () => 0,
+            () => null,
+            () => sharedHeaderCache,
+            registry,
+            factory
+        );
+
+        await using var output = new MemoryStream();
+        await registry.CollectAndExportAsTextAsync(output);
+        var metricsText = Encoding.UTF8.GetString(output.ToArray());
+
+        Assert.Contains("nzbdav_shared_header_cache_hits_total 1", metricsText);
+        Assert.Contains("nzbdav_shared_header_cache_misses_total 1", metricsText);
+        Assert.Contains("nzbdav_shared_header_cache_write_failures_total 1", metricsText);
+    }
+
+    [Fact]
+    public async Task SweepOnce_RemovesExpiredRows_ButKeepsFreshRows()
+    {
+        var fixture = new NzbWebDAV.Tests.Clients.Usenet.Caching.PostgresHeaderCacheFixture();
+        if (!fixture.IsAvailable) return;
+
+        await fixture.InitializeAsync();
+        try
+        {
+            await fixture.ResetAsync();
+
+            await using (var dbContext = new DavDatabaseContext())
+            {
+                dbContext.YencHeaderCache.Add(new YencHeaderCacheEntry
+                {
+                    SegmentId = "old-segment",
+                    FileName = "old.bin",
+                    FileSize = 100,
+                    LineLength = 128,
+                    PartNumber = 1,
+                    TotalParts = 1,
+                    PartSize = 100,
+                    PartOffset = 0,
+                    CachedAt = DateTime.UtcNow.AddDays(-100)
+                });
+                dbContext.YencHeaderCache.Add(new YencHeaderCacheEntry
+                {
+                    SegmentId = "new-segment",
+                    FileName = "new.bin",
+                    FileSize = 100,
+                    LineLength = 128,
+                    PartNumber = 1,
+                    TotalParts = 1,
+                    PartSize = 100,
+                    PartOffset = 0,
+                    CachedAt = DateTime.UtcNow.AddDays(-10)
+                });
+                await dbContext.SaveChangesAsync();
+            }
+
+            var configManager = new ConfigManager();
+            configManager.UpdateValues(
+            [
+                new ConfigItem { ConfigName = "cache.metadata-retention-days", ConfigValue = "90" }
+            ]);
+
+            var sweeper = new YencHeaderCacheSweeper(configManager);
+            await sweeper.SweepOnce(CancellationToken.None);
+
+            await using var verifyContext = new DavDatabaseContext();
+            Assert.False(await verifyContext.YencHeaderCache.AnyAsync(x => x.SegmentId == "old-segment"));
+            Assert.True(await verifyContext.YencHeaderCache.AnyAsync(x => x.SegmentId == "new-segment"));
+        }
+        finally
+        {
+            await fixture.DisposeAsync();
+        }
+    }
+
+    private static UsenetSharp.Models.UsenetYencHeader CreateHeader(string fileName, long partOffset)
+    {
+        return new UsenetSharp.Models.UsenetYencHeader
+        {
+            FileName = fileName,
+            FileSize = partOffset + 100,
+            LineLength = 128,
+            PartNumber = 1,
+            TotalParts = 1,
+            PartSize = 100,
+            PartOffset = partOffset
+        };
     }
 
     private static ConnectionPoolStats CreatePoolStats(int maxConnections, int live, int idle)
@@ -135,5 +248,11 @@ public sealed class NzbdavMetricsCollectorTests
             new ConnectionPoolStats.ConnectionPoolChangedEventArgs(live, idle, maxConnections)
         );
         return poolStats;
+    }
+
+    private static void SetPrivateField(object target, string fieldName, long value)
+    {
+        var field = target.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);
+        field!.SetValue(target, value);
     }
 }
