@@ -149,6 +149,8 @@ public partial class Program
             builder.Services
                 .AddSingleton<IAuthFailureTracker, PostgresAuthFailureTracker>()
                 .AddHostedService<AuthFailuresSweeper>()
+                .AddHostedService<ConnectionPoolCoordinator>()
+                .AddHostedService<ConnectionPoolClaimSweeper>()
                 .AddHostedService<WebsocketOutboxListener>()
                 .AddHostedService<WebsocketOutboxSweeper>();
         }

@@ -51,17 +51,20 @@ All NZBDAV to load balancer traffic should use the private vRack network
 
 ## NNTP Connection Budget
 
-Each NZBDAV streaming node manages its own NNTP connection pool.
-Split your provider's total connection limit across nodes:
+In multi-node mode, set `usenet.max-download-connections` to the provider's
+TOTAL connection limit, not a manual per-node slice. NZBDAV coordinates the
+shared budget through Postgres and each node heartbeats its current claim.
 
-| Provider limit | Nodes | Per-node setting |
+Example:
+
+| Provider limit | Nodes | Setting |
 |---|---|---|
-| 30 connections | 2 streaming | `usenet.max-download-connections = 15` |
-| 50 connections | 3 streaming | `usenet.max-download-connections = 16` |
-| 50 connections | 5 streaming | `usenet.max-download-connections = 10` |
+| 30 connections | 2 streaming | `usenet.max-download-connections = 30` |
+| 50 connections | 3 streaming | `usenet.max-download-connections = 50` |
+| 50 connections | 5 streaming | `usenet.max-download-connections = 50` |
 
-Set via NZBDAV settings UI or environment variable.
-Leave 2-3 connections of headroom per node for health checks.
+Keep a few connections of provider-side headroom if you also use the same
+account outside NZBDAV.
 
 ### Alternative: Separate provider accounts
 

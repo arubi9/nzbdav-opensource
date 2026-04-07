@@ -23,15 +23,16 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
     /* -------------------------------- configuration -------------------------------- */
 
     public TimeSpan IdleTimeout { get; }
+    public int MaxConnections => Volatile.Read(ref _maxConnections);
     public int LiveConnections => _live;
     public int IdleConnections => _idleConnections.Count;
     public int ActiveConnections => _live - _idleConnections.Count;
-    public int AvailableConnections => _maxConnections - ActiveConnections;
+    public int AvailableConnections => Math.Max(0, MaxConnections - ActiveConnections);
 
     public event EventHandler<ConnectionPoolStats.ConnectionPoolChangedEventArgs>? OnConnectionPoolChanged;
 
     private readonly Func<CancellationToken, ValueTask<T>> _factory;
-    private readonly int _maxConnections;
+    private int _maxConnections;
 
     /* --------------------------------- state --------------------------------------- */
 
@@ -171,8 +172,18 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         OnConnectionPoolChanged?.Invoke(this, new ConnectionPoolStats.ConnectionPoolChangedEventArgs(
             _live,
             _idleConnections.Count,
-            _maxConnections
+            MaxConnections
         ));
+    }
+
+    public void Resize(int newMaxConnections)
+    {
+        if (newMaxConnections <= 0)
+            throw new ArgumentOutOfRangeException(nameof(newMaxConnections));
+
+        Interlocked.Exchange(ref _maxConnections, newMaxConnections);
+        _gate.UpdateMaxAllowed(newMaxConnections);
+        TriggerConnectionPoolChangedEvent();
     }
 
     /* =================== idle sweeper (background) ================================= */
