@@ -67,6 +67,7 @@ public sealed class DavDatabaseContext() : DbContext(CreateOptions())
     public DbSet<ConfigItem> ConfigItems => Set<ConfigItem>();
     public DbSet<BlobCleanupItem> BlobCleanupItems => Set<BlobCleanupItem>();
     public DbSet<MissingSegmentId> MissingSegmentIds => Set<MissingSegmentId>();
+    public DbSet<YencHeaderCacheEntry> YencHeaderCache => Set<YencHeaderCacheEntry>();
 
     // tables
     protected override void OnModelCreating(ModelBuilder b)
@@ -468,6 +469,27 @@ public sealed class DavDatabaseContext() : DbContext(CreateOptions())
                     x => x.ToUnixTimeSeconds(),
                     x => DateTimeOffset.FromUnixTimeSeconds(x)
                 );
+        });
+
+        b.Entity<YencHeaderCacheEntry>(e =>
+        {
+            e.ToTable("yenc_header_cache");
+            e.HasKey(x => x.SegmentId);
+
+            e.Property(x => x.FileSize)
+                .HasColumnType("BIGINT");
+
+            e.Property(x => x.PartSize)
+                .HasColumnType("BIGINT");
+
+            e.Property(x => x.PartOffset)
+                .HasColumnType("BIGINT");
+
+            e.Property(x => x.CachedAt)
+                .HasColumnType("TIMESTAMPTZ")
+                .HasDefaultValueSql("now()");
+
+            e.HasIndex(x => x.CachedAt);
         });
     }
 }

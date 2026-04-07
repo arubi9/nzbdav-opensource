@@ -276,6 +276,44 @@ namespace NzbWebDAV.Database.Migrations
                     b.ToTable("MissingSegmentIds", (string)null);
                 });
 
+            modelBuilder.Entity("NzbWebDAV.Database.Models.YencHeaderCacheEntry", b =>
+                {
+                    b.Property<string>("SegmentId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("FileName")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("FileSize")
+                        .HasColumnType("BIGINT");
+
+                    b.Property<int>("LineLength")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("PartNumber")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("TotalParts")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("PartSize")
+                        .HasColumnType("BIGINT");
+
+                    b.Property<long>("PartOffset")
+                        .HasColumnType("BIGINT");
+
+                    b.Property<DateTime>("CachedAt")
+                        .HasColumnType("TIMESTAMPTZ")
+                        .HasDefaultValueSql("now()");
+
+                    b.HasKey("SegmentId");
+
+                    b.HasIndex("CachedAt");
+
+                    b.ToTable("yenc_header_cache", (string)null);
+                });
+
             modelBuilder.Entity("NzbWebDAV.Database.Models.QueueItem", b =>
                 {
                     b.Property<Guid>("Id")
