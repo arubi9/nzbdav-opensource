@@ -178,7 +178,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
 
     public void Resize(int newMaxConnections)
     {
-        if (newMaxConnections <= 0)
+        if (newMaxConnections < 0)
             throw new ArgumentOutOfRangeException(nameof(newMaxConnections));
 
         Interlocked.Exchange(ref _maxConnections, newMaxConnections);

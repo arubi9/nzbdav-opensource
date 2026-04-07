@@ -45,6 +45,45 @@ public sealed class WebsocketOutboxListenerIntegrationTests : IClassFixture<Post
     }
 
     [Fact]
+    public async Task InitializeStateFromOutbox_RestoresLatestStatefulMessages_WithoutReplayingEvents()
+    {
+        if (!_fixture.IsAvailable) return;
+
+        await _fixture.ResetAsync();
+        using var environment = new backend.Tests.Config.TemporaryEnvironment(
+            ("DATABASE_URL", _fixture.ConnectionString),
+            ("DATABASE_URL_SESSION", _fixture.ConnectionString));
+
+        await using (var dbContext = new DavDatabaseContext())
+        {
+            dbContext.WebsocketOutbox.Add(new NzbWebDAV.Database.Models.WebsocketOutboxEntry
+            {
+                Topic = WebsocketTopic.QueueItemStatus.Name,
+                Payload = "item-1|Queued"
+            });
+            dbContext.WebsocketOutbox.Add(new NzbWebDAV.Database.Models.WebsocketOutboxEntry
+            {
+                Topic = WebsocketTopic.QueueItemStatus.Name,
+                Payload = "item-1|Downloading"
+            });
+            dbContext.WebsocketOutbox.Add(new NzbWebDAV.Database.Models.WebsocketOutboxEntry
+            {
+                Topic = WebsocketTopic.QueueItemAdded.Name,
+                Payload = "{\"queueItem\":\"event-only\"}"
+            });
+            await dbContext.SaveChangesAsync();
+        }
+
+        var manager = new WebsocketManager();
+        var listener = new WebsocketOutboxListener(manager);
+
+        await listener.InitializeStateFromOutbox(CancellationToken.None);
+
+        Assert.Equal("item-1|Downloading", GetLastMessage(manager, WebsocketTopic.QueueItemStatus));
+        Assert.Null(GetLastMessage(manager, WebsocketTopic.QueueItemAdded));
+    }
+
+    [Fact]
     public async Task SweepOnce_RemovesExpiredRows()
     {
         if (!_fixture.IsAvailable) return;

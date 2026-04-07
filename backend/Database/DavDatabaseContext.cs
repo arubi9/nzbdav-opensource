@@ -522,7 +522,6 @@ public sealed class DavDatabaseContext() : DbContext(CreateOptions())
                 .IsRequired();
             e.Property(x => x.Payload)
                 .HasColumnName("payload")
-                .HasColumnType("jsonb")
                 .IsRequired();
             e.Property(x => x.CreatedAt)
                 .HasColumnName("created_at")

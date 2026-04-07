@@ -129,7 +129,7 @@ namespace NzbWebDAV.Database.Migrations
                     b.Property<string>("Payload")
                         .IsRequired()
                         .HasColumnName("payload")
-                        .HasColumnType("jsonb");
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("Topic")
                         .IsRequired()

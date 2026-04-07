@@ -96,8 +96,17 @@ public sealed class ConnectionPoolCoordinator : BackgroundService
                     .Select(x => x.NodeId)
                     .Append(_nodeId)
                     .Distinct(StringComparer.Ordinal)
-                    .Count();
-                var desiredClaim = Math.Max(1, totalSlots / Math.Max(1, activeNodeIds));
+                    .OrderBy(x => x, StringComparer.Ordinal)
+                    .ToList();
+                var activeNodeCount = activeNodeIds.Count;
+                var fairShare = activeNodeCount == 0 ? 0 : totalSlots / activeNodeCount;
+                var remainder = activeNodeCount == 0 ? 0 : totalSlots % activeNodeCount;
+                var ordinal = activeNodeIds.FindIndex(x => x == _nodeId);
+                var desiredClaim = fairShare + (ordinal >= 0 && ordinal < remainder ? 1 : 0);
+                var claimedByOthers = activeClaims
+                    .Where(x => x.NodeId != _nodeId)
+                    .Sum(x => x.ClaimedSlots);
+                desiredClaim = Math.Min(desiredClaim, Math.Max(0, totalSlots - claimedByOthers));
 
                 var myClaim = activeClaims.FirstOrDefault(x => x.NodeId == _nodeId);
                 if (myClaim == null)

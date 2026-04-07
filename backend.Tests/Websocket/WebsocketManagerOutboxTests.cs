@@ -52,6 +52,29 @@ public sealed class WebsocketManagerOutboxTests : IClassFixture<PostgresHeaderCa
         Assert.Equal("{\"queueItem\":\"abc\"}", row.Payload);
     }
 
+    [Fact]
+    public async Task SendMessage_InMultiNodeMode_AllowsLegacyDelimitedPayloads()
+    {
+        if (!_fixture.IsAvailable) return;
+
+        await _fixture.ResetAsync();
+        using var environment = new backend.Tests.Config.TemporaryEnvironment(
+            ("DATABASE_URL", _fixture.ConnectionString),
+            ("DATABASE_URL_SESSION", _fixture.ConnectionString));
+
+        var manager = new WebsocketManager();
+        await manager.SendMessage(WebsocketTopic.QueueItemStatus, "item-1|Downloading");
+
+        await using var dbContext = new DavDatabaseContext();
+        var row = await dbContext.WebsocketOutbox
+            .OrderByDescending(x => x.Seq)
+            .FirstOrDefaultAsync();
+
+        Assert.NotNull(row);
+        Assert.Equal("item-1|Downloading", row!.Payload);
+        Assert.Equal("item-1|Downloading", GetLastMessage(manager, WebsocketTopic.QueueItemStatus));
+    }
+
     private static string? GetLastMessage(WebsocketManager manager, WebsocketTopic topic)
     {
         var field = typeof(WebsocketManager).GetField("_lastMessage", BindingFlags.Instance | BindingFlags.NonPublic);

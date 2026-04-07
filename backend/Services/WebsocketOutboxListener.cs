@@ -53,6 +53,37 @@ public sealed class WebsocketOutboxListener(WebsocketManager websocketManager) :
         }
     }
 
+    public async Task InitializeStateFromOutbox(CancellationToken cancellationToken)
+    {
+        await using var dbContext = new DavDatabaseContext();
+        var tailSeq = await dbContext.WebsocketOutbox
+            .OrderByDescending(x => x.Seq)
+            .Select(x => x.Seq)
+            .FirstOrDefaultAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        var stateRows = await dbContext.WebsocketOutbox
+            .Where(x => x.Seq <= tailSeq)
+            .OrderByDescending(x => x.Seq)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        var seenTopics = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var row in stateRows)
+        {
+            if (!WebsocketTopic.TryFromName(row.Topic, out var topic) || topic is null)
+                continue;
+            if (topic.Type != WebsocketTopic.TopicType.State)
+                continue;
+            if (!seenTopics.Add(topic.Name))
+                continue;
+
+            websocketManager.RememberLastMessage(topic, row.Payload);
+        }
+
+        _lastSeenSeq = tailSeq;
+    }
+
     private async Task RunListenerLoop(CancellationToken cancellationToken)
     {
         var sessionConnectionString = EnvironmentUtil.GetDatabaseUrlSession();
@@ -62,14 +93,7 @@ public sealed class WebsocketOutboxListener(WebsocketManager websocketManager) :
         await using var connection = new NpgsqlConnection(sessionConnectionString);
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
 
-        await using (var dbContext = new DavDatabaseContext())
-        {
-            _lastSeenSeq = await dbContext.WebsocketOutbox
-                .OrderByDescending(x => x.Seq)
-                .Select(x => x.Seq)
-                .FirstOrDefaultAsync(cancellationToken)
-                .ConfigureAwait(false);
-        }
+        await InitializeStateFromOutbox(cancellationToken).ConfigureAwait(false);
 
         await using (var command = new NpgsqlCommand("LISTEN websocket;", connection))
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);

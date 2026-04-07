@@ -58,6 +58,49 @@ public sealed class ConnectionPoolCoordinatorTests : IClassFixture<PostgresHeade
         Assert.Equal(1, appliedClaims[0]);
     }
 
+    [Fact]
+    public async Task RebalanceAllOnce_DoesNotOversubscribe_WhenMoreNodesThanSlots()
+    {
+        if (!_fixture.IsAvailable) return;
+
+        await _fixture.ResetAsync();
+        using var environment = new backend.Tests.Config.TemporaryEnvironment(("DATABASE_URL", _fixture.ConnectionString));
+        var configManager = CreateConfigManager(maxConnections: 2);
+
+        await using (var dbContext = new DavDatabaseContext())
+        {
+            dbContext.ConnectionPoolClaims.Add(new NzbWebDAV.Database.Models.ConnectionPoolClaim
+            {
+                NodeId = "node-a",
+                ProviderIndex = 0,
+                ClaimedSlots = 1,
+                HeartbeatAt = DateTime.UtcNow
+            });
+            dbContext.ConnectionPoolClaims.Add(new NzbWebDAV.Database.Models.ConnectionPoolClaim
+            {
+                NodeId = "node-b",
+                ProviderIndex = 0,
+                ClaimedSlots = 1,
+                HeartbeatAt = DateTime.UtcNow
+            });
+            await dbContext.SaveChangesAsync();
+        }
+
+        var appliedClaims = new Dictionary<int, int>();
+        var coordinator = new ConnectionPoolCoordinator(
+            configManager,
+            (providerIndex, claim) => appliedClaims[providerIndex] = claim,
+            () => new DavDatabaseContext(),
+            () => "node-c");
+
+        await coordinator.RebalanceAllOnce(CancellationToken.None);
+
+        Assert.Equal(0, appliedClaims[0]);
+        await using var verifyContext = new DavDatabaseContext();
+        var totalClaimed = await verifyContext.ConnectionPoolClaims.SumAsync(x => x.ClaimedSlots);
+        Assert.Equal(2, totalClaimed);
+    }
+
     private static ConfigManager CreateConfigManager(int maxConnections)
     {
         var configManager = new ConfigManager();

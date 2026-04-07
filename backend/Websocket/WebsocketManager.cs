@@ -81,14 +81,19 @@ public class WebsocketManager
 
     public Task FanoutToLocalSockets(WebsocketTopic topic, string message)
     {
-        lock (_lastMessage)
-            _lastMessage[topic] = message;
+        RememberLastMessage(topic, message);
         List<WebSocket>? authenticatedSockets;
         lock (_authenticatedSockets)
             authenticatedSockets = _authenticatedSockets.ToList();
         var topicMessage = new TopicMessage(topic, message);
         var bytes = new ArraySegment<byte>(Encoding.UTF8.GetBytes(topicMessage.ToJson()));
         return Task.WhenAll(authenticatedSockets.Select(x => SendMessage(x, bytes)));
+    }
+
+    public void RememberLastMessage(WebsocketTopic topic, string message)
+    {
+        lock (_lastMessage)
+            _lastMessage[topic] = message;
     }
 
     /// <summary>
