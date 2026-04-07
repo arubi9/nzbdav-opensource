@@ -136,6 +136,12 @@ public partial class Program
                 .AddHostedService<BlobCleanupService>()
                 .AddHostedService<SmallFilePrecacheService>()
                 .AddHostedService<MediaProbeService>();
+
+            // Registered LAST among ingest services so its StopAsync runs
+            // FIRST on shutdown — the host stops hosted services in reverse
+            // registration order. The snapshot flush must run before the
+            // database context and cache are torn down by the framework.
+            builder.Services.AddHostedService<SnapshotFlushOnShutdownService>();
         }
 
         if (WebApplicationAuthExtensions.IsWebdavAuthDisabled())
@@ -192,14 +198,12 @@ public partial class Program
         if (NodeRoleConfig.RunsStreaming)
             app.UseNWebDav();
         _ = app.Services.GetRequiredService<NzbdavMetricsCollector>();
-        app.Lifetime.ApplicationStopping.Register(() =>
-        {
-            SigtermUtil.Cancel();
-            ContentIndexSnapshotInterceptor.SnapshotWriter
-                .FlushAsync(CancellationToken.None)
-                .GetAwaiter()
-                .GetResult();
-        });
+        // SIGTERM cancellation token fires here so background work notices
+        // shutdown before the hosted-service graceful stop window begins.
+        // The snapshot flush itself is now handled by
+        // SnapshotFlushOnShutdownService.StopAsync (registered above) so we
+        // can await it cleanly instead of sync-bridging with GetResult().
+        app.Lifetime.ApplicationStopping.Register(SigtermUtil.Cancel);
         await app.RunAsync().ConfigureAwait(false);
     }
 }
