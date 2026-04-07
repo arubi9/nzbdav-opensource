@@ -82,14 +82,14 @@ public partial class Program
         // initialize the config-manager
         var configManager = new ConfigManager();
         await configManager.LoadConfig().ConfigureAwait(false);
-        ContentIndexSnapshotInterceptor.SnapshotWriter
-            .SetDebounceInterval(TimeSpan.FromSeconds(configManager.GetSnapshotDebounceSeconds()));
+        ContentIndexSnapshotInterceptor.SetDebounceInterval(
+            TimeSpan.FromSeconds(configManager.GetSnapshotDebounceSeconds()));
         configManager.OnConfigChanged += (_, eventArgs) =>
         {
             if (!eventArgs.ChangedConfig.ContainsKey("cache.snapshot-debounce-seconds")) return;
 
-            ContentIndexSnapshotInterceptor.SnapshotWriter
-                .SetDebounceInterval(TimeSpan.FromSeconds(configManager.GetSnapshotDebounceSeconds()));
+            ContentIndexSnapshotInterceptor.SetDebounceInterval(
+                TimeSpan.FromSeconds(configManager.GetSnapshotDebounceSeconds()));
         };
 
         // initialize websocket-manager
@@ -233,9 +233,15 @@ public partial class Program
         _ = app.Services.GetRequiredService<NzbdavMetricsCollector>();
         // SIGTERM cancellation token fires here so background work notices
         // shutdown before the hosted-service graceful stop window begins.
-        // The snapshot flush itself is now handled by
-        // SnapshotFlushOnShutdownService.StopAsync (registered above) so we
-        // can await it cleanly instead of sync-bridging with GetResult().
+        // SigtermUtil.Cancel is intentionally synchronous — it's just
+        // CancellationTokenSource.Cancel(), which is trivially fast and
+        // safe to call from a sync ApplicationStopping callback. Unlike
+        // the old snapshot flush which used .GetAwaiter().GetResult() to
+        // bridge an async call and could block the shutdown thread on a
+        // slow disk, this callback returns immediately. The snapshot
+        // flush itself is now handled by SnapshotFlushOnShutdownService
+        // (registered above as a hosted service) so its async work can
+        // await cleanly under the host's graceful-stop budget.
         app.Lifetime.ApplicationStopping.Register(SigtermUtil.Cancel);
         await app.RunAsync().ConfigureAwait(false);
     }

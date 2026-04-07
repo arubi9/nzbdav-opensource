@@ -21,13 +21,18 @@ namespace NzbWebDAV.Services;
 /// </summary>
 public sealed class SnapshotFlushOnShutdownService : IHostedService
 {
+    // Intentional no-op. This service exists only to hook into
+    // IHostedService.StopAsync for graceful shutdown — there is no
+    // foreground work to start. Static analyzers that flag "hosted
+    // service with empty StartAsync" as dead code are wrong in this
+    // case. See the class-level comment for the rationale.
     public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
         try
         {
-            await ContentIndexSnapshotInterceptor.SnapshotWriter
+            await ContentIndexSnapshotInterceptor
                 .FlushAsync(cancellationToken)
                 .ConfigureAwait(false);
         }

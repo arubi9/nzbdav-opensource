@@ -8,8 +8,30 @@ namespace NzbWebDAV.Database.Interceptors;
 
 public sealed class ContentIndexSnapshotInterceptor : SaveChangesInterceptor
 {
+    // Singleton writer shared across all DbContext instances. Kept
+    // internal so it's only accessible from within the NzbWebDAV
+    // assembly; external callers should use the public forwarding
+    // methods below instead of touching the field directly.
     internal static readonly DebouncedSnapshotWriter SnapshotWriter = new();
     private static readonly ConditionalWeakTable<DbContext, PendingSnapshotMarker> PendingSnapshots = new();
+
+    /// <summary>
+    /// Public entry point for flushing any pending snapshot write.
+    /// Used by <c>SnapshotFlushOnShutdownService.StopAsync</c> during
+    /// graceful shutdown. Prefer this over touching
+    /// <see cref="SnapshotWriter"/> directly so the field can stay
+    /// internal and its lifecycle stays owned by the interceptor.
+    /// </summary>
+    public static Task FlushAsync(CancellationToken cancellationToken)
+        => SnapshotWriter.FlushAsync(cancellationToken);
+
+    /// <summary>
+    /// Public entry point for updating the debounce interval from
+    /// config. Used by <c>Program.cs</c> on startup and on
+    /// <c>OnConfigChanged</c>. Same rationale as <see cref="FlushAsync"/>.
+    /// </summary>
+    public static void SetDebounceInterval(TimeSpan debounceInterval)
+        => SnapshotWriter.SetDebounceInterval(debounceInterval);
 
     public override InterceptionResult<int> SavingChanges(DbContextEventData eventData, InterceptionResult<int> result)
     {

@@ -46,7 +46,14 @@ services:
       interval: 10s
       timeout: 3s
       retries: 3
-      start_period: 30s
+      # First-boot budget: EF Core migrations (Database.EnsureCreatedAsync
+      # or explicit --db-migration) can exceed 60s on a cold Postgres,
+      # especially when the schema gets expanded by the multi-node
+      # hardening tables. Conservative 180s means a slow first boot
+      # doesn't mark the container unhealthy and kick it into a
+      # Docker-restart loop before migrations finish. After first boot
+      # the health check is evaluated normally at 10s intervals.
+      start_period: 180s
 
   nzbdav-stream-2:
     image: nzbdav:latest
@@ -66,7 +73,14 @@ services:
       interval: 10s
       timeout: 3s
       retries: 3
-      start_period: 30s
+      # First-boot budget: EF Core migrations (Database.EnsureCreatedAsync
+      # or explicit --db-migration) can exceed 60s on a cold Postgres,
+      # especially when the schema gets expanded by the multi-node
+      # hardening tables. Conservative 180s means a slow first boot
+      # doesn't mark the container unhealthy and kick it into a
+      # Docker-restart loop before migrations finish. After first boot
+      # the health check is evaluated normally at 10s intervals.
+      start_period: 180s
 
   nzbdav-ingest:
     image: nzbdav:latest
@@ -86,7 +100,14 @@ services:
       interval: 10s
       timeout: 3s
       retries: 3
-      start_period: 30s
+      # First-boot budget: EF Core migrations (Database.EnsureCreatedAsync
+      # or explicit --db-migration) can exceed 60s on a cold Postgres,
+      # especially when the schema gets expanded by the multi-node
+      # hardening tables. Conservative 180s means a slow first boot
+      # doesn't mark the container unhealthy and kick it into a
+      # Docker-restart loop before migrations finish. After first boot
+      # the health check is evaluated normally at 10s intervals.
+      start_period: 180s
 
   postgres:
     image: postgres:17
