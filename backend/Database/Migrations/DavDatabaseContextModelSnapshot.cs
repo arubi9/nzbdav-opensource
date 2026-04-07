@@ -63,6 +63,55 @@ namespace NzbWebDAV.Database.Migrations
                     b.ToTable("ConfigItems", (string)null);
                 });
 
+            modelBuilder.Entity("NzbWebDAV.Database.Models.YencHeaderCacheEntry", b =>
+                {
+                    b.Property<string>("SegmentId")
+                        .HasColumnName("segment_id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CachedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnName("cached_at")
+                        .HasColumnType("TEXT")
+                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+                    b.Property<string>("FileName")
+                        .IsRequired()
+                        .HasColumnName("file_name")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("FileSize")
+                        .HasColumnName("file_size")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("LineLength")
+                        .HasColumnName("line_length")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("PartOffset")
+                        .HasColumnName("part_offset")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("PartNumber")
+                        .HasColumnName("part_number")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("PartSize")
+                        .HasColumnName("part_size")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("TotalParts")
+                        .HasColumnName("total_parts")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("SegmentId");
+
+                    b.HasIndex("CachedAt")
+                        .HasDatabaseName("ix_yenc_header_cache_cached_at");
+
+                    b.ToTable("yenc_header_cache", (string)null);
+                });
+
             modelBuilder.Entity("NzbWebDAV.Database.Models.DavItem", b =>
                 {
                     b.Property<Guid>("Id")
