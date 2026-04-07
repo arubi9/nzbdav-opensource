@@ -16,4 +16,5 @@ nuget
 
 .idea/
 .vscode/
+.worktrees/
 .claude/worktrees/
