@@ -51,6 +51,8 @@ const defaultConfig = {
     "cache.l2.access-key": "",
     "cache.l2.secret-key": "",
     "cache.l2.ssl": "false",
+    "cache.metadata-shared-enabled": "true",
+    "cache.metadata-retention-days": "90",
 }
 
 export async function loader({ request }: Route.LoaderArgs) {
