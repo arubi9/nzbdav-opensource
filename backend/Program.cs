@@ -112,7 +112,6 @@ public partial class Program
             .AddWebdavBasicAuthentication(configManager)
             .AddSingleton(configManager)
             .AddSingleton(websocketManager)
-            .AddSingleton<LiveSegmentCache>()
             .AddSingleton<UsenetStreamingClient>()
             .AddSingleton<QueueManager>()
             .AddSingleton<ReadAheadWarmingService>()
@@ -127,6 +126,13 @@ public partial class Program
             .AddHostedService<AuthFailureTrackerSweeper>()
             .AddSingleton<ApiKeyAuthFilter>()
             .AddScoped<SabApiController>();
+
+        if (configManager.IsSharedHeaderCacheEnabled())
+            builder.Services.AddSingleton<SharedHeaderCache>();
+
+        builder.Services.AddSingleton(sp => new LiveSegmentCache(
+            configManager,
+            sp.GetService<SharedHeaderCache>()));
 
         if (NodeRoleConfig.RunsIngest)
         {

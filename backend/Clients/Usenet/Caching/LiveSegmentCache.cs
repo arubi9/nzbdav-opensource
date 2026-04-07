@@ -99,6 +99,7 @@ public sealed class LiveSegmentCache : IDisposable
     private readonly MemoryCache _headerCache;
     private readonly SemaphoreSlim _pruneLock = new(1, 1);
     private readonly object _headerCacheLock = new();
+    private readonly SharedHeaderCache? _sharedHeaderCache;
     private long _maxCacheSizeBytes;
     private TimeSpan _maxAge;
     private bool _disposed;
@@ -109,8 +110,11 @@ public sealed class LiveSegmentCache : IDisposable
     private long _dedupes;
     private long _evictions;
 
-    public LiveSegmentCache(ConfigManager configManager)
+    public LiveSegmentCache(
+        ConfigManager configManager,
+        SharedHeaderCache? sharedHeaderCache = null)
     {
+        _sharedHeaderCache = sharedHeaderCache;
         var configuredDir = configManager.GetCacheDirectory();
         CacheDirectory = configuredDir ?? Path.Join(DavDatabaseContext.ConfigPath, "stream-cache");
         _maxCacheSizeBytes = (long)configManager.GetCacheMaxSizeGb() * 1024 * 1024 * 1024;
@@ -140,9 +144,11 @@ public sealed class LiveSegmentCache : IDisposable
     public LiveSegmentCache(
         string cacheDirectory,
         long maxCacheSizeBytes = 10L * 1024 * 1024 * 1024,
-        TimeSpan? maxAge = null
+        TimeSpan? maxAge = null,
+        SharedHeaderCache? sharedHeaderCache = null
     )
     {
+        _sharedHeaderCache = sharedHeaderCache;
         CacheDirectory = cacheDirectory;
         _maxCacheSizeBytes = maxCacheSizeBytes;
         _maxAge = maxAge ?? TimeSpan.FromHours(6);
@@ -383,8 +389,20 @@ public sealed class LiveSegmentCache : IDisposable
         CancellationToken cancellationToken
     )
     {
+        if (_sharedHeaderCache != null)
+        {
+            var sharedHeader = await _sharedHeaderCache.TryReadAsync(segmentId, cancellationToken).ConfigureAwait(false);
+            if (sharedHeader != null)
+            {
+                StoreHeader(segmentId, sharedHeader);
+                return sharedHeader;
+            }
+        }
+
         var header = await headerFactory(cancellationToken).ConfigureAwait(false);
         StoreHeader(segmentId, header);
+        if (_sharedHeaderCache != null)
+            _ = _sharedHeaderCache.WriteAsync(segmentId, header, CancellationToken.None);
         return header;
     }
 

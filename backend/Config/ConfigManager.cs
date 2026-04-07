@@ -256,6 +256,18 @@ public class ConfigManager
     public string? GetCacheDirectory()
         => StringUtil.EmptyToNull(GetConfigValue("cache.directory"));
 
+    public bool IsSharedHeaderCacheEnabled()
+    {
+        if (string.IsNullOrEmpty(EnvironmentUtil.GetEnvironmentVariable("DATABASE_URL")))
+            return false;
+
+        var value = StringUtil.EmptyToNull(GetConfigValue("cache.metadata-shared-enabled"));
+        return value == null || bool.Parse(value);
+    }
+
+    public int GetMetadataRetentionDays()
+        => int.Parse(StringUtil.EmptyToNull(GetConfigValue("cache.metadata-retention-days")) ?? "90");
+
     public bool IsPrecacheEnabled()
     {
         var val = StringUtil.EmptyToNull(GetConfigValue("cache.precache-enable"));
