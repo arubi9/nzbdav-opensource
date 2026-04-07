@@ -1,5 +1,6 @@
 ﻿using System.Security.Cryptography;
 using NzbWebDAV.Models;
+using NzbWebDAV.Utils;
 
 namespace NzbWebDAV.Streams
 {
@@ -91,9 +92,9 @@ namespace NzbWebDAV.Streams
 
         public override int Read(byte[] buffer, int offset, int count)
         {
-            // Legacy sync readers still exist in some stream consumers, so keep the
-            // fallback until the pipeline is confirmed async end-to-end.
-            return ReadAsync(buffer, offset, count).GetAwaiter().GetResult();
+            // AES-encrypted RAR consumers may still issue sync reads. Dispatch
+            // onto BlockingIoScheduler to bound thread-pool consumption.
+            return BlockingIoScheduler.RunBlocking(() => ReadAsync(buffer, offset, count));
         }
 
         public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken ct)

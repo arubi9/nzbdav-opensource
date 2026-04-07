@@ -1,4 +1,5 @@
 ﻿using System.Buffers;
+using NzbWebDAV.Utils;
 using UsenetSharp.Streams;
 
 namespace NzbWebDAV.Streams;
@@ -32,23 +33,26 @@ public class CancellableStream(Stream innerStream, CancellationToken token) : Fa
     public override int Read(byte[] buffer, int offset, int count)
     {
         CheckDisposed();
-        // Archive readers still exercise synchronous reads, so preserve this bridge
-        // instead of breaking those call sites while the broader pipeline is upgraded.
-        return ReadAsync(buffer, offset, count, token)
-            .GetAwaiter()
-            .GetResult();
+        // Archive readers still exercise synchronous reads. Dispatch onto
+        // BlockingIoScheduler to bound thread-pool consumption under
+        // concurrent sync-read load.
+        return BlockingIoScheduler.RunBlocking(() => ReadAsync(buffer, offset, count, token));
     }
 
     public override int Read(Span<byte> buffer)
     {
         CheckDisposed();
-        // Span-based sync reads are still required by some consumers of wrapped archive streams.
+        // Span-based sync reads for archive consumers. Same bounded-scheduler
+        // rationale as the byte-array overload above. The rent/copy dance is
+        // required because Span<byte> can't cross an async boundary — it's
+        // ref-struct — so we materialize into pooled heap memory first.
         var array = ArrayPool<byte>.Shared.Rent(buffer.Length);
         try
         {
-            var buffer1 = new Memory<byte>(array, 0, buffer.Length);
-            var result = this.ReadAsync(buffer1, token).AsTask().GetAwaiter().GetResult();
-            buffer1.Span[..result].CopyTo(buffer);
+            var length = buffer.Length;
+            var result = BlockingIoScheduler.RunBlocking(
+                () => ReadAsync(new Memory<byte>(array, 0, length), token));
+            new ReadOnlySpan<byte>(array, 0, result).CopyTo(buffer);
             return result;
         }
         finally

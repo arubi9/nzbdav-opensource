@@ -3,6 +3,7 @@ using NzbWebDAV.Database.Models;
 using NzbWebDAV.Exceptions;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Models;
+using NzbWebDAV.Utils;
 
 namespace NzbWebDAV.Streams;
 
@@ -25,8 +26,12 @@ public class DavMultipartFileStream(
 
     public override int Read(byte[] buffer, int offset, int count)
     {
-        // Keep the sync bridge until WebDAV clients are confirmed to stay on ReadAsync only.
-        return ReadAsync(buffer, offset, count).GetAwaiter().GetResult();
+        // Sync-read bridge for WebDAV clients that don't use ReadAsync (older
+        // rclone, Windows WebClient, some third-party archive libs). Dispatch
+        // onto BlockingIoScheduler so the blocking await doesn't saturate the
+        // default thread-pool under concurrent sync-read load. See
+        // BlockingIoScheduler.cs for the rationale.
+        return BlockingIoScheduler.RunBlocking(() => ReadAsync(buffer, offset, count));
     }
 
     public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)

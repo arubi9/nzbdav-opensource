@@ -22,8 +22,10 @@ public class MultipartFileStream(MultipartFile multipartFile, INntpClient usenet
 
     public override int Read(byte[] buffer, int offset, int count)
     {
-        // Multipart archive consumers may still request synchronous reads through third-party APIs.
-        return ReadAsync(buffer, offset, count).GetAwaiter().GetResult();
+        // Multipart archive consumers (e.g. RarProcessor, some NzbFile
+        // deobfuscation paths) still issue sync reads. Dispatch onto
+        // BlockingIoScheduler to bound thread-pool consumption.
+        return BlockingIoScheduler.RunBlocking(() => ReadAsync(buffer, offset, count));
     }
 
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
