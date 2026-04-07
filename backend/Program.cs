@@ -123,6 +123,7 @@ public partial class Program
             .AddScoped<IStore, DatabaseStore>()
             .AddScoped<GetAndHeadHandlerPatch>()
             .AddSingleton<AuthFailureTracker>()
+            .AddHostedService<AuthFailureTrackerSweeper>()
             .AddSingleton<ApiKeyAuthFilter>()
             .AddScoped<SabApiController>();
 
