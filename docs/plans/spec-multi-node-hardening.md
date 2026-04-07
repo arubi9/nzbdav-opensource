@@ -142,15 +142,21 @@ path. PgBouncer supports running multiple pool modes on different ports.
 
 ### PgBouncer config
 
+**Port convention:** both PgBouncer instances listen on 5432 inside their
+own container. The docker service name (`pgbouncer` vs
+`pgbouncer-session`) routes traffic to the right one. This is simpler
+than running two ports on one container and matches the edoburu/pgbouncer
+image's default `LISTEN_PORT=5432`.
+
 ```ini
-# /etc/pgbouncer/pgbouncer.ini
+# pgbouncer.ini — transaction pool (for normal EF Core queries)
 
 [databases]
 nzbdav = host=postgres port=5432 dbname=nzbdav
 
 [pgbouncer]
 listen_addr = 0.0.0.0
-listen_port = 6432          ; transaction-pool port — for normal EF Core
+listen_port = 5432          ; container-internal, app connects via service name
 pool_mode = transaction
 max_client_conn = 500
 default_pool_size = 25
@@ -163,21 +169,21 @@ log_disconnections = 0
 log_pooler_errors = 1
 ```
 
-A **second PgBouncer instance** (or same binary on a different port — the
-latter is simpler) for `LISTEN/NOTIFY`:
-
 ```ini
-# /etc/pgbouncer/pgbouncer-session.ini
+# pgbouncer-session.ini — session pool (for LISTEN/NOTIFY AND the
+# NOTIFY-side of Item 3's outbox publisher; see "NOTIFY reliability"
+# note in Item 3 below)
 
 [databases]
 nzbdav = host=postgres port=5432 dbname=nzbdav
 
 [pgbouncer]
 listen_addr = 0.0.0.0
-listen_port = 6433          ; session-pool port — for LISTEN/NOTIFY subscribers
+listen_port = 5432          ; container-internal
 pool_mode = session
-max_client_conn = 20        ; small — only the WebsocketListener tasks connect here
-default_pool_size = 5
+max_client_conn = 50        ; higher than "listener-only" would need —
+                            ;   publishers ALSO use this pool for NOTIFY
+default_pool_size = 10
 server_lifetime = 3600
 ```
 
@@ -206,8 +212,8 @@ session-scoped features. Known-compatible:
 # Before (DavDatabaseContext.cs:43):
 Host={host};Port={port};Database={db};Username={u};Password={p};Pooling=true;MinPoolSize=5;MaxPoolSize=50
 
-# After — transaction pool:
-Host=pgbouncer;Port=6432;Database=nzbdav;Username=nzbdav;Password=nzbdav;Pooling=true;MinPoolSize=2;MaxPoolSize=50;No Reset On Close=true;Server Compatibility Mode=Redshift
+# After — transaction pool (normal EF Core path):
+Host=pgbouncer;Port=5432;Database=nzbdav;Username=nzbdav;Password=nzbdav;Pooling=true;MinPoolSize=2;MaxPoolSize=50;No Reset On Close=true;Server Compatibility Mode=Redshift
 
 # "No Reset On Close=true" — PgBouncer handles connection reset between
 #   transactions; Npgsql shouldn't also try to reset on connection close.
@@ -216,11 +222,16 @@ Host=pgbouncer;Port=6432;Database=nzbdav;Username=nzbdav;Password=nzbdav;Pooling
 #   covers both).
 ```
 
-And for the session pool (used only by the websocket listener):
+And for the session pool (used by the websocket listener AND by the
+outbox publisher's NOTIFY path — see Item 3's "NOTIFY reliability" note):
 
 ```
-Host=pgbouncer;Port=6433;Database=nzbdav;Username=nzbdav;Password=nzbdav;Pooling=true;MinPoolSize=1;MaxPoolSize=3
+Host=pgbouncer-session;Port=5432;Database=nzbdav;Username=nzbdav;Password=nzbdav;Pooling=true;MinPoolSize=1;MaxPoolSize=10
 ```
+
+Pool size 10 is sized for: 1 dedicated listener task per streaming node +
+headroom for the publisher's NOTIFY calls (which are brief and released
+immediately after the NOTIFY statement completes).
 
 ### Deployment changes
 
@@ -258,9 +269,8 @@ Add a `pgbouncer` service to `docs/deployment/docker-compose.multi-node.yml`:
       DB_PASSWORD: nzbdav
       DB_NAME: nzbdav
       POOL_MODE: session
-      MAX_CLIENT_CONN: 20
-      DEFAULT_POOL_SIZE: 5
-      LISTEN_PORT: 5432
+      MAX_CLIENT_CONN: 50          # publishers + listeners
+      DEFAULT_POOL_SIZE: 10
     depends_on:
       postgres:
         condition: service_healthy
@@ -271,11 +281,15 @@ Update each nzbdav-* service:
 ```yaml
     environment:
       DATABASE_URL: Host=pgbouncer;Port=5432;Database=nzbdav;Username=nzbdav;Password=nzbdav;Pooling=true;MinPoolSize=2;MaxPoolSize=50;No Reset On Close=true;Server Compatibility Mode=Redshift
-      DATABASE_URL_SESSION: Host=pgbouncer-session;Port=5432;Database=nzbdav;Username=nzbdav;Password=nzbdav;Pooling=true;MinPoolSize=1;MaxPoolSize=3
+      DATABASE_URL_SESSION: Host=pgbouncer-session;Port=5432;Database=nzbdav;Username=nzbdav;Password=nzbdav;Pooling=true;MinPoolSize=1;MaxPoolSize=10
 ```
 
-`DATABASE_URL_SESSION` is new — read only by the websocket listener code
-in Item 3.
+`DATABASE_URL_SESSION` is new — read by BOTH the websocket listener task
+(one long-lived `LISTEN` connection per streaming node) AND by the outbox
+publisher's NOTIFY call (see Item 3's "NOTIFY reliability" note — the
+NOTIFY cannot go through the transaction-pool because PgBouncer may
+silently drop it when the backend is returned to the pool at transaction
+commit).
 
 ### Migration execution
 
@@ -354,21 +368,58 @@ public async Task SendMessage(WebsocketTopic topic, object payload)
         return;
     }
 
-    // Multi-node Postgres mode: write to outbox table, then NOTIFY
-    // to wake up all listening nodes. The local node will see its
-    // own NOTIFY and fan out normally — no double-publish because
-    // the listener path is the only one that calls FanoutToLocalSockets.
-    await using var dbContext = new DavDatabaseContext();
-    dbContext.WebsocketOutbox.Add(new WebsocketOutboxEntry
+    // Multi-node Postgres mode: write to outbox table (via transaction
+    // pool) then fire NOTIFY (via SESSION pool — see below). Listeners
+    // catch up via the outbox even if the NOTIFY is lost.
+    await using (var dbContext = new DavDatabaseContext())
     {
-        Topic = topic.ToString(),
-        Payload = JsonSerializer.Serialize(payload),
-    });
-    await dbContext.SaveChangesAsync();
+        dbContext.WebsocketOutbox.Add(new WebsocketOutboxEntry
+        {
+            Topic = topic.ToString(),
+            Payload = JsonSerializer.Serialize(payload),
+        });
+        await dbContext.SaveChangesAsync();
+    }
 
-    // NOTIFY fires outside the transaction commit so all listeners
-    // (including our own) see a consistent state.
-    await dbContext.Database.ExecuteSqlRawAsync("NOTIFY websocket");
+    // NOTIFY RELIABILITY: this call MUST NOT go through the PgBouncer
+    // transaction pool. PgBouncer's transaction-pool mode can silently
+    // drop NOTIFYs because it returns the backend connection to the
+    // pool at COMMIT — the NOTIFY never reaches the server's notify
+    // queue, or it reaches the wrong backend with no listeners.
+    //
+    // The fix: use a dedicated connection that goes through the
+    // pgbouncer-session pool (session-mode), where the backend
+    // connection is NOT released between commands. The NOTIFY
+    // reliably lands on a backend that Postgres's LISTEN/NOTIFY
+    // machinery can route to subscribers.
+    //
+    // We use a SEPARATE NpgsqlConnection here (not the DavDatabaseContext)
+    // because DavDatabaseContext is configured to use DATABASE_URL
+    // (transaction pool). The session-pool connection is cheap —
+    // NOTIFY is one statement, we release immediately.
+    //
+    // NOTIFY failure is logged but not retried. The outbox row is
+    // already committed, so listeners will pick it up on their next
+    // 30-second catch-up poll. The NOTIFY is a latency optimization,
+    // not a reliability mechanism.
+    try
+    {
+        var sessionConnString = EnvironmentUtil.GetEnvironmentVariable("DATABASE_URL_SESSION")
+            ?? throw new InvalidOperationException(
+                "DATABASE_URL_SESSION is required in multi-node mode for NOTIFY publishing.");
+        await using var sessionConn = new Npgsql.NpgsqlConnection(sessionConnString);
+        await sessionConn.OpenAsync();
+        await using var notifyCmd = new Npgsql.NpgsqlCommand("NOTIFY websocket", sessionConn);
+        await notifyCmd.ExecuteNonQueryAsync();
+        // Connection release on Dispose returns the backend to the
+        // session pool; PgBouncer holds it open for reuse.
+    }
+    catch (Exception ex)
+    {
+        Log.Warning(ex,
+            "Websocket NOTIFY failed — subscribers will catch up via the 30-second poll. " +
+            "Check pgbouncer-session health if this persists.");
+    }
 }
 ```
 
@@ -376,6 +427,13 @@ Note: in multi-node mode, the local-fanout call is REMOVED from the
 publish path. The local node receives its own NOTIFY back via the
 LISTEN loop and fans out from there. This guarantees every node sees
 events in the same order (the outbox seq order).
+
+**Crash-safety:** if the NOTIFY fails (e.g., pgbouncer-session container
+is down), the row is already committed to the outbox table, so
+subscribers will pick it up on their next periodic catch-up poll
+(max 30 seconds stale). We log the NOTIFY failure as a warning but do
+not retry — the outbox + poll path is the reliability guarantee, and
+the NOTIFY is a latency optimization.
 
 ### Subscribe path
 
