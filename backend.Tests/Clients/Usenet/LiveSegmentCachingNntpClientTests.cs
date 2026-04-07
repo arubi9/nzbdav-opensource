@@ -196,6 +196,65 @@ public class LiveSegmentCachingNntpClientTests
         Assert.Equal("segment-a", writes[0].SegmentId);
     }
 
+    [Fact]
+    public async Task InvalidL2Metadata_FallsThroughToNntp()
+    {
+        await using var cacheScope = new TempCacheScope();
+        var fakeNntpClient = new FakeNntpClient()
+            .AddSegment("segment-a", Encoding.ASCII.GetBytes("segment-a"), partOffset: 0);
+        using var l2Cache = new ObjectStorageSegmentCache(
+            bucketName: "bucket",
+            queueCapacity: 4,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
+            tryReadAsync: (_, _) => Task.FromResult<ObjectStorageSegmentCache.ReadResult?>(
+                new ObjectStorageSegmentCache.ReadResult(
+                    Encoding.ASCII.GetBytes("segment-a"),
+                    new Dictionary<string, string>())),
+            writeAsync: (_, _) => Task.CompletedTask);
+
+        using var liveCache = new LiveSegmentCache(cacheScope.Path, l2Cache: l2Cache);
+        using var client = new LiveSegmentCachingNntpClient(fakeNntpClient, liveCache);
+
+        var response = await client.DecodedBodyAsync("segment-a", CancellationToken.None);
+        await using (response.Stream)
+        {
+            Assert.Equal("segment-a", Encoding.ASCII.GetString(await ReadAllBytesAsync(response.Stream)));
+        }
+
+        Assert.Equal(1, fakeNntpClient.DecodedBodyCallCount);
+    }
+
+    [Fact]
+    public async Task L2Promotion_PreservesCategoryAndOwnerMetadata()
+    {
+        await using var cacheScope = new TempCacheScope();
+        var ownerId = Guid.NewGuid();
+        using var l2Cache = new ObjectStorageSegmentCache(
+            bucketName: "bucket",
+            queueCapacity: 4,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
+            tryReadAsync: (_, _) => Task.FromResult<ObjectStorageSegmentCache.ReadResult?>(
+                new ObjectStorageSegmentCache.ReadResult(
+                    Encoding.ASCII.GetBytes("segment-a"),
+                    new Dictionary<string, string>
+                    {
+                        ["x-amz-meta-yenc-header"] = System.Text.Json.JsonSerializer.Serialize(CreateHeader("segment.bin")),
+                        ["x-amz-meta-category"] = "small_file",
+                        ["x-amz-meta-owner-nzb-id"] = ownerId.ToString()
+                    })),
+            writeAsync: (_, _) => Task.CompletedTask);
+
+        using var liveCache = new LiveSegmentCache(cacheScope.Path, l2Cache: l2Cache);
+        using var client = new LiveSegmentCachingNntpClient(new FakeNntpClient(), liveCache);
+
+        var response = await client.DecodedBodyAsync("segment-a", CancellationToken.None);
+        await response.Stream.DisposeAsync();
+
+        Assert.Equal(1, liveCache.GetStats().SmallFileCount);
+        liveCache.EvictByOwner(ownerId);
+        Assert.False(liveCache.HasBody("segment-a"));
+    }
+
     private static async Task<byte[]> ReadAllBytesAsync(Stream stream)
     {
         using var memoryStream = new MemoryStream();

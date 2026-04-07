@@ -39,6 +39,12 @@ public sealed class LiveSegmentCache : IDisposable
         BodyFetchOrigin Origin
     );
 
+    private readonly record struct L2BodyFetchSource(
+        BodyFetchSource Source,
+        SegmentCategory Category,
+        Guid? OwnerNzbId
+    );
+
     private sealed class CacheEntry
     {
         private UsenetArticleHeader? _articleHeaders;
@@ -418,14 +424,17 @@ public sealed class LiveSegmentCache : IDisposable
             if (l2Read != null)
             {
                 var l2Source = BuildBodyFetchSourceFromL2(segmentId, l2Read);
-                var promoted = await StoreBodySourceAsync(
-                    segmentId,
-                    l2Source,
-                    cancellationToken,
-                    category,
-                    ownerNzbId,
-                    enqueueL2Write: false).ConfigureAwait(false);
-                return new BodyFetchOutcome(promoted, BodyFetchOrigin.L2);
+                if (l2Source != null)
+                {
+                    var promoted = await StoreBodySourceAsync(
+                        segmentId,
+                        l2Source.Value.Source,
+                        cancellationToken,
+                        l2Source.Value.Category,
+                        l2Source.Value.OwnerNzbId,
+                        enqueueL2Write: false).ConfigureAwait(false);
+                    return new BodyFetchOutcome(promoted, BodyFetchOrigin.L2);
+                }
             }
         }
 
@@ -535,25 +544,50 @@ public sealed class LiveSegmentCache : IDisposable
         }
     }
 
-    private static BodyFetchSource BuildBodyFetchSourceFromL2(
+    private static L2BodyFetchSource? BuildBodyFetchSourceFromL2(
         string segmentId,
         ObjectStorageSegmentCache.ReadResult readResult)
     {
         if (!readResult.Metadata.TryGetValue("x-amz-meta-yenc-header", out var headerJson))
         {
-            throw new InvalidOperationException($"L2 metadata missing yEnc header for segment {segmentId}.");
+            Log.Debug("L2 metadata missing yEnc header for segment {SegmentId}; falling back to NNTP.", segmentId);
+            return null;
         }
 
         var yencHeader = JsonSerializer.Deserialize<UsenetYencHeader>(headerJson);
         if (yencHeader is null)
         {
-            throw new InvalidOperationException($"Failed to deserialize yEnc header metadata for segment {segmentId}.");
+            Log.Debug("L2 metadata contains invalid yEnc header for segment {SegmentId}; falling back to NNTP.", segmentId);
+            return null;
         }
 
-        return new BodyFetchSource(
-            new MemoryStream(readResult.Body, writable: false),
-            yencHeader,
-            ArticleHeaders: null);
+        var category = SegmentCategory.Unknown;
+        if (readResult.Metadata.TryGetValue("x-amz-meta-category", out var categoryValue))
+        {
+            category = categoryValue switch
+            {
+                "smallfile" => SegmentCategory.SmallFile,
+                "small_file" => SegmentCategory.SmallFile,
+                "videosegment" => SegmentCategory.VideoSegment,
+                "video_segment" => SegmentCategory.VideoSegment,
+                _ => SegmentCategory.Unknown
+            };
+        }
+
+        Guid? ownerNzbId = null;
+        if (readResult.Metadata.TryGetValue("x-amz-meta-owner-nzb-id", out var ownerValue) &&
+            Guid.TryParse(ownerValue, out var parsedOwner))
+        {
+            ownerNzbId = parsedOwner;
+        }
+
+        return new L2BodyFetchSource(
+            new BodyFetchSource(
+                new MemoryStream(readResult.Body, writable: false),
+                yencHeader,
+                ArticleHeaders: null),
+            category,
+            ownerNzbId);
     }
 
     private bool TryGetFreshEntry(string segmentId, out CacheEntry entry)
