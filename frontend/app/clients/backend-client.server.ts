@@ -309,7 +309,8 @@ export type EncryptionStatus = {
     plaintextSecretsCount: number,
     bannerSeverity: "none" | "info" | "warning",
     migrationCompletedAt: string | null,
-    postMigrationAcknowledged: string | null,
+    postMigrationAcknowledged: boolean,
+    postMigrationAcknowledgedAt: string | null,
 }
 
 export type TestUsenetConnectionRequest = {

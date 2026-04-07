@@ -1,5 +1,7 @@
 using System.Text;
 using NzbWebDAV.Clients.Usenet.Caching;
+using NzbWebDAV.Config;
+using NzbWebDAV.Database.Models;
 using UsenetSharp.Models;
 
 namespace NzbWebDAV.Tests.Clients.Usenet.Caching;
@@ -159,6 +161,45 @@ public sealed class ObjectStorageSegmentCacheTests
 
         cache.Dispose();
         cache.Dispose();
+    }
+
+    [Fact]
+    public async Task DeleteByOwnerAsync_UsesInjectedDeleteDelegate()
+    {
+        Guid? deletedOwner = null;
+
+        using var cache = new ObjectStorageSegmentCache(
+            bucketName: "bucket",
+            queueCapacity: 4,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
+            tryReadAsync: (_, _) => Task.FromResult<ObjectStorageSegmentCache.ReadResult?>(null),
+            writeAsync: (_, _) => Task.CompletedTask,
+            deleteByOwnerAsync: (ownerNzbId, _) =>
+            {
+                deletedOwner = ownerNzbId;
+                return Task.CompletedTask;
+            });
+
+        var ownerId = Guid.NewGuid();
+        await cache.DeleteByOwnerAsync(ownerId, CancellationToken.None);
+
+        Assert.Equal(ownerId, deletedOwner);
+    }
+
+    [Fact]
+    public void CtorFromConfig_DegradesWhenRequiredSettingsMissing()
+    {
+        var configManager = new ConfigManager();
+        configManager.UpdateValues(
+        [
+            new ConfigItem { ConfigName = "cache.l2.enabled", ConfigValue = "true" },
+            new ConfigItem { ConfigName = "cache.l2.bucket-name", ConfigValue = "nzbdav-segments" }
+        ]);
+
+        using var cache = new ObjectStorageSegmentCache(configManager);
+
+        Assert.Equal("nzbdav-segments", cache.BucketName);
+        Assert.Equal(0, cache.L2Hits);
     }
 
     private static UsenetYencHeader CreateHeader(string fileName)

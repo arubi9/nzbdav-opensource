@@ -30,6 +30,9 @@ public sealed class YencHeaderCacheSweeper(ConfigManager configManager) : Backgr
         try
         {
             var retentionDays = configManager.GetMetadataRetentionDays();
+            // Use a parameterized UTC cutoff instead of Postgres-specific
+            // date arithmetic so this cleanup stays portable across SQLite
+            // tests and Postgres production runs.
             var cutoff = DateTime.UtcNow.AddDays(-retentionDays);
 
             await using var dbContext = new DavDatabaseContext();

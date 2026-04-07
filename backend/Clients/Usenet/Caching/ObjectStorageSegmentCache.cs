@@ -13,10 +13,19 @@ namespace NzbWebDAV.Clients.Usenet.Caching;
 public sealed class ObjectStorageSegmentCache : IDisposable
 {
     public sealed record ReadResult(byte[] Body, IReadOnlyDictionary<string, string> Metadata);
+    private sealed record ConfigBinding(
+        string BucketName,
+        int QueueCapacity,
+        Func<CancellationToken, Task> EnsureBucketExistsAsync,
+        Func<string, CancellationToken, Task<ReadResult?>> TryReadAsync,
+        Func<WriteRequest, CancellationToken, Task> WriteAsync,
+        Func<Guid, CancellationToken, Task>? DeleteByOwnerAsync,
+        bool StartWriter);
 
     private readonly Func<CancellationToken, Task> _ensureBucketExistsAsync;
     private readonly Func<string, CancellationToken, Task<ReadResult?>> _tryReadAsync;
     private readonly Func<WriteRequest, CancellationToken, Task> _writeAsync;
+    private readonly Func<Guid, CancellationToken, Task>? _deleteByOwnerAsync;
     private readonly CancellationTokenSource _shutdownCts = new();
     private readonly SemaphoreSlim _queueSignal = new(0);
     private readonly ConcurrentQueue<WriteRequest> _writeQueue = new();
@@ -40,12 +49,19 @@ public sealed class ObjectStorageSegmentCache : IDisposable
     public string BucketName { get; }
 
     public ObjectStorageSegmentCache(ConfigManager configManager)
+        : this(CreateFromConfig(configManager))
+    {
+    }
+
+    private ObjectStorageSegmentCache(ConfigBinding binding)
         : this(
-            bucketName: configManager.GetL2BucketName(),
-            queueCapacity: configManager.GetL2WriteQueueCapacity(),
-            ensureBucketExistsAsync: CreateEnsureBucketDelegate(configManager),
-            tryReadAsync: CreateReadDelegate(configManager),
-            writeAsync: CreateWriteDelegate(configManager))
+            binding.BucketName,
+            binding.QueueCapacity,
+            binding.EnsureBucketExistsAsync,
+            binding.TryReadAsync,
+            binding.WriteAsync,
+            binding.DeleteByOwnerAsync,
+            binding.StartWriter)
     {
     }
 
@@ -55,6 +71,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         Func<CancellationToken, Task> ensureBucketExistsAsync,
         Func<string, CancellationToken, Task<ReadResult?>> tryReadAsync,
         Func<WriteRequest, CancellationToken, Task> writeAsync,
+        Func<Guid, CancellationToken, Task>? deleteByOwnerAsync = null,
         bool startWriter = true)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(queueCapacity);
@@ -64,6 +81,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         _ensureBucketExistsAsync = ensureBucketExistsAsync;
         _tryReadAsync = tryReadAsync;
         _writeAsync = writeAsync;
+        _deleteByOwnerAsync = deleteByOwnerAsync;
         _writerTask = startWriter ? Task.Run(WriterLoopAsync) : Task.CompletedTask;
     }
 
@@ -143,10 +161,10 @@ public sealed class ObjectStorageSegmentCache : IDisposable
 
     public async Task DeleteByOwnerAsync(Guid ownerNzbId, CancellationToken ct)
     {
-        if (_disposed)
+        if (_disposed || _deleteByOwnerAsync is null)
             return;
 
-        await DeleteByOwnerCoreAsync(ownerNzbId, ct).ConfigureAwait(false);
+        await _deleteByOwnerAsync(ownerNzbId, ct).ConfigureAwait(false);
     }
 
     public void Dispose()
@@ -212,11 +230,41 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         }
     }
 
-    private static Func<CancellationToken, Task> CreateEnsureBucketDelegate(ConfigManager configManager)
+    private static ConfigBinding CreateFromConfig(ConfigManager configManager)
     {
-        var client = CreateClient(configManager);
         var bucketName = configManager.GetL2BucketName();
+        var endpoint = configManager.GetL2Endpoint();
+        var accessKey = configManager.GetL2AccessKey();
+        var secretKey = configManager.GetL2SecretKey();
 
+        if (string.IsNullOrWhiteSpace(endpoint) ||
+            string.IsNullOrWhiteSpace(accessKey) ||
+            string.IsNullOrWhiteSpace(secretKey))
+        {
+            Log.Warning("L2 cache is enabled but incomplete configuration was provided. Continuing without shared L2.");
+            return new ConfigBinding(
+                bucketName,
+                configManager.GetL2WriteQueueCapacity(),
+                _ => Task.CompletedTask,
+                (_, _) => Task.FromResult<ReadResult?>(null),
+                (_, _) => Task.CompletedTask,
+                null,
+                false);
+        }
+
+        var client = CreateClient(endpoint, accessKey, secretKey, configManager.IsL2SslEnabled());
+        return new ConfigBinding(
+            bucketName,
+            configManager.GetL2WriteQueueCapacity(),
+            CreateEnsureBucketDelegate(client, bucketName),
+            CreateReadDelegate(client, bucketName),
+            CreateWriteDelegate(client, bucketName),
+            CreateDeleteByOwnerDelegate(client, bucketName),
+            true);
+    }
+
+    private static Func<CancellationToken, Task> CreateEnsureBucketDelegate(IMinioClient client, string bucketName)
+    {
         return async ct =>
         {
             var existsArgs = new BucketExistsArgs()
@@ -231,11 +279,8 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         };
     }
 
-    private static Func<string, CancellationToken, Task<ReadResult?>> CreateReadDelegate(ConfigManager configManager)
+    private static Func<string, CancellationToken, Task<ReadResult?>> CreateReadDelegate(IMinioClient client, string bucketName)
     {
-        var client = CreateClient(configManager);
-        var bucketName = configManager.GetL2BucketName();
-
         return async (segmentId, ct) =>
         {
             try
@@ -256,11 +301,8 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         };
     }
 
-    private static Func<WriteRequest, CancellationToken, Task> CreateWriteDelegate(ConfigManager configManager)
+    private static Func<WriteRequest, CancellationToken, Task> CreateWriteDelegate(IMinioClient client, string bucketName)
     {
-        var client = CreateClient(configManager);
-        var bucketName = configManager.GetL2BucketName();
-
         return async (request, ct) =>
         {
             using var stream = new MemoryStream(request.Body, writable: false);
@@ -269,7 +311,12 @@ public sealed class ObjectStorageSegmentCache : IDisposable
                 ["x-amz-meta-segment-id"] = request.SegmentId,
                 ["x-amz-meta-yenc-filename"] = request.YencHeaders.FileName,
                 ["x-amz-meta-yenc-header"] = JsonSerializer.Serialize(request.YencHeaders),
-                ["x-amz-meta-category"] = request.Category.ToString().ToLowerInvariant()
+                ["x-amz-meta-category"] = request.Category switch
+                {
+                    SegmentCategory.SmallFile => "small_file",
+                    SegmentCategory.VideoSegment => "video",
+                    _ => "unknown"
+                }
             };
             if (request.OwnerNzbId.HasValue)
                 headers["x-amz-meta-owner-nzb-id"] = request.OwnerNzbId.Value.ToString();
@@ -285,54 +332,46 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         };
     }
 
-    private static IMinioClient CreateClient(ConfigManager configManager)
+    private static Func<Guid, CancellationToken, Task> CreateDeleteByOwnerDelegate(IMinioClient client, string bucketName)
+    {
+        return async (ownerNzbId, ct) =>
+        {
+            var listArgs = new ListObjectsArgs()
+                .WithBucket(bucketName)
+                .WithPrefix("segments/")
+                .WithRecursive(true)
+                .WithIncludeUserMetadata(true);
+
+            await foreach (var item in client.ListObjectsEnumAsync(listArgs, ct).ConfigureAwait(false))
+            {
+                if (!item.UserMetadata.TryGetValue("X-Amz-Meta-Owner-Nzb-Id", out var metadataValue) &&
+                    !item.UserMetadata.TryGetValue("x-amz-meta-owner-nzb-id", out metadataValue))
+                {
+                    continue;
+                }
+
+                if (!Guid.TryParse(metadataValue, out var parsedOwner) || parsedOwner != ownerNzbId)
+                    continue;
+
+                var removeArgs = new RemoveObjectArgs()
+                    .WithBucket(bucketName)
+                    .WithObject(item.Key);
+                await client.RemoveObjectAsync(removeArgs, ct).ConfigureAwait(false);
+            }
+        };
+    }
+
+    private static IMinioClient CreateClient(
+        string endpoint,
+        string accessKey,
+        string secretKey,
+        bool useSsl)
     {
         return new MinioClient()
-            .WithEndpoint(configManager.GetL2Endpoint())
-            .WithCredentials(configManager.GetL2AccessKey(), configManager.GetL2SecretKey())
-            .WithSSL(configManager.IsL2SslEnabled())
+            .WithEndpoint(endpoint)
+            .WithCredentials(accessKey, secretKey)
+            .WithSSL(useSsl)
             .Build();
-    }
-
-    private async Task DeleteByOwnerCoreAsync(Guid ownerNzbId, CancellationToken ct)
-    {
-        var client = CreateClientFromDelegates();
-        if (client is null)
-            return;
-
-        var listArgs = new ListObjectsArgs()
-            .WithBucket(BucketName)
-            .WithPrefix("segments/")
-            .WithRecursive(true)
-            .WithIncludeUserMetadata(true);
-
-        await foreach (var item in client.ListObjectsEnumAsync(listArgs, ct).ConfigureAwait(false))
-        {
-            if (!item.UserMetadata.TryGetValue("X-Amz-Meta-Owner-Nzb-Id", out var metadataValue) &&
-                !item.UserMetadata.TryGetValue("x-amz-meta-owner-nzb-id", out metadataValue))
-            {
-                continue;
-            }
-
-            if (!Guid.TryParse(metadataValue, out var parsedOwner) || parsedOwner != ownerNzbId)
-                continue;
-
-            var removeArgs = new RemoveObjectArgs()
-                .WithBucket(BucketName)
-                .WithObject(item.Key);
-            await client.RemoveObjectAsync(removeArgs, ct).ConfigureAwait(false);
-        }
-    }
-
-    private IMinioClient? CreateClientFromDelegates()
-    {
-        if (_tryReadAsync.Target is null || _writeAsync.Target is null)
-            return null;
-
-        var readTargetType = _tryReadAsync.Target.GetType();
-        var clientField = readTargetType.GetFields(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
-            .FirstOrDefault(x => typeof(IMinioClient).IsAssignableFrom(x.FieldType));
-        return clientField?.GetValue(_tryReadAsync.Target) as IMinioClient;
     }
 
     public readonly record struct WriteRequest(

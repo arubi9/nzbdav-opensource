@@ -65,6 +65,27 @@ public sealed class SharedHeaderCacheTests : IClassFixture<PostgresHeaderCacheFi
         Assert.Equal(1024, header.PartOffset);
     }
 
+    [Fact]
+    public async Task TryReadAsync_ReturnsNullAndCountsMiss_OnTransientError()
+    {
+        var cache = new SharedHeaderCache(() => throw new InvalidOperationException("db down"));
+
+        var header = await cache.TryReadAsync("segment-a", CancellationToken.None);
+
+        Assert.Null(header);
+        Assert.Equal(1, cache.Misses);
+    }
+
+    [Fact]
+    public async Task WriteAsync_SwallowsTransientError_AndCountsFailure()
+    {
+        var cache = new SharedHeaderCache(() => throw new InvalidOperationException("db down"));
+
+        await cache.WriteAsync("segment-a", CreateHeader("a.bin", 0), CancellationToken.None);
+
+        Assert.Equal(1, cache.WriteFailures);
+    }
+
     private static UsenetYencHeader CreateHeader(string fileName, long partOffset)
     {
         return new UsenetYencHeader

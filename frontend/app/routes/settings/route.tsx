@@ -94,7 +94,7 @@ function Body(props: BodyProps) {
     const [isSaved, setIsSaved] = useState(false);
     const [activeTab, setActiveTab] = useState('usenet');
     const [postMigrationAcknowledged, setPostMigrationAcknowledged] = useState(
-        props.encryptionStatus.postMigrationAcknowledged !== null);
+        props.encryptionStatus.postMigrationAcknowledged);
     const [isAcknowledgingPostMigration, setIsAcknowledgingPostMigration] = useState(false);
 
     // derived variables

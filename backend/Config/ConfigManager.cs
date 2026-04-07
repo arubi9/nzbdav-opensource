@@ -119,6 +119,8 @@ public class ConfigManager
 
     public string GetApiKey()
     {
+        // This env fallback is load-bearing during onboarding/bootstrap before
+        // the persisted ConfigItems row exists.
         return StringUtil.EmptyToNull(GetConfigValue("api.key"))
                ?? EnvironmentUtil.GetRequiredVariable("FRONTEND_BACKEND_API_KEY");
     }
@@ -347,20 +349,19 @@ public class ConfigManager
         return val != null ? bool.Parse(val) : false;
     }
 
-    public string GetL2Endpoint()
-        => StringUtil.EmptyToNull(GetConfigValue("cache.l2.endpoint"))
-           ?? throw new InvalidOperationException("cache.l2.endpoint is required when L2 is enabled.");
+    public string? GetL2Endpoint()
+        => StringUtil.EmptyToNull(GetConfigValue("cache.l2.endpoint"));
 
     public string GetL2BucketName()
         => StringUtil.EmptyToNull(GetConfigValue("cache.l2.bucket-name")) ?? "nzbdav-segments";
 
-    public string GetL2AccessKey()
+    public string? GetL2AccessKey()
         => StringUtil.EmptyToNull(GetConfigValue("cache.l2.access-key"))
-           ?? EnvironmentUtil.GetRequiredVariable("NZBDAV_L2_ACCESS_KEY");
+           ?? EnvironmentUtil.GetEnvironmentVariable("NZBDAV_L2_ACCESS_KEY");
 
-    public string GetL2SecretKey()
+    public string? GetL2SecretKey()
         => StringUtil.EmptyToNull(GetConfigValue("cache.l2.secret-key"))
-           ?? EnvironmentUtil.GetRequiredVariable("NZBDAV_L2_SECRET_KEY");
+           ?? EnvironmentUtil.GetEnvironmentVariable("NZBDAV_L2_SECRET_KEY");
 
     public bool IsL2SslEnabled()
     {

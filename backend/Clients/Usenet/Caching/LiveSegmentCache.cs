@@ -587,8 +587,8 @@ public sealed class LiveSegmentCache : IDisposable
             {
                 "smallfile" => SegmentCategory.SmallFile,
                 "small_file" => SegmentCategory.SmallFile,
+                "video" => SegmentCategory.VideoSegment,
                 "videosegment" => SegmentCategory.VideoSegment,
-                "video_segment" => SegmentCategory.VideoSegment,
                 _ => SegmentCategory.Unknown
             };
         }

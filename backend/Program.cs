@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using NzbWebDAV.Api.Filters;
 using NWebDav.Server;
 using NWebDav.Server.Stores;
@@ -22,7 +23,6 @@ using NzbWebDAV.Utils;
 using NzbWebDAV.WebDav;
 using NzbWebDAV.WebDav.Base;
 using Microsoft.AspNetCore.HttpOverrides;
-using Microsoft.Extensions.Hosting;
 using NzbWebDAV.Websocket;
 using Prometheus;
 using Serilog;
@@ -122,11 +122,12 @@ public partial class Program
                     return null!;
 
                 var cache = new ObjectStorageSegmentCache(configManager);
+                var applicationStopping = sp.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping;
                 _ = Task.Run(async () =>
                 {
                     try
                     {
-                        await cache.EnsureBucketExistsAsync(CancellationToken.None).ConfigureAwait(false);
+                        await cache.EnsureBucketExistsAsync(applicationStopping).ConfigureAwait(false);
                     }
                     catch (Exception ex)
                     {
@@ -177,6 +178,7 @@ public partial class Program
             sp.GetRequiredService<UsenetStreamingClient>(),
             sp.GetRequiredService<ReadAheadWarmingService>(),
             sp.GetRequiredService<QueueManager>(),
+            sp.GetService<ObjectStorageSegmentCache>(),
             sp.GetService<SharedHeaderCache>()));
 
         if (NodeRoleConfig.RunsIngest)

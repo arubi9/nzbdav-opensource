@@ -81,6 +81,72 @@ public sealed class StartupEncryptionCheckTests
         await using var verifyContext = await _fixture.CreateMigratedContextAsync();
         Assert.False(await verifyContext.ConfigItems.AnyAsync(x => x.ConfigName == "encryption.migration-completed-at"));
     }
+
+    [Fact]
+    public async Task RunAsync_WithoutKey_WhenEncryptedRowsExist_ThrowsLostKeyError()
+    {
+        await _fixture.ResetAsync();
+        var masterKey = _fixture.CreateKey();
+        _fixture.SetKeys(masterKey: masterKey, oldKey: null);
+
+        string ciphertext;
+        using (var encryption = new ConfigEncryptionService())
+            ciphertext = encryption.Encrypt("secret-value");
+
+        await using (var setupContext = await _fixture.CreateMigratedContextAsync())
+        {
+            var apiKeyRow = await setupContext.ConfigItems.SingleAsync(x => x.ConfigName == "api.key");
+            apiKeyRow.ConfigValue = ciphertext;
+            apiKeyRow.IsEncrypted = true;
+            await setupContext.SaveChangesAsync();
+        }
+
+        _fixture.SetKeys(masterKey: null, oldKey: null);
+
+        await using var dbContext = await _fixture.CreateMigratedContextAsync();
+        using var encryptionWithoutKey = new ConfigEncryptionService();
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => StartupEncryptionCheck.RunAsync(dbContext, encryptionWithoutKey));
+
+        Assert.Contains("Found encrypted config but NZBDAV_MASTER_KEY is not set", ex.Message);
+    }
+
+    [Fact]
+    public async Task RunAsync_DoesNotDuplicateMigrationMarker_WhenItAlreadyExists()
+    {
+        await _fixture.ResetAsync();
+        _fixture.SetKeys(masterKey: _fixture.CreateKey(), oldKey: null);
+
+        await using (var setupContext = await _fixture.CreateMigratedContextAsync())
+        {
+            setupContext.ConfigItems.Add(new ConfigItem
+            {
+                ConfigName = "encryption.migration-completed-at",
+                ConfigValue = "2026-04-07T12:00:00.0000000Z",
+                IsEncrypted = false
+            });
+            setupContext.ConfigItems.Add(new ConfigItem
+            {
+                ConfigName = "arr.instances",
+                ConfigValue = "{}",
+                IsEncrypted = false
+            });
+            await setupContext.SaveChangesAsync();
+        }
+
+        await using (var dbContext = await _fixture.CreateMigratedContextAsync())
+        using (var encryption = new ConfigEncryptionService())
+        {
+            await StartupEncryptionCheck.RunAsync(dbContext, encryption);
+        }
+
+        await using var verifyContext = await _fixture.CreateMigratedContextAsync();
+        var markers = await verifyContext.ConfigItems
+            .Where(x => x.ConfigName == "encryption.migration-completed-at")
+            .CountAsync();
+        Assert.Equal(1, markers);
+    }
 }
 
 public sealed class ConfigEncryptionDatabaseFixture : IAsyncLifetime

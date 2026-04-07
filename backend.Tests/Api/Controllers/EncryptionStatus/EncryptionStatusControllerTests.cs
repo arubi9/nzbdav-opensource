@@ -79,7 +79,8 @@ public sealed class EncryptionStatusControllerTests
         Assert.True(response.KeySet);
         Assert.Equal("none", response.BannerSeverity);
         Assert.Equal("2026-04-07T12:00:00.0000000Z", response.MigrationCompletedAt);
-        Assert.Equal("2026-04-07T12:30:00.0000000Z", response.PostMigrationAcknowledged);
+        Assert.True(response.PostMigrationAcknowledged);
+        Assert.Equal("2026-04-07T12:30:00.0000000Z", response.PostMigrationAcknowledgedAt);
     }
 
     [Fact]

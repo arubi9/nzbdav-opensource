@@ -70,6 +70,7 @@ public sealed class NzbdavMetricsCollector
         UsenetStreamingClient usenetClient,
         ReadAheadWarmingService warming,
         QueueManager queue,
+        ObjectStorageSegmentCache? l2Cache = null,
         SharedHeaderCache? sharedHeaderCache = null
     ) : this(
         () => cache.GetStats(),
@@ -78,7 +79,7 @@ public sealed class NzbdavMetricsCollector
         () => usenetClient.HealthyProviderCount,
         () => warming.ActiveSessionCount,
         () => queue.GetInProgressQueueItem().queueItem != null ? 1 : 0,
-        () => TryGetL2Cache(cache),
+        () => l2Cache,
         () => sharedHeaderCache,
         Prometheus.Metrics.DefaultRegistry,
         Prometheus.Metrics.WithCustomRegistry(Prometheus.Metrics.DefaultRegistry)
@@ -251,12 +252,6 @@ public sealed class NzbdavMetricsCollector
         if (delta > 0)
             counter.Inc(delta);
         previousValue = currentValue;
-    }
-
-    private static ObjectStorageSegmentCache? TryGetL2Cache(LiveSegmentCache cache)
-    {
-        var field = typeof(LiveSegmentCache).GetField("_l2Cache", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-        return field?.GetValue(cache) as ObjectStorageSegmentCache;
     }
 
     public static void IncrementActiveStreams() => ActiveStreamsGauge.Inc();

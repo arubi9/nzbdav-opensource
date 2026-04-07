@@ -63,6 +63,30 @@ public sealed class SharedHeaderCacheIntegrationTests : IClassFixture<PostgresHe
         Assert.Equal("factory.bin", header.FileName);
     }
 
+    [Fact]
+    public async Task SharedCacheUnavailable_FallsThroughToFactory()
+    {
+        if (!_fixture.IsAvailable) return;
+
+        await _fixture.ResetAsync();
+        var sharedCache = new SharedHeaderCache(() => throw new InvalidOperationException("db down"));
+        var configManager = new ConfigManager();
+        using var liveCache = new LiveSegmentCache(configManager, sharedHeaderCache: sharedCache);
+        var called = false;
+
+        var header = await liveCache.GetOrAddHeaderAsync(
+            "segment-a",
+            _ =>
+            {
+                called = true;
+                return Task.FromResult(CreateHeader("factory.bin", 0));
+            },
+            CancellationToken.None);
+
+        Assert.True(called);
+        Assert.Equal("factory.bin", header.FileName);
+    }
+
     private static UsenetYencHeader CreateHeader(string fileName, long partOffset)
     {
         return new UsenetYencHeader

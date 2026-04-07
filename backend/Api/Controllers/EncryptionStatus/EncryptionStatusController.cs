@@ -15,17 +15,30 @@ public sealed class EncryptionStatusController(
     DavDatabaseClient dbClient,
     ConfigEncryptionService encryptionService) : ControllerBase
 {
+    private static readonly string[] MarkerConfigKeys =
+    [
+        "encryption.migration-completed-at",
+        "encryption.post-migration-acknowledged"
+    ];
+
     [HttpGet]
     public async Task<IActionResult> Get()
     {
-        var configItems = await dbClient.Ctx.ConfigItems.ToListAsync().ConfigureAwait(false);
-        var plaintextSecretsCount = configItems.Count(item =>
-            SensitiveConfigKeys.IsSensitive(item.ConfigName) && !item.IsEncrypted);
+        var sensitiveKeys = SensitiveConfigKeys.Keys.ToList();
+        var plaintextSecretsCount = await dbClient.Ctx.ConfigItems
+            .Where(item => sensitiveKeys.Contains(item.ConfigName) && !item.IsEncrypted)
+            .CountAsync()
+            .ConfigureAwait(false);
 
-        var migrationCompletedAt = configItems
+        var markers = await dbClient.Ctx.ConfigItems
+            .Where(item => MarkerConfigKeys.Contains(item.ConfigName))
+            .ToListAsync()
+            .ConfigureAwait(false);
+
+        var migrationCompletedAt = markers
             .FirstOrDefault(item => item.ConfigName == "encryption.migration-completed-at")
             ?.ConfigValue;
-        var postMigrationAcknowledged = configItems
+        var postMigrationAcknowledgedAt = markers
             .FirstOrDefault(item => item.ConfigName == "encryption.post-migration-acknowledged")
             ?.ConfigValue;
 
@@ -34,7 +47,8 @@ public sealed class EncryptionStatusController(
             plaintextSecretsCount,
             encryptionService.IsKeyConfigured ? "none" : plaintextSecretsCount > 0 ? "warning" : "info",
             migrationCompletedAt,
-            postMigrationAcknowledged));
+            postMigrationAcknowledgedAt != null,
+            postMigrationAcknowledgedAt));
     }
 
     [HttpPost("acknowledge-post-migration")]
@@ -64,4 +78,5 @@ public sealed record EncryptionStatusResponse(
     int PlaintextSecretsCount,
     string BannerSeverity,
     string? MigrationCompletedAt,
-    string? PostMigrationAcknowledged);
+    bool PostMigrationAcknowledged,
+    string? PostMigrationAcknowledgedAt);

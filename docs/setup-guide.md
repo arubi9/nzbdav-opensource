@@ -107,6 +107,22 @@ Notes:
 * Existing plaintext installs will migrate sensitive rows on startup once the key is configured.
 * Historical backups made before that migration remain plaintext. After the first encrypted startup, rotate any credentials that may exist in older backups.
 
+Rotation procedure:
+
+1. Set `NZBDAV_MASTER_KEY` and restart NzbDav.
+2. If startup reports that historical plaintext secrets were migrated, rotate:
+   * your Usenet provider password
+   * Radarr/Sonarr API keys
+   * the NzbDav API key
+   * any copied WebDAV credentials
+3. If you are rotating keys, set `NZBDAV_MASTER_KEY_OLD` temporarily alongside the new `NZBDAV_MASTER_KEY`, restart once, confirm startup reports rotation complete, then remove `NZBDAV_MASTER_KEY_OLD`.
+
+Lost-key procedure:
+
+* If `NZBDAV_MASTER_KEY` is lost and encrypted config rows already exist, NzbDav cannot decrypt them.
+* Restore the original key from your secret manager or deployment manifests.
+* If the key is unrecoverable, delete the config database and reconfigure the instance from scratch.
+
 ### 2. Core Configuration
 
 Navigate to `http://your-server-ip:3000`.

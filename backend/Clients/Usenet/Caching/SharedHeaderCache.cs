@@ -10,6 +10,16 @@ public sealed class SharedHeaderCache
     private long _hits;
     private long _misses;
     private long _writeFailures;
+    private readonly Func<DavDatabaseContext> _dbContextFactory;
+
+    public SharedHeaderCache() : this(() => new DavDatabaseContext())
+    {
+    }
+
+    public SharedHeaderCache(Func<DavDatabaseContext> dbContextFactory)
+    {
+        _dbContextFactory = dbContextFactory;
+    }
 
     public long Hits => Interlocked.Read(ref _hits);
     public long Misses => Interlocked.Read(ref _misses);
@@ -21,7 +31,7 @@ public sealed class SharedHeaderCache
     {
         try
         {
-            await using var dbContext = new DavDatabaseContext();
+            await using var dbContext = _dbContextFactory();
             var row = await dbContext.YencHeaderCache
                 .AsNoTracking()
                 .FirstOrDefaultAsync(x => x.SegmentId == segmentId, cancellationToken)
@@ -62,7 +72,7 @@ public sealed class SharedHeaderCache
     {
         try
         {
-            await using var dbContext = new DavDatabaseContext();
+            await using var dbContext = _dbContextFactory();
             await dbContext.Database.ExecuteSqlInterpolatedAsync($@"
                 INSERT INTO yenc_header_cache
                     (segment_id, file_name, file_size, line_length,
