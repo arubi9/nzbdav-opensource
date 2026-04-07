@@ -1,4 +1,5 @@
-﻿using System.Net;
+﻿using System.Collections.Concurrent;
+using System.Net;
 using NzbWebDAV.Clients.RadarrSonarr.BaseModels;
 using NzbWebDAV.Clients.RadarrSonarr.RadarrModels;
 
@@ -6,7 +7,10 @@ namespace NzbWebDAV.Clients.RadarrSonarr;
 
 public class RadarrClient(string host, string apiKey) : ArrClient(host, apiKey)
 {
-    private static readonly Dictionary<string, int> SymlinkOrStrmToMovieIdCache = new();
+    // ConcurrentDictionary because concurrent queue-item processing can hit
+    // this cache in parallel. Previously a plain Dictionary without locking
+    // — race condition on resize, intermittent hangs/corruption under load.
+    private static readonly ConcurrentDictionary<string, int> SymlinkOrStrmToMovieIdCache = new();
 
     public Task<RadarrMovie> GetMovieAsync(int id) =>
         Get<RadarrMovie>($"/movie/{id}");

@@ -1,4 +1,5 @@
-﻿using System.Net;
+﻿using System.Collections.Concurrent;
+using System.Net;
 using NzbWebDAV.Clients.RadarrSonarr.BaseModels;
 using NzbWebDAV.Clients.RadarrSonarr.SonarrModels;
 using NzbWebDAV.Utils;
@@ -7,8 +8,11 @@ namespace NzbWebDAV.Clients.RadarrSonarr;
 
 public class SonarrClient(string host, string apiKey) : ArrClient(host, apiKey)
 {
-    private static readonly Dictionary<string, int> SeriesPathToSeriesIdCache = new();
-    private static readonly Dictionary<string, int> SymlinkOrStrmToEpisodeFileIdCache = new();
+    // ConcurrentDictionary because concurrent queue-item processing can hit
+    // these caches in parallel. Previously a plain Dictionary without locking
+    // — race condition on resize, intermittent hangs/corruption under load.
+    private static readonly ConcurrentDictionary<string, int> SeriesPathToSeriesIdCache = new();
+    private static readonly ConcurrentDictionary<string, int> SymlinkOrStrmToEpisodeFileIdCache = new();
 
     public Task<SonarrQueue> GetSonarrQueueAsync() =>
         Get<SonarrQueue>($"/queue?protocol=usenet&pageSize=5000");

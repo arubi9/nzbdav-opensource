@@ -1,4 +1,5 @@
-﻿using NzbWebDAV.Config;
+﻿using System.Collections.Concurrent;
+using NzbWebDAV.Config;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Extensions;
 
@@ -9,7 +10,11 @@ namespace NzbWebDAV.Utils;
 /// </summary>
 public static class OrganizedLinksUtil
 {
-    private static readonly Dictionary<Guid, string> Cache = new();
+    // ConcurrentDictionary because GetLink can be called concurrently from
+    // multiple request paths (WebDAV property handlers + REST API + background
+    // tasks like ContentIndexRecoveryService). Previously a plain Dictionary
+    // without locking — race condition on concurrent write.
+    private static readonly ConcurrentDictionary<Guid, string> Cache = new();
 
     /// <summary>
     /// Searches organized media library for a symlink or strm pointing to the given target
