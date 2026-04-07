@@ -116,7 +116,6 @@ public partial class Program
             .AddSingleton<QueueManager>()
             .AddSingleton<ReadAheadWarmingService>()
             .AddSingleton<StreamExecutionService>()
-            .AddSingleton<NzbdavMetricsCollector>()
             .AddScoped<DavDatabaseContext>()
             .AddScoped<DavDatabaseClient>()
             .AddScoped<DatabaseStore>()
@@ -133,6 +132,12 @@ public partial class Program
         builder.Services.AddSingleton(sp => new LiveSegmentCache(
             configManager,
             sp.GetService<SharedHeaderCache>()));
+        builder.Services.AddSingleton(sp => new NzbdavMetricsCollector(
+            sp.GetRequiredService<LiveSegmentCache>(),
+            sp.GetRequiredService<UsenetStreamingClient>(),
+            sp.GetRequiredService<ReadAheadWarmingService>(),
+            sp.GetRequiredService<QueueManager>(),
+            sp.GetService<SharedHeaderCache>()));
 
         if (NodeRoleConfig.RunsIngest)
         {
@@ -143,6 +148,9 @@ public partial class Program
                 .AddHostedService<BlobCleanupService>()
                 .AddHostedService<SmallFilePrecacheService>()
                 .AddHostedService<MediaProbeService>();
+
+            if (configManager.IsSharedHeaderCacheEnabled())
+                builder.Services.AddHostedService<YencHeaderCacheSweeper>();
 
             // Registered LAST among ingest services so its StopAsync runs
             // FIRST on shutdown — the host stops hosted services in reverse
