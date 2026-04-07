@@ -45,13 +45,17 @@ public sealed class DavDatabaseContext() : DbContext(CreateOptions())
 
     private static string BuildPostgresConnectionString(string databaseUrl)
     {
-        var connectionString =
+        var isUriStyle =
             databaseUrl.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase) ||
-            databaseUrl.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase)
+            databaseUrl.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase);
+        var connectionString =
+            isUriStyle
                 ? ConvertPostgresUrl(databaseUrl)
                 : databaseUrl;
 
-        return ApplyPgbouncerCompatibilityFlags(connectionString);
+        return UsesPgbouncer(databaseUrl, connectionString, isUriStyle)
+            ? ApplyPgbouncerCompatibilityFlags(connectionString)
+            : connectionString;
     }
 
     private static string ApplyPgbouncerCompatibilityFlags(string connectionString)
@@ -83,6 +87,15 @@ public sealed class DavDatabaseContext() : DbContext(CreateOptions())
         var username = userInfo.Length > 0 ? Uri.UnescapeDataString(userInfo[0]) : string.Empty;
         var password = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : string.Empty;
         return $"Host={uri.Host};Port={uri.Port};Database={uri.AbsolutePath.TrimStart('/')};Username={username};Password={password};Pooling=true;MinPoolSize=2;MaxPoolSize=50";
+    }
+
+    private static bool UsesPgbouncer(string databaseUrl, string connectionString, bool isUriStyle)
+    {
+        if (isUriStyle)
+            return new Uri(databaseUrl).Host.Contains("pgbouncer", StringComparison.OrdinalIgnoreCase);
+
+        var builder = new NpgsqlConnectionStringBuilder(connectionString);
+        return builder.Host.Contains("pgbouncer", StringComparison.OrdinalIgnoreCase);
     }
 
     // database sets

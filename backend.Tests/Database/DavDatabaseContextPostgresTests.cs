@@ -34,6 +34,19 @@ public sealed class DavDatabaseContextPostgresTests : IClassFixture<PostgresHead
     }
 
     [Fact]
+    public void DirectPostgresConnectionString_RemainsUntouched()
+    {
+        using var environment = new backend.Tests.Config.TemporaryEnvironment(
+            ("DATABASE_URL", "Host=postgres;Port=5432;Database=nzbdav;Username=user;Password=pass"));
+
+        using var dbContext = new DavDatabaseContext();
+        var connectionString = dbContext.Database.GetDbConnection().ConnectionString;
+
+        Assert.DoesNotContain("No Reset On Close=true", connectionString);
+        Assert.DoesNotContain("Server Compatibility Mode=Redshift", connectionString);
+    }
+
+    [Fact]
     public async Task LatestMigration_CreatesCoordinationTables()
     {
         if (!_fixture.IsAvailable) return;
