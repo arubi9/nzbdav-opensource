@@ -29,10 +29,10 @@ public sealed class WebsocketManagerOutboxTests : IClassFixture<PostgresHeaderCa
         Assert.Equal("ready", GetLastMessage(manager, WebsocketTopic.QueueItemStatus));
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task SendMessage_InMultiNodeMode_WritesOutboxRow()
     {
-        if (!_fixture.IsAvailable) return;
+        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         using var environment = new backend.Tests.Config.TemporaryEnvironment(
@@ -52,10 +52,10 @@ public sealed class WebsocketManagerOutboxTests : IClassFixture<PostgresHeaderCa
         Assert.Equal("{\"queueItem\":\"abc\"}", row.Payload);
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task SendMessage_InMultiNodeMode_AllowsLegacyDelimitedPayloads()
     {
-        if (!_fixture.IsAvailable) return;
+        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         using var environment = new backend.Tests.Config.TemporaryEnvironment(

@@ -15,10 +15,10 @@ public sealed class PostgresAuthFailureTrackerTests : IClassFixture<PostgresHead
         _fixture = fixture;
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task RecordFailure_UsesSharedPostgresCounter()
     {
-        if (!_fixture.IsAvailable) return;
+        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         using var environment = new backend.Tests.Config.TemporaryEnvironment(("DATABASE_URL", _fixture.ConnectionString));
@@ -44,10 +44,10 @@ public sealed class PostgresAuthFailureTrackerTests : IClassFixture<PostgresHead
         Assert.False(await tracker.IsBlockedAsync("203.0.113.9"));
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task SweepOnce_RemovesExpiredRows_ButKeepsFreshRows()
     {
-        if (!_fixture.IsAvailable) return;
+        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         using var environment = new backend.Tests.Config.TemporaryEnvironment(("DATABASE_URL", _fixture.ConnectionString));

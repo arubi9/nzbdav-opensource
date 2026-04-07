@@ -19,10 +19,10 @@ public sealed class SharedHeaderCacheIntegrationTests : IClassFixture<PostgresHe
         _fixture = fixture;
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task ColdCacheHitViaSharedCache_DoesNotCallNntpFactory()
     {
-        if (!_fixture.IsAvailable) return;
+        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         var sharedCache = new SharedHeaderCache();
@@ -45,10 +45,10 @@ public sealed class SharedHeaderCacheIntegrationTests : IClassFixture<PostgresHe
         Assert.Equal("cached.bin", header.FileName);
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task SharedCacheDisabled_PassthroughCallsFactory()
     {
-        if (!_fixture.IsAvailable) return;
+        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
 
@@ -63,10 +63,10 @@ public sealed class SharedHeaderCacheIntegrationTests : IClassFixture<PostgresHe
         Assert.Equal("factory.bin", header.FileName);
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task SharedCacheUnavailable_FallsThroughToFactory()
     {
-        if (!_fixture.IsAvailable) return;
+        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         var sharedCache = new SharedHeaderCache(() => throw new InvalidOperationException("db down"));

@@ -18,10 +18,10 @@ public sealed class SharedHeaderCacheTests : IClassFixture<PostgresHeaderCacheFi
         _fixture = fixture;
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task TryReadAsync_ReturnsNullOnMissingRow()
     {
-        if (!_fixture.IsAvailable) return;
+        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         var cache = new SharedHeaderCache();
@@ -32,10 +32,10 @@ public sealed class SharedHeaderCacheTests : IClassFixture<PostgresHeaderCacheFi
         Assert.Equal(1, cache.Misses);
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task TryReadAsync_ReturnsPopulatedHeaderOnHit()
     {
-        if (!_fixture.IsAvailable) return;
+        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         var cache = new SharedHeaderCache();
@@ -48,10 +48,10 @@ public sealed class SharedHeaderCacheTests : IClassFixture<PostgresHeaderCacheFi
         Assert.Equal(1, cache.Hits);
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task WriteAsync_UpsertsExistingRow()
     {
-        if (!_fixture.IsAvailable) return;
+        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         var cache = new SharedHeaderCache();

@@ -15,11 +15,10 @@ namespace backend.Tests.Integration;
 [Collection(nameof(ObjectStorageIntegrationCollection))]
 public sealed class ObjectStorageIntegrationTests
 {
-    [Fact]
+    [SkippableFact]
     public async Task EndToEnd_WriteAndRead()
     {
-        if (!DockerAvailable())
-            return;
+        Skip.IfNot(DockerAvailable(), "Docker is required for this integration test.");
 
         await using var fixture = await MinioFixture.StartAsync();
 
@@ -38,11 +37,10 @@ public sealed class ObjectStorageIntegrationTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task L1MissL2Hit_PromotesToL1()
     {
-        if (!DockerAvailable())
-            return;
+        Skip.IfNot(DockerAvailable(), "Docker is required for this integration test.");
 
         await using var fixture = await MinioFixture.StartAsync();
         await fixture.PutDirectAsync(
@@ -70,11 +68,10 @@ public sealed class ObjectStorageIntegrationTests
         Assert.Equal(1, liveCache.GetStats().SmallFileCount);
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task L2Unreachable_FallsThroughToNntp()
     {
-        if (!DockerAvailable())
-            return;
+        Skip.IfNot(DockerAvailable(), "Docker is required for this integration test.");
 
         await using var fixture = await MinioFixture.StartAsync();
         await fixture.Container.StopAsync();
@@ -99,11 +96,10 @@ public sealed class ObjectStorageIntegrationTests
         Assert.Equal(1, fakeNntp.DecodedBodyCallCount);
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task BucketCreation_IsIdempotent()
     {
-        if (!DockerAvailable())
-            return;
+        Skip.IfNot(DockerAvailable(), "Docker is required for this integration test.");
 
         await using var fixture = await MinioFixture.StartAsync();
 
@@ -111,11 +107,10 @@ public sealed class ObjectStorageIntegrationTests
         await fixture.Cache.EnsureBucketExistsAsync(CancellationToken.None);
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task MetadataRoundTrip()
     {
-        if (!DockerAvailable())
-            return;
+        Skip.IfNot(DockerAvailable(), "Docker is required for this integration test.");
 
         await using var fixture = await MinioFixture.StartAsync();
         var ownerId = Guid.NewGuid();

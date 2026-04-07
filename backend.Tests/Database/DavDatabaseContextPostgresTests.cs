@@ -46,10 +46,10 @@ public sealed class DavDatabaseContextPostgresTests : IClassFixture<PostgresHead
         Assert.DoesNotContain("Server Compatibility Mode=Redshift", connectionString);
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task LatestMigration_CreatesCoordinationTables()
     {
-        if (!_fixture.IsAvailable) return;
+        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
 

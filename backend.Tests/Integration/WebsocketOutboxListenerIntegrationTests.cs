@@ -17,10 +17,10 @@ public sealed class WebsocketOutboxListenerIntegrationTests : IClassFixture<Post
         _fixture = fixture;
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task CatchUpOnce_ReplaysRowsNewerThanLastSeen()
     {
-        if (!_fixture.IsAvailable) return;
+        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         using var environment = new backend.Tests.Config.TemporaryEnvironment(
@@ -44,10 +44,10 @@ public sealed class WebsocketOutboxListenerIntegrationTests : IClassFixture<Post
         Assert.Equal("42", GetLastMessage(manager, WebsocketTopic.QueueItemProgress));
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task InitializeStateFromOutbox_RestoresLatestStatefulMessages_WithoutReplayingEvents()
     {
-        if (!_fixture.IsAvailable) return;
+        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         using var environment = new backend.Tests.Config.TemporaryEnvironment(
@@ -83,10 +83,10 @@ public sealed class WebsocketOutboxListenerIntegrationTests : IClassFixture<Post
         Assert.Null(GetLastMessage(manager, WebsocketTopic.QueueItemAdded));
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task SweepOnce_RemovesExpiredRows()
     {
-        if (!_fixture.IsAvailable) return;
+        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         using var environment = new backend.Tests.Config.TemporaryEnvironment(
