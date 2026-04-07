@@ -63,6 +63,87 @@ namespace NzbWebDAV.Database.Migrations
                     b.ToTable("ConfigItems", (string)null);
                 });
 
+            modelBuilder.Entity("NzbWebDAV.Database.Models.AuthFailureEntry", b =>
+                {
+                    b.Property<string>("IpAddress")
+                        .HasColumnName("ip_address")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("FailureCount")
+                        .HasColumnName("failure_count")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime>("WindowStart")
+                        .HasColumnName("window_start")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("IpAddress");
+
+                    b.HasIndex("WindowStart")
+                        .HasDatabaseName("ix_auth_failures_window_start");
+
+                    b.ToTable("auth_failures", (string)null);
+                });
+
+            modelBuilder.Entity("NzbWebDAV.Database.Models.ConnectionPoolClaim", b =>
+                {
+                    b.Property<string>("NodeId")
+                        .HasColumnName("node_id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("ProviderIndex")
+                        .HasColumnName("provider_index")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("ClaimedSlots")
+                        .HasColumnName("claimed_slots")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime>("HeartbeatAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnName("heartbeat_at")
+                        .HasColumnType("TEXT")
+                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+                    b.HasKey("NodeId", "ProviderIndex");
+
+                    b.HasIndex("HeartbeatAt")
+                        .HasDatabaseName("ix_connection_pool_claims_heartbeat_at");
+
+                    b.ToTable("connection_pool_claims", (string)null);
+                });
+
+            modelBuilder.Entity("NzbWebDAV.Database.Models.WebsocketOutboxEntry", b =>
+                {
+                    b.Property<long>("Seq")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnName("seq")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnName("created_at")
+                        .HasColumnType("TEXT")
+                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+                    b.Property<string>("Payload")
+                        .IsRequired()
+                        .HasColumnName("payload")
+                        .HasColumnType("jsonb");
+
+                    b.Property<string>("Topic")
+                        .IsRequired()
+                        .HasColumnName("topic")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Seq");
+
+                    b.HasIndex("CreatedAt")
+                        .HasDatabaseName("ix_websocket_outbox_created_at");
+
+                    b.ToTable("websocket_outbox", (string)null);
+                });
+
             modelBuilder.Entity("NzbWebDAV.Database.Models.YencHeaderCacheEntry", b =>
                 {
                     b.Property<string>("SegmentId")

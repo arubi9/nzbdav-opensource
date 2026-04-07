@@ -2,6 +2,16 @@
 
 public static class EnvironmentUtil
 {
+    public static string? GetDatabaseUrl()
+    {
+        return GetEnvironmentVariable("DATABASE_URL");
+    }
+
+    public static string? GetDatabaseUrlSession()
+    {
+        return GetEnvironmentVariable("DATABASE_URL_SESSION");
+    }
+
     public static string? GetEnvironmentVariable(string envVariable)
     {
         return StringUtil.EmptyToNull(Environment.GetEnvironmentVariable(envVariable));

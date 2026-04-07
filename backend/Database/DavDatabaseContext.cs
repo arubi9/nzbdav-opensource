@@ -1,6 +1,7 @@
 ﻿using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+using Npgsql;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database.Interceptors;
 using NzbWebDAV.Database.Models;
@@ -16,13 +17,11 @@ public sealed class DavDatabaseContext() : DbContext(CreateOptions())
     private static DbContextOptions<DavDatabaseContext> CreateOptions()
     {
         var builder = new DbContextOptionsBuilder<DavDatabaseContext>();
-        var databaseUrl = EnvironmentUtil.GetEnvironmentVariable("DATABASE_URL");
+        var databaseUrl = EnvironmentUtil.GetDatabaseUrl();
 
         if (!string.IsNullOrEmpty(databaseUrl))
         {
-            var connectionString = databaseUrl.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase)
-                ? ConvertPostgresUrl(databaseUrl)
-                : databaseUrl;
+            var connectionString = BuildPostgresConnectionString(databaseUrl);
             builder.UseNpgsql(connectionString);
         }
         else
@@ -44,13 +43,46 @@ public sealed class DavDatabaseContext() : DbContext(CreateOptions())
         return builder.Options;
     }
 
+    private static string BuildPostgresConnectionString(string databaseUrl)
+    {
+        var connectionString =
+            databaseUrl.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase) ||
+            databaseUrl.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase)
+                ? ConvertPostgresUrl(databaseUrl)
+                : databaseUrl;
+
+        return ApplyPgbouncerCompatibilityFlags(connectionString);
+    }
+
+    private static string ApplyPgbouncerCompatibilityFlags(string connectionString)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(connectionString)
+        {
+            Pooling = true
+        };
+
+        if (builder.MinPoolSize <= 0)
+            builder.MinPoolSize = 2;
+
+        if (builder.MaxPoolSize <= 0)
+            builder.MaxPoolSize = 50;
+
+        var normalized = builder.ConnectionString;
+        if (!normalized.Contains("No Reset On Close", StringComparison.OrdinalIgnoreCase))
+            normalized += ";No Reset On Close=true";
+        if (!normalized.Contains("Server Compatibility Mode", StringComparison.OrdinalIgnoreCase))
+            normalized += ";Server Compatibility Mode=Redshift";
+
+        return normalized;
+    }
+
     private static string ConvertPostgresUrl(string url)
     {
         var uri = new Uri(url);
         var userInfo = uri.UserInfo.Split(':', 2);
         var username = userInfo.Length > 0 ? Uri.UnescapeDataString(userInfo[0]) : string.Empty;
         var password = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : string.Empty;
-        return $"Host={uri.Host};Port={uri.Port};Database={uri.AbsolutePath.TrimStart('/')};Username={username};Password={password};Pooling=true;MinPoolSize=5;MaxPoolSize=50";
+        return $"Host={uri.Host};Port={uri.Port};Database={uri.AbsolutePath.TrimStart('/')};Username={username};Password={password};Pooling=true;MinPoolSize=2;MaxPoolSize=50";
     }
 
     // database sets
@@ -66,6 +98,9 @@ public sealed class DavDatabaseContext() : DbContext(CreateOptions())
     public DbSet<HealthCheckStat> HealthCheckStats => Set<HealthCheckStat>();
     public DbSet<ConfigItem> ConfigItems => Set<ConfigItem>();
     public DbSet<YencHeaderCacheEntry> YencHeaderCache => Set<YencHeaderCacheEntry>();
+    public DbSet<WebsocketOutboxEntry> WebsocketOutbox => Set<WebsocketOutboxEntry>();
+    public DbSet<AuthFailureEntry> AuthFailures => Set<AuthFailureEntry>();
+    public DbSet<ConnectionPoolClaim> ConnectionPoolClaims => Set<ConnectionPoolClaim>();
     public DbSet<BlobCleanupItem> BlobCleanupItems => Set<BlobCleanupItem>();
     public DbSet<MissingSegmentId> MissingSegmentIds => Set<MissingSegmentId>();
 
@@ -460,6 +495,61 @@ public sealed class DavDatabaseContext() : DbContext(CreateOptions())
                 .HasColumnName("cached_at")
                 .HasDefaultValueSql("CURRENT_TIMESTAMP");
             e.HasIndex(x => x.CachedAt).HasDatabaseName("ix_yenc_header_cache_cached_at");
+        });
+
+        b.Entity<WebsocketOutboxEntry>(e =>
+        {
+            e.ToTable("websocket_outbox");
+            e.HasKey(x => x.Seq);
+            e.Property(x => x.Seq)
+                .HasColumnName("seq")
+                .ValueGeneratedOnAdd();
+            e.Property(x => x.Topic)
+                .HasColumnName("topic")
+                .IsRequired();
+            e.Property(x => x.Payload)
+                .HasColumnName("payload")
+                .HasColumnType("jsonb")
+                .IsRequired();
+            e.Property(x => x.CreatedAt)
+                .HasColumnName("created_at")
+                .HasDefaultValueSql("CURRENT_TIMESTAMP");
+            e.HasIndex(x => x.CreatedAt).HasDatabaseName("ix_websocket_outbox_created_at");
+        });
+
+        b.Entity<AuthFailureEntry>(e =>
+        {
+            e.ToTable("auth_failures");
+            e.HasKey(x => x.IpAddress);
+            e.Property(x => x.IpAddress)
+                .HasColumnName("ip_address")
+                .IsRequired();
+            e.Property(x => x.FailureCount)
+                .HasColumnName("failure_count")
+                .IsRequired();
+            e.Property(x => x.WindowStart)
+                .HasColumnName("window_start")
+                .IsRequired();
+            e.HasIndex(x => x.WindowStart).HasDatabaseName("ix_auth_failures_window_start");
+        });
+
+        b.Entity<ConnectionPoolClaim>(e =>
+        {
+            e.ToTable("connection_pool_claims");
+            e.HasKey(x => new { x.NodeId, x.ProviderIndex });
+            e.Property(x => x.NodeId)
+                .HasColumnName("node_id")
+                .IsRequired();
+            e.Property(x => x.ProviderIndex)
+                .HasColumnName("provider_index")
+                .IsRequired();
+            e.Property(x => x.ClaimedSlots)
+                .HasColumnName("claimed_slots")
+                .IsRequired();
+            e.Property(x => x.HeartbeatAt)
+                .HasColumnName("heartbeat_at")
+                .HasDefaultValueSql("CURRENT_TIMESTAMP");
+            e.HasIndex(x => x.HeartbeatAt).HasDatabaseName("ix_connection_pool_claims_heartbeat_at");
         });
 
         // BlobCleanupItem

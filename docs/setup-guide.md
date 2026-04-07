@@ -145,6 +145,26 @@ NzbDav now keeps a backend live-stream cache at `/config/stream-cache` during ac
 * If multiple viewers are watching the same file, NzbDav can reuse already-fetched segments from this cache instead of fetching the same segment body again.
 * Make sure your `/config` volume has free **SSD/NVMe** space available. Slow or nearly-full storage will hurt streaming performance.
 
+### PgBouncer Setup
+
+Multi-node deployments should point normal EF Core traffic at the
+transaction-pooled `pgbouncer` service and reserve `pgbouncer-session`
+for long-lived LISTEN/NOTIFY traffic.
+
+* `DATABASE_URL` should point at `pgbouncer`.
+* `DATABASE_URL_SESSION` should point at `pgbouncer-session`.
+* Run schema migrations against `postgres` directly, not through
+  transaction-pooled PgBouncer. For example:
+
+```bash
+docker compose exec nzbdav-ingest sh -c \
+  'DATABASE_URL="Host=postgres;Port=5432;Database=nzbdav;Username=nzbdav;Password=nzbdav" dotnet NzbWebDAV.dll --db-migration'
+```
+
+This keeps migration-time session features and locking semantics on the
+real Postgres connection while the application runtime still benefits from
+PgBouncer pooling.
+
 ### L2 Cache Setup
 
 For multi-node deployments, you can add a shared L2 object-storage cache so all
