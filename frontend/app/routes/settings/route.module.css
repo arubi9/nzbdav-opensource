@@ -25,3 +25,33 @@
 .button {
     margin-right: 10px;
 }
+
+.banner {
+    border-radius: 8px;
+    border: 1px solid #586e75;
+    margin-bottom: 20px;
+    padding: 14px 16px;
+    line-height: 1.5;
+}
+
+.bannerWarning {
+    background: rgba(203, 75, 22, 0.14);
+    border-color: rgba(203, 75, 22, 0.55);
+    color: #fdf6e3;
+}
+
+.bannerInfo {
+    background: rgba(38, 139, 210, 0.14);
+    border-color: rgba(38, 139, 210, 0.55);
+    color: #e6f4ff;
+}
+
+.bannerTitle {
+    display: block;
+    font-weight: 700;
+    margin-bottom: 8px;
+}
+
+.bannerButton {
+    margin-top: 12px;
+}

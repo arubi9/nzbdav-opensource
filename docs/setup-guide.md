@@ -84,6 +84,29 @@ Run the container
 docker compose up -d
 ```
 
+### 1.1 Encryption At Rest
+
+NzbDav encrypts sensitive config values in `ConfigItems` with AES-256-GCM when `NZBDAV_MASTER_KEY` is set.
+
+Generate a key before first boot:
+
+```bash
+openssl rand -base64 32
+```
+
+Add it to the `nzbdav` service environment:
+
+```yaml
+environment:
+  - NZBDAV_MASTER_KEY=<paste-generated-key>
+```
+
+Notes:
+
+* New installs should set this before storing Usenet passwords, Arr API keys, the NzbDav API key, or the WebDAV password hash.
+* Existing plaintext installs will migrate sensitive rows on startup once the key is configured.
+* Historical backups made before that migration remain plaintext. After the first encrypted startup, rotate any credentials that may exist in older backups.
+
 ### 2. Core Configuration
 
 Navigate to `http://your-server-ip:3000`.

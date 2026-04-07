@@ -3,7 +3,9 @@ using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Clients.Usenet.Concurrency;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
+using NzbWebDAV.Services;
 using NzbWebDAV.Utils;
+using Serilog;
 
 namespace NzbWebDAV.Config;
 
@@ -11,8 +13,18 @@ public class ConfigManager
 {
     public static readonly string AppVersion = EnvironmentUtil.GetEnvironmentVariable("NZBDAV_VERSION") ?? "unknown";
 
+    private readonly ConfigEncryptionService _encryption;
     private readonly Dictionary<string, string> _config = new();
     public event EventHandler<ConfigEventArgs>? OnConfigChanged;
+
+    public ConfigManager() : this(new ConfigEncryptionService())
+    {
+    }
+
+    public ConfigManager(ConfigEncryptionService encryption)
+    {
+        _encryption = encryption;
+    }
 
     public async Task LoadConfig()
     {
@@ -23,7 +35,22 @@ public class ConfigManager
             _config.Clear();
             foreach (var configItem in configItems)
             {
-                _config[configItem.ConfigName] = configItem.ConfigValue;
+                var value = configItem.ConfigValue;
+                if (configItem.IsEncrypted)
+                {
+                    var (plaintext, usedOldKey) = _encryption.Decrypt(configItem.ConfigValue);
+                    value = plaintext;
+
+                    if (usedOldKey)
+                    {
+                        Log.Warning(
+                            "Config key '{Name}' was decrypted with NZBDAV_MASTER_KEY_OLD outside the startup rotation pass. " +
+                            "A full rotation requires a restart; keep NZBDAV_MASTER_KEY_OLD set until then.",
+                            configItem.ConfigName);
+                    }
+                }
+
+                _config[configItem.ConfigName] = value;
             }
         }
     }
@@ -44,15 +71,40 @@ public class ConfigManager
 
     public void UpdateValues(List<ConfigItem> configItems)
     {
+        var changedConfig = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var item in configItems)
+        {
+            changedConfig[item.ConfigName] = item.ConfigValue;
+
+            if (!SensitiveConfigKeys.IsSensitive(item.ConfigName) || !_encryption.IsKeyConfigured)
+            {
+                item.IsEncrypted = false;
+                continue;
+            }
+
+            if (ConfigEncryptionService.IsEncryptedFormat(item.ConfigValue))
+            {
+                throw new InvalidOperationException(
+                    $"Double-encryption detected for config key '{item.ConfigName}'. " +
+                    $"Value already has the v1: prefix before the encryption pass. " +
+                    $"This usually means the caller wrapped the value twice, or a " +
+                    $"plaintext value happens to start with 'v1:' and cannot be " +
+                    $"distinguished from ciphertext. Reject the write.");
+            }
+
+            item.ConfigValue = _encryption.Encrypt(item.ConfigValue);
+            item.IsEncrypted = true;
+        }
+
         lock (_config)
         {
             foreach (var configItem in configItems)
             {
-                _config[configItem.ConfigName] = configItem.ConfigValue;
+                _config[configItem.ConfigName] = changedConfig[configItem.ConfigName];
             }
         }
 
-        var changedConfig = configItems.ToDictionary(x => x.ConfigName, x => x.ConfigValue);
         OnConfigChanged?.Invoke(this, new ConfigEventArgs { ChangedConfig = changedConfig });
     }
 
