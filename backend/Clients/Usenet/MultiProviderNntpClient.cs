@@ -153,7 +153,7 @@ public class MultiProviderNntpClient(List<MultiConnectionNntpClient> providers) 
                 if (!isLastProvider && result.ResponseType == UsenetResponseType.NoArticleWithThatMessageId)
                     continue;
 
-                provider.Health.RegisterSuccess();
+                provider.Health.RegisterSuccess(provider.Client.ProviderType);
                 return result;
             }
             catch (Exception e) when (!e.IsCancellationException())
@@ -192,6 +192,31 @@ public class MultiProviderNntpClient(List<MultiConnectionNntpClient> providers) 
         public ProviderHealth Health { get; } = new();
     }
 
+    /// <summary>
+    /// Per-provider circuit breaker with exponential-backoff cooldown.
+    ///
+    /// State model (informal — not a full textbook Closed/Open/HalfOpen):
+    /// <list type="bullet">
+    /// <item><b>Closed</b> — <c>_consecutiveFailures == 0</c>. Provider is
+    /// used normally. <see cref="IsInCooldown"/> returns false.</item>
+    /// <item><b>Open</b> — <c>IsInCooldown(now) == true</c>. Provider is
+    /// skipped by <see cref="GetOrderedProviders"/>. Cooldown doubles on
+    /// each subsequent failure up to a 60s ceiling.</item>
+    /// <item><b>HalfOpen</b> (implicit) — the first request that arrives
+    /// AFTER <c>_cooldownUntilUtcTicks</c> expires acts as the probe.
+    /// Success → Closed (counter reset). Failure → Open with a longer
+    /// cooldown.</item>
+    /// </list>
+    ///
+    /// Known limitation: no HalfOpen concurrency limit. If N requests
+    /// arrive in the first ~100ms after cooldown expiry, all N hit the
+    /// provider before the first one's failure updates the cooldown.
+    /// In practice this is bounded — the first failure re-extends the
+    /// cooldown, and subsequent in-flight requests either succeed (good,
+    /// we're back online) or fail fast. Worst case: a handful of wasted
+    /// connection slots during each recovery probe window. Fixable with
+    /// an Interlocked.CompareExchange gate if it becomes a real problem.
+    /// </summary>
     private sealed class ProviderHealth
     {
         private int _consecutiveFailures;
@@ -200,10 +225,23 @@ public class MultiProviderNntpClient(List<MultiConnectionNntpClient> providers) 
         public bool IsInCooldown(DateTimeOffset now)
             => now.UtcTicks < Interlocked.Read(ref _cooldownUntilUtcTicks);
 
-        public void RegisterSuccess()
+        public void RegisterSuccess(ProviderType providerType)
         {
-            Interlocked.Exchange(ref _consecutiveFailures, 0);
-            Interlocked.Exchange(ref _cooldownUntilUtcTicks, DateTimeOffset.MinValue.UtcTicks);
+            var previousFailures = Interlocked.Exchange(ref _consecutiveFailures, 0);
+            var wasInCooldown = Interlocked.Exchange(
+                ref _cooldownUntilUtcTicks, DateTimeOffset.MinValue.UtcTicks);
+
+            // Emit a recovery log line ONLY on the transition from
+            // failing-or-cooling-down back to healthy. Normal healthy
+            // operation would otherwise log this on every successful
+            // request, which is noise.
+            if (previousFailures > 0 || wasInCooldown > DateTimeOffset.UtcNow.UtcTicks)
+            {
+                Log.Information(
+                    "NNTP provider {Type} recovered after {Failures} consecutive failures",
+                    providerType,
+                    previousFailures);
+            }
         }
 
         public void RegisterFailure(ProviderType providerType)
@@ -212,7 +250,8 @@ public class MultiProviderNntpClient(List<MultiConnectionNntpClient> providers) 
             var cooldown = TimeSpan.FromSeconds(Math.Min(60, Math.Pow(2, Math.Min(failures, 5))));
             var until = DateTimeOffset.UtcNow.Add(cooldown);
             Interlocked.Exchange(ref _cooldownUntilUtcTicks, until.UtcTicks);
-            Log.Warning("Blocking NNTP provider {Type} for {Cooldown}", providerType, cooldown);
+            Log.Warning("Blocking NNTP provider {Type} for {Cooldown} ({Failures} consecutive failures)",
+                providerType, cooldown, failures);
         }
     }
 }
