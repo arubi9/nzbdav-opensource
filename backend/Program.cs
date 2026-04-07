@@ -1,7 +1,8 @@
+global using Microsoft.EntityFrameworkCore;
+
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using NzbWebDAV.Api.Filters;
 using NWebDav.Server;
@@ -28,6 +29,7 @@ using Prometheus;
 using Serilog;
 using Serilog.Events;
 using Serilog.Sinks.SystemConsole.Themes;
+using System.Reflection;
 
 namespace NzbWebDAV;
 
@@ -113,6 +115,7 @@ public partial class Program
             .AddSingleton(configManager)
             .AddSingleton(websocketManager)
             .AddSingleton<LiveSegmentCache>()
+            .AddSingleton<SharedHeaderCache>()
             .AddSingleton<UsenetStreamingClient>()
             .AddSingleton<QueueManager>()
             .AddSingleton<ReadAheadWarmingService>()
@@ -137,6 +140,12 @@ public partial class Program
                 .AddHostedService<BlobCleanupService>()
                 .AddHostedService<SmallFilePrecacheService>()
                 .AddHostedService<MediaProbeService>();
+
+            if (!string.IsNullOrEmpty(EnvironmentUtil.GetEnvironmentVariable("DATABASE_URL")) &&
+                IsSharedHeaderCacheEnabled(configManager))
+            {
+                builder.Services.AddHostedService<YencHeaderCacheSweeper>();
+            }
 
             // Registered LAST among ingest services so its StopAsync runs
             // FIRST on shutdown — the host stops hosted services in reverse
@@ -244,5 +253,23 @@ public partial class Program
         // await cleanly under the host's graceful-stop budget.
         app.Lifetime.ApplicationStopping.Register(SigtermUtil.Cancel);
         await app.RunAsync().ConfigureAwait(false);
+    }
+
+    private static bool IsSharedHeaderCacheEnabled(ConfigManager configManager)
+    {
+        var value = TryGetConfigValue(configManager, "cache.metadata-shared-enabled");
+        return value == null || bool.Parse(value);
+    }
+
+    private static string? TryGetConfigValue(ConfigManager configManager, string configName)
+    {
+        var method = typeof(ConfigManager).GetMethod(
+            "GetConfigValue",
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            types: [typeof(string)],
+            modifiers: null);
+
+        return method?.Invoke(configManager, [configName]) as string;
     }
 }
