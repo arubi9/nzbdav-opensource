@@ -1,6 +1,10 @@
 ﻿using System.Net.WebSockets;
 using System.Text;
 using Microsoft.AspNetCore.Http;
+using Npgsql;
+using NzbWebDAV.Config;
+using NzbWebDAV.Database;
+using NzbWebDAV.Database.Models;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Utils;
 using Serilog;
@@ -51,11 +55,37 @@ public class WebsocketManager
     /// </summary>
     /// <param name="topic">The topic of the message to send</param>
     /// <param name="message">The message to send</param>
-    public Task SendMessage(WebsocketTopic topic, string message)
+    public async Task SendMessage(WebsocketTopic topic, string message)
     {
-        lock (_lastMessage) _lastMessage[topic] = message;
+        if (!MultiNodeMode.IsEnabled)
+        {
+            await FanoutToLocalSockets(topic, message).ConfigureAwait(false);
+            return;
+        }
+
+        await using (var dbContext = new DavDatabaseContext())
+        {
+            dbContext.WebsocketOutbox.Add(new WebsocketOutboxEntry
+            {
+                Topic = topic.Name,
+                Payload = message
+            });
+            await dbContext.SaveChangesAsync().ConfigureAwait(false);
+        }
+
+        lock (_lastMessage)
+            _lastMessage[topic] = message;
+
+        await TryNotifyAsync().ConfigureAwait(false);
+    }
+
+    public Task FanoutToLocalSockets(WebsocketTopic topic, string message)
+    {
+        lock (_lastMessage)
+            _lastMessage[topic] = message;
         List<WebSocket>? authenticatedSockets;
-        lock (_authenticatedSockets) authenticatedSockets = _authenticatedSockets.ToList();
+        lock (_authenticatedSockets)
+            authenticatedSockets = _authenticatedSockets.ToList();
         var topicMessage = new TopicMessage(topic, message);
         var bytes = new ArraySegment<byte>(Encoding.UTF8.GetBytes(topicMessage.ToJson()));
         return Task.WhenAll(authenticatedSockets.Select(x => SendMessage(x, bytes)));
@@ -162,6 +192,28 @@ public class WebsocketManager
     {
         if (socket.State == WebSocketState.Open)
             await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation, "Unauthorized", CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private static async Task TryNotifyAsync()
+    {
+        try
+        {
+            var sessionConnectionString = EnvironmentUtil.GetDatabaseUrlSession();
+            if (string.IsNullOrEmpty(sessionConnectionString))
+            {
+                Log.Warning("DATABASE_URL_SESSION is not configured; websocket outbox listeners will rely on catch-up polling.");
+                return;
+            }
+
+            await using var connection = new NpgsqlConnection(sessionConnectionString);
+            await connection.OpenAsync().ConfigureAwait(false);
+            await using var command = new NpgsqlCommand("NOTIFY websocket;", connection);
+            await command.ExecuteNonQueryAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Websocket NOTIFY failed; listeners will catch up via polling.");
+        }
     }
 
     private sealed class TopicMessage(WebsocketTopic topic, string message)

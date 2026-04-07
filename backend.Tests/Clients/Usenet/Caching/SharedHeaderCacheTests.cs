@@ -103,6 +103,7 @@ public sealed class PostgresHeaderCacheFixture : IAsyncLifetime
     }
 
     public bool IsAvailable { get; }
+    public string? ConnectionString => Environment.GetEnvironmentVariable("DATABASE_URL");
 
     public async Task InitializeAsync()
     {
@@ -131,7 +132,11 @@ public sealed class PostgresHeaderCacheFixture : IAsyncLifetime
             return;
 
         await using var dbContext = new DavDatabaseContext();
-        await dbContext.Database.ExecuteSqlRawAsync("DELETE FROM yenc_header_cache;");
+        await dbContext.Database.ExecuteSqlRawAsync(@"
+            DELETE FROM websocket_outbox;
+            DELETE FROM auth_failures;
+            DELETE FROM connection_pool_claims;
+            DELETE FROM yenc_header_cache;");
     }
 
     private static bool DockerAvailable()

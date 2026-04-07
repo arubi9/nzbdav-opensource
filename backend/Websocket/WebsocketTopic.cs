@@ -2,6 +2,8 @@
 
 public class WebsocketTopic
 {
+    private static Dictionary<string, WebsocketTopic>? _topicsByName;
+
     // Stateful topics
     public static readonly WebsocketTopic UsenetConnections = new("cxs", TopicType.State);
     public static readonly WebsocketTopic SymlinkTaskProgress = new("stp", TopicType.State);
@@ -25,6 +27,34 @@ public class WebsocketTopic
     {
         Name = name;
         Type = type;
+    }
+
+    public static bool TryFromName(string name, out WebsocketTopic? topic)
+    {
+        var found = TopicsByName.TryGetValue(name, out var matchedTopic);
+        topic = matchedTopic;
+        return found;
+    }
+
+    private static Dictionary<string, WebsocketTopic> TopicsByName => _topicsByName ??= CreateTopicsByName();
+
+    private static Dictionary<string, WebsocketTopic> CreateTopicsByName()
+    {
+        return new Dictionary<string, WebsocketTopic>(StringComparer.Ordinal)
+        {
+            [UsenetConnections.Name] = UsenetConnections,
+            [SymlinkTaskProgress.Name] = SymlinkTaskProgress,
+            [CleanupTaskProgress.Name] = CleanupTaskProgress,
+            [StrmToSymlinksTaskProgress.Name] = StrmToSymlinksTaskProgress,
+            [QueueItemStatus.Name] = QueueItemStatus,
+            [QueueItemProgress.Name] = QueueItemProgress,
+            [HealthItemStatus.Name] = HealthItemStatus,
+            [HealthItemProgress.Name] = HealthItemProgress,
+            [QueueItemAdded.Name] = QueueItemAdded,
+            [QueueItemRemoved.Name] = QueueItemRemoved,
+            [HistoryItemAdded.Name] = HistoryItemAdded,
+            [HistoryItemRemoved.Name] = HistoryItemRemoved,
+        };
     }
 
     public enum TopicType

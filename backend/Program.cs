@@ -145,6 +145,13 @@ public partial class Program
             .AddSingleton<ApiKeyAuthFilter>()
             .AddScoped<SabApiController>();
 
+        if (MultiNodeMode.IsEnabled)
+        {
+            builder.Services
+                .AddHostedService<WebsocketOutboxListener>()
+                .AddHostedService<WebsocketOutboxSweeper>();
+        }
+
         if (configManager.IsSharedHeaderCacheEnabled())
             builder.Services.AddSingleton<SharedHeaderCache>();
 
