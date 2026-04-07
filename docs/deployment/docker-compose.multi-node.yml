@@ -35,12 +35,15 @@ services:
       NZBDAV_ROLE: streaming
       DATABASE_URL: Host=postgres;Database=nzbdav;Username=nzbdav;Password=nzbdav
       FRONTEND_BACKEND_API_KEY: ${FRONTEND_BACKEND_API_KEY}
+      NZBDAV_L2_ACCESS_KEY: ${MINIO_ROOT_USER:-nzbdav}
+      NZBDAV_L2_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
       CONFIG_PATH: /config
       ASPNETCORE_URLS: http://0.0.0.0:8080
     volumes:
       - nzbdav-stream-1-config:/config
     depends_on:
       - postgres
+      - minio
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/ready"]
       interval: 10s
@@ -62,12 +65,15 @@ services:
       NZBDAV_ROLE: streaming
       DATABASE_URL: Host=postgres;Database=nzbdav;Username=nzbdav;Password=nzbdav
       FRONTEND_BACKEND_API_KEY: ${FRONTEND_BACKEND_API_KEY}
+      NZBDAV_L2_ACCESS_KEY: ${MINIO_ROOT_USER:-nzbdav}
+      NZBDAV_L2_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
       CONFIG_PATH: /config
       ASPNETCORE_URLS: http://0.0.0.0:8080
     volumes:
       - nzbdav-stream-2-config:/config
     depends_on:
       - postgres
+      - minio
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/ready"]
       interval: 10s
@@ -89,12 +95,15 @@ services:
       NZBDAV_ROLE: ingest
       DATABASE_URL: Host=postgres;Database=nzbdav;Username=nzbdav;Password=nzbdav
       FRONTEND_BACKEND_API_KEY: ${FRONTEND_BACKEND_API_KEY}
+      NZBDAV_L2_ACCESS_KEY: ${MINIO_ROOT_USER:-nzbdav}
+      NZBDAV_L2_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
       CONFIG_PATH: /config
       ASPNETCORE_URLS: http://0.0.0.0:8080
     volumes:
       - nzbdav-ingest-config:/config
     depends_on:
       - postgres
+      - minio
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/ready"]
       interval: 10s
@@ -124,6 +133,21 @@ services:
       timeout: 3s
       retries: 5
 
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-nzbdav}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    command: server /data
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
   haproxy:
     image: haproxy:3.1
     # restart: unless-stopped is the MINIMUM mitigation for the SPOF documented
@@ -151,3 +175,4 @@ volumes:
   nzbdav-stream-2-config:
   nzbdav-ingest-config:
   postgres-data:
+  minio-data:

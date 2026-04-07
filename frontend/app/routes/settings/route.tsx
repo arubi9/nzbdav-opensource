@@ -45,6 +45,12 @@ const defaultConfig = {
     "cache.precache-max-file-size-mb": "5",
     "cache.read-ahead-enable": "true",
     "cache.read-ahead-segments": "200",
+    "cache.l2.enabled": "false",
+    "cache.l2.endpoint": "",
+    "cache.l2.bucket-name": "nzbdav-segments",
+    "cache.l2.access-key": "",
+    "cache.l2.secret-key": "",
+    "cache.l2.ssl": "false",
 }
 
 export async function loader({ request }: Route.LoaderArgs) {
