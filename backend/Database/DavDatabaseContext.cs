@@ -1,6 +1,7 @@
 ﻿using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+using NzbWebDAV.Config;
 using NzbWebDAV.Database.Interceptors;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Utils;
@@ -30,7 +31,16 @@ public sealed class DavDatabaseContext() : DbContext(CreateOptions())
                 .AddInterceptors(new SqliteForeignKeyEnabler());
         }
 
-        builder.AddInterceptors(new ContentIndexSnapshotInterceptor());
+        // Only the ingest node owns the content-index snapshot file. Streaming
+        // nodes read from the shared Postgres (or their own SQLite in combined
+        // mode) as the source of truth — they have nothing useful to persist
+        // to a local snapshot file. Registering the interceptor on a streaming
+        // node would cost a disk write on every SaveChanges for no recovery
+        // benefit, because the streaming node's local snapshot would lag
+        // behind whatever the ingest node actually wrote.
+        if (NodeRoleConfig.RunsIngest)
+            builder.AddInterceptors(new ContentIndexSnapshotInterceptor());
+
         return builder.Options;
     }
 
