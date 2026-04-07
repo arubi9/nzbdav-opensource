@@ -42,6 +42,12 @@ public sealed class StartupEncryptionCheckTests
             var apiKeyRow = await setupContext.ConfigItems.SingleAsync(x => x.ConfigName == "api.key");
             apiKeyRow.ConfigValue = "plaintext-api-key";
             apiKeyRow.IsEncrypted = false;
+            setupContext.ConfigItems.Add(new ConfigItem
+            {
+                ConfigName = "arr.instances",
+                ConfigValue = "{}",
+                IsEncrypted = false
+            });
             await setupContext.SaveChangesAsync();
         }
 
@@ -58,6 +64,22 @@ public sealed class StartupEncryptionCheckTests
         Assert.True(secretRow.IsEncrypted);
         Assert.StartsWith("v1:", secretRow.ConfigValue);
         Assert.False(markerRow.IsEncrypted);
+    }
+
+    [Fact]
+    public async Task RunAsync_WithOnlyBootstrapKeys_DoesNotWriteMigrationMarker()
+    {
+        await _fixture.ResetAsync();
+        _fixture.SetKeys(masterKey: _fixture.CreateKey(), oldKey: null);
+
+        await using (var dbContext = await _fixture.CreateMigratedContextAsync())
+        using (var encryption = new ConfigEncryptionService())
+        {
+            await StartupEncryptionCheck.RunAsync(dbContext, encryption);
+        }
+
+        await using var verifyContext = await _fixture.CreateMigratedContextAsync();
+        Assert.False(await verifyContext.ConfigItems.AnyAsync(x => x.ConfigName == "encryption.migration-completed-at"));
     }
 }
 

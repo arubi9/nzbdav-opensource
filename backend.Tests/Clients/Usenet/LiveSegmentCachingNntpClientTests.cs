@@ -167,6 +167,39 @@ public class LiveSegmentCachingNntpClientTests
     }
 
     [Fact]
+    public async Task L1MissL2Hit_WithCapitalizedMetadataKeys_PromotesBodyToL1()
+    {
+        await using var cacheScope = new TempCacheScope();
+        var fakeNntpClient = new FakeNntpClient();
+        using var l2Cache = new ObjectStorageSegmentCache(
+            bucketName: "bucket",
+            queueCapacity: 4,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
+            tryReadAsync: (_, _) => Task.FromResult<ObjectStorageSegmentCache.ReadResult?>(
+                new ObjectStorageSegmentCache.ReadResult(
+                    Encoding.ASCII.GetBytes("segment-a"),
+                    new Dictionary<string, string>
+                    {
+                        ["X-Amz-Meta-Yenc-Header"] = System.Text.Json.JsonSerializer.Serialize(CreateHeader("segment.bin")),
+                        ["X-Amz-Meta-Category"] = "smallfile"
+                    })),
+            writeAsync: (_, _) => Task.CompletedTask);
+
+        using var liveCache = new LiveSegmentCache(cacheScope.Path, l2Cache: l2Cache);
+        using var client = new LiveSegmentCachingNntpClient(fakeNntpClient, liveCache);
+
+        var response = await client.DecodedBodyAsync("segment-a", CancellationToken.None);
+        await using (response.Stream)
+        {
+            Assert.Equal("segment-a", Encoding.ASCII.GetString(await ReadAllBytesAsync(response.Stream)));
+        }
+
+        Assert.Equal(0, fakeNntpClient.DecodedBodyCallCount);
+        Assert.True(liveCache.HasBody("segment-a"));
+        Assert.Equal(1, l2Cache.L2Hits);
+    }
+
+    [Fact]
     public async Task L2Miss_FallsThroughToNntp_AndEnqueuesWriteBehind()
     {
         await using var cacheScope = new TempCacheScope();

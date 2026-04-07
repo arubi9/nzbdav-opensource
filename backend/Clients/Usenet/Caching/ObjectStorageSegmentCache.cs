@@ -111,7 +111,10 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         }
 
         Interlocked.Increment(ref _l2Hits);
-        return result;
+        return result with
+        {
+            Metadata = new Dictionary<string, string>(result.Metadata, StringComparer.OrdinalIgnoreCase)
+        };
     }
 
     public void EnqueueWrite(

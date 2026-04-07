@@ -15,6 +15,7 @@ public sealed class YencHeaderCacheSweeper(ConfigManager configManager) : Backgr
         using var timer = new PeriodicTimer(SweepInterval);
         try
         {
+            await SweepOnce(stoppingToken).ConfigureAwait(false);
             while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false))
                 await SweepOnce(stoppingToken).ConfigureAwait(false);
         }

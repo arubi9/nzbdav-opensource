@@ -61,6 +61,7 @@ public static class StartupEncryptionCheck
         {
             var migrated = 0;
             var rotated = 0;
+            var migratedKeys = new List<string>();
 
             foreach (var row in await db.ConfigItems.ToListAsync().ConfigureAwait(false))
             {
@@ -69,6 +70,7 @@ public static class StartupEncryptionCheck
                     row.ConfigValue = encryption.Encrypt(row.ConfigValue);
                     row.IsEncrypted = true;
                     migrated++;
+                    migratedKeys.Add(row.ConfigName);
                     continue;
                 }
 
@@ -83,7 +85,11 @@ public static class StartupEncryptionCheck
                 }
             }
 
-            if (migrated > 0)
+            var migratedNonBootstrapKeys = migratedKeys
+                .Where(key => !BootstrapConfigKeys.Contains(key))
+                .ToList();
+
+            if (migratedNonBootstrapKeys.Count > 0)
             {
                 var alreadyHasMarker = await db.ConfigItems
                     .AnyAsync(c => c.ConfigName == "encryption.migration-completed-at")
@@ -108,12 +114,15 @@ public static class StartupEncryptionCheck
             if (migrated > 0)
             {
                 Log.Information("Encrypted {Count} existing config secrets on startup", migrated);
-                Log.Warning("===========================================================");
-                Log.Warning("  Historical backups of your config database (if any) are");
-                Log.Warning("  still PLAINTEXT. Rotate usenet provider passwords,");
-                Log.Warning("  Radarr/Sonarr API keys, and the NZBDAV API key NOW if");
-                Log.Warning("  there is any chance a pre-migration backup is exposed.");
-                Log.Warning("===========================================================");
+                if (migratedNonBootstrapKeys.Count > 0)
+                {
+                    Log.Warning("===========================================================");
+                    Log.Warning("  Historical backups of your config database (if any) are");
+                    Log.Warning("  still PLAINTEXT. Rotate usenet provider passwords,");
+                    Log.Warning("  Radarr/Sonarr API keys, and the NZBDAV API key NOW if");
+                    Log.Warning("  there is any chance a pre-migration backup is exposed.");
+                    Log.Warning("===========================================================");
+                }
             }
 
             if (rotated > 0)

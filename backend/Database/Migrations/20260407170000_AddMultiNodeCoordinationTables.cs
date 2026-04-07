@@ -1,10 +1,14 @@
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
+using NzbWebDAV.Database;
 
 #nullable disable
 
 namespace NzbWebDAV.Database.Migrations
 {
+    [DbContext(typeof(DavDatabaseContext))]
+    [Migration("20260407170000_AddMultiNodeCoordinationTables")]
     public partial class AddMultiNodeCoordinationTables : Migration
     {
         protected override void Up(MigrationBuilder migrationBuilder)

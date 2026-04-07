@@ -1,9 +1,13 @@
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
+using NzbWebDAV.Database;
 
 #nullable disable
 
 namespace NzbWebDAV.Database.Migrations
 {
+    [DbContext(typeof(DavDatabaseContext))]
+    [Migration("20260407130000_AddYencHeaderCache")]
     public partial class AddYencHeaderCache : Migration
     {
         protected override void Up(MigrationBuilder migrationBuilder)
