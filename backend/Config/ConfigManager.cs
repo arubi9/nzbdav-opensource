@@ -277,6 +277,36 @@ public class ConfigManager
     public int GetSnapshotDebounceSeconds()
         => int.Parse(StringUtil.EmptyToNull(GetConfigValue("cache.snapshot-debounce-seconds")) ?? "5");
 
+    public bool IsL2Enabled()
+    {
+        var val = StringUtil.EmptyToNull(GetConfigValue("cache.l2.enabled"));
+        return val != null ? bool.Parse(val) : false;
+    }
+
+    public string GetL2Endpoint()
+        => GetConfigValue("cache.l2.endpoint")
+           ?? throw new InvalidOperationException("cache.l2.endpoint is required when L2 is enabled.");
+
+    public string GetL2BucketName()
+        => GetConfigValue("cache.l2.bucket-name") ?? "nzbdav-segments";
+
+    public string GetL2AccessKey()
+        => StringUtil.EmptyToNull(GetConfigValue("cache.l2.access-key"))
+           ?? EnvironmentUtil.GetRequiredVariable("NZBDAV_L2_ACCESS_KEY");
+
+    public string GetL2SecretKey()
+        => StringUtil.EmptyToNull(GetConfigValue("cache.l2.secret-key"))
+           ?? EnvironmentUtil.GetRequiredVariable("NZBDAV_L2_SECRET_KEY");
+
+    public bool GetL2UseSsl()
+    {
+        var val = StringUtil.EmptyToNull(GetConfigValue("cache.l2.use-ssl"));
+        return val != null ? bool.Parse(val) : false;
+    }
+
+    public int GetL2WriteQueueCapacity()
+        => int.Parse(StringUtil.EmptyToNull(GetConfigValue("cache.l2.write-queue-capacity")) ?? "2048");
+
     public class ConfigEventArgs : EventArgs
     {
         public required Dictionary<string, string> ChangedConfig { get; init; }
