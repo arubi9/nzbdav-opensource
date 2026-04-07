@@ -53,7 +53,15 @@ public class BlobCleanupService(ObjectStorageSegmentCache? l2Cache = null) : Bac
     {
         BlobStore.Delete(cleanupItem.Id);
         if (l2Cache != null)
-            await l2Cache.DeleteByOwnerAsync(cleanupItem.Id, ct).ConfigureAwait(false);
+        {
+            var ownerId = await dbContext.HistoryItems
+                .Where(x => x.Id == cleanupItem.Id)
+                .Select(x => x.DownloadDirId)
+                .FirstOrDefaultAsync(ct)
+                .ConfigureAwait(false);
+
+            await l2Cache.DeleteByOwnerAsync(ownerId ?? cleanupItem.Id, ct).ConfigureAwait(false);
+        }
 
         dbContext.BlobCleanupItems.Remove(cleanupItem);
         await dbContext.SaveChangesAsync(ct).ConfigureAwait(false);

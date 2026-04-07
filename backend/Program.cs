@@ -72,13 +72,6 @@ public partial class Program
             return;
         }
 
-        if (!string.IsNullOrEmpty(EnvironmentUtil.GetEnvironmentVariable("DATABASE_URL")))
-        {
-            await databaseContext.Database
-                .EnsureCreatedAsync(SigtermUtil.GetCancellationToken())
-                .ConfigureAwait(false);
-        }
-
         var encryptionService = new ConfigEncryptionService();
         await StartupEncryptionCheck.RunAsync(databaseContext, encryptionService).ConfigureAwait(false);
 
