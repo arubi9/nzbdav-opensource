@@ -79,8 +79,11 @@ public partial class Program
                 .ConfigureAwait(false);
         }
 
+        var encryptionService = new ConfigEncryptionService();
+        await StartupEncryptionCheck.RunAsync(databaseContext, encryptionService).ConfigureAwait(false);
+
         // initialize the config-manager
-        var configManager = new ConfigManager();
+        var configManager = new ConfigManager(encryptionService);
         await configManager.LoadConfig().ConfigureAwait(false);
         ContentIndexSnapshotInterceptor.SetDebounceInterval(
             TimeSpan.FromSeconds(configManager.GetSnapshotDebounceSeconds()));
@@ -110,6 +113,7 @@ public partial class Program
             .AddCheck<NzbdavHealthCheck>("nzbdav");
         builder.Services
             .AddWebdavBasicAuthentication(configManager)
+            .AddSingleton(encryptionService)
             .AddSingleton(configManager)
             .AddSingleton(websocketManager)
             .AddSingleton<LiveSegmentCache>()

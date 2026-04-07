@@ -12,6 +12,8 @@ public class UpdateConfigController(DavDatabaseClient dbClient, ConfigManager co
 {
     private async Task<UpdateConfigResponse> UpdateConfig(UpdateConfigRequest request)
     {
+        configManager.UpdateValues(request.ConfigItems);
+
         // 1. Retrieve all ConfigItems from the database that match the ConfigNames in the request
         var configNames = request.ConfigItems.Select(x => x.ConfigName).ToHashSet();
         var existingItems = await dbClient.Ctx.ConfigItems
@@ -27,6 +29,7 @@ public class UpdateConfigController(DavDatabaseClient dbClient, ConfigManager co
             if (existingItemsDict.TryGetValue(item.ConfigName, out ConfigItem? existingItem))
             {
                 existingItem.ConfigValue = item.ConfigValue;
+                existingItem.IsEncrypted = item.IsEncrypted;
                 itemsToUpdate.Add(existingItem);
             }
             else
@@ -41,9 +44,6 @@ public class UpdateConfigController(DavDatabaseClient dbClient, ConfigManager co
 
         // 4. Save changes in one call
         await dbClient.Ctx.SaveChangesAsync(HttpContext.RequestAborted).ConfigureAwait(false);
-
-        // 5. Update the ConfigManager
-        configManager.UpdateValues(request.ConfigItems);
 
         // return
         return new UpdateConfigResponse { Status = true };

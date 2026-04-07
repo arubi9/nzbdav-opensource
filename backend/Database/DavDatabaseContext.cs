@@ -441,6 +441,9 @@ public sealed class DavDatabaseContext() : DbContext(CreateOptions())
             e.HasKey(i => i.ConfigName);
             e.Property(i => i.ConfigValue)
                 .IsRequired();
+            e.Property(i => i.IsEncrypted)
+                .IsRequired()
+                .HasDefaultValue(false);
         });
 
         // BlobCleanupItem
