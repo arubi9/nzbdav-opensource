@@ -1,6 +1,5 @@
 ﻿using System.Security.Cryptography;
 using NzbWebDAV.Models;
-using NzbWebDAV.Utils;
 
 namespace NzbWebDAV.Streams
 {
@@ -18,6 +17,29 @@ namespace NzbWebDAV.Streams
         private readonly long _mLimit;
         private bool _isDisposed;
         private long? _pendingSeekPosition = null;
+
+        /// <summary>
+        /// Optional ambient cancellation token plumbed into the sync-read
+        /// bridge. Set from the owning request pipeline so a disconnected
+        /// client unsticks an in-flight sync Read. Setting this also
+        /// propagates to the wrapped inner stream IF it's one of ours.
+        /// </summary>
+        public CancellationToken AmbientCancellationToken
+        {
+            get => _ambientCancellationToken;
+            set
+            {
+                _ambientCancellationToken = value;
+                // Propagate to the wrapped stream so inner sync reads also
+                // see client-abort. Stream composition means the wrapped
+                // stream can be another sync-bridged stream.
+                if (_mStream is DavMultipartFileStream dav)
+                    dav.AmbientCancellationToken = value;
+                else if (_mStream is MultipartFileStream multi)
+                    multi.AmbientCancellationToken = value;
+            }
+        }
+        private CancellationToken _ambientCancellationToken = CancellationToken.None;
 
         // store for reinitializing on Seek
         private readonly byte[] _mKey;
@@ -92,9 +114,11 @@ namespace NzbWebDAV.Streams
 
         public override int Read(byte[] buffer, int offset, int count)
         {
-            // AES-encrypted RAR consumers may still issue sync reads. Dispatch
-            // onto BlockingIoScheduler to bound thread-pool consumption.
-            return BlockingIoScheduler.RunBlocking(() => ReadAsync(buffer, offset, count));
+            // Sync-read bridge for AES-encrypted RAR consumers. Blocks a
+            // threadpool thread for the wrapped stream's I/O duration.
+            // AmbientCancellationToken propagates client-abort down through
+            // the AES decoder into the wrapped NNTP fetch.
+            return ReadAsync(buffer, offset, count, AmbientCancellationToken).GetAwaiter().GetResult();
         }
 
         public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken ct)

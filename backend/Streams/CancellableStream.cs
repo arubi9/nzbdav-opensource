@@ -1,5 +1,4 @@
 ﻿using System.Buffers;
-using NzbWebDAV.Utils;
 using UsenetSharp.Streams;
 
 namespace NzbWebDAV.Streams;
@@ -33,25 +32,28 @@ public class CancellableStream(Stream innerStream, CancellationToken token) : Fa
     public override int Read(byte[] buffer, int offset, int count)
     {
         CheckDisposed();
-        // Archive readers still exercise synchronous reads. Dispatch onto
-        // BlockingIoScheduler to bound thread-pool consumption under
-        // concurrent sync-read load.
-        return BlockingIoScheduler.RunBlocking(() => ReadAsync(buffer, offset, count, token));
+        // Sync-read bridge. Blocks a threadpool thread for the duration of
+        // the wrapped stream's I/O. The caller's cancellation token is
+        // already captured on this stream (line 6) so aborted clients
+        // unblock promptly.
+        return ReadAsync(buffer, offset, count, token).GetAwaiter().GetResult();
     }
 
     public override int Read(Span<byte> buffer)
     {
         CheckDisposed();
-        // Span-based sync reads for archive consumers. Same bounded-scheduler
-        // rationale as the byte-array overload above. The rent/copy dance is
-        // required because Span<byte> can't cross an async boundary — it's
-        // ref-struct — so we materialize into pooled heap memory first.
+        // Span-based sync reads for archive consumers. Materialize into
+        // pooled heap memory first because Span<byte> can't cross an async
+        // boundary (it's a ref-struct). Same blocking semantics as the
+        // byte-array overload.
         var array = ArrayPool<byte>.Shared.Rent(buffer.Length);
         try
         {
             var length = buffer.Length;
-            var result = BlockingIoScheduler.RunBlocking(
-                () => ReadAsync(new Memory<byte>(array, 0, length), token));
+            var result = ReadAsync(new Memory<byte>(array, 0, length), token)
+                .AsTask()
+                .GetAwaiter()
+                .GetResult();
             new ReadOnlySpan<byte>(array, 0, result).CopyTo(buffer);
             return result;
         }

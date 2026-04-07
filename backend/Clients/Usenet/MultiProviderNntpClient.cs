@@ -227,6 +227,19 @@ public class MultiProviderNntpClient(List<MultiConnectionNntpClient> providers) 
 
         public void RegisterSuccess(ProviderType providerType)
         {
+            // NOTE on thread-safety: RegisterSuccess and RegisterFailure
+            // are not mutually atomic. If a success and a failure race,
+            // the success can wipe the failure's cooldown. Example:
+            //   1. Failure thread:   Interlocked.Exchange cooldown = now+8s
+            //   2. Success thread:   Interlocked.Exchange cooldown = MinValue
+            //   3. Failure thread:   returns — but cooldown was cleared
+            // Result: one extra probe request per race, then the next
+            // failure re-opens the circuit with the correct cooldown. The
+            // race is self-correcting within one NNTP round-trip and the
+            // old code had the same shape, so this isn't a regression.
+            // Fix-if-needed: CompareExchange loop that only clears the
+            // cooldown when the current value matches what the caller
+            // sampled. Not worth the complexity for a self-healing race.
             var previousFailures = Interlocked.Exchange(ref _consecutiveFailures, 0);
             var wasInCooldown = Interlocked.Exchange(
                 ref _cooldownUntilUtcTicks, DateTimeOffset.MinValue.UtcTicks);

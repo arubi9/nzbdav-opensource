@@ -11,6 +11,14 @@ public class MultipartFileStream(MultipartFile multipartFile, INntpClient usenet
     private bool _isDisposed;
     private Stream? _currentStream;
 
+    /// <summary>
+    /// Optional ambient cancellation token plumbed into the sync-read
+    /// bridge. Set this from the owning pipeline so an aborted caller
+    /// unblocks the threadpool thread waiting on NNTP. Defaults to
+    /// <see cref="CancellationToken.None"/> for back-compat.
+    /// </summary>
+    public CancellationToken AmbientCancellationToken { get; set; } = CancellationToken.None;
+
     public override bool CanSeek => true;
     public override long Length => multipartFile.FileSize;
 
@@ -22,10 +30,11 @@ public class MultipartFileStream(MultipartFile multipartFile, INntpClient usenet
 
     public override int Read(byte[] buffer, int offset, int count)
     {
-        // Multipart archive consumers (e.g. RarProcessor, some NzbFile
-        // deobfuscation paths) still issue sync reads. Dispatch onto
-        // BlockingIoScheduler to bound thread-pool consumption.
-        return BlockingIoScheduler.RunBlocking(() => ReadAsync(buffer, offset, count));
+        // Sync-read bridge for archive consumers (RarProcessor, NzbFile
+        // deobfuscation). Blocks a threadpool thread for the NNTP fetch
+        // duration — unavoidable for a sync API. AmbientCancellationToken
+        // propagates client-abort so aborted callers unblock promptly.
+        return ReadAsync(buffer, offset, count, AmbientCancellationToken).GetAwaiter().GetResult();
     }
 
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)

@@ -3,7 +3,6 @@ using NzbWebDAV.Database.Models;
 using NzbWebDAV.Exceptions;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Models;
-using NzbWebDAV.Utils;
 
 namespace NzbWebDAV.Streams;
 
@@ -18,6 +17,15 @@ public class DavMultipartFileStream(
     private CombinedStream? _innerStream;
     private bool _disposed;
 
+    /// <summary>
+    /// Optional ambient cancellation token plumbed into the sync-read
+    /// bridge. Set this to <c>HttpContext.RequestAborted</c> from the
+    /// controller/handler that owns the stream so a disconnected client
+    /// unblocks the threadpool thread that's waiting on the NNTP fetch.
+    /// Defaults to <see cref="CancellationToken.None"/> for back-compat.
+    /// </summary>
+    public CancellationToken AmbientCancellationToken { get; set; } = CancellationToken.None;
+
 
     public override void Flush()
     {
@@ -27,11 +35,14 @@ public class DavMultipartFileStream(
     public override int Read(byte[] buffer, int offset, int count)
     {
         // Sync-read bridge for WebDAV clients that don't use ReadAsync (older
-        // rclone, Windows WebClient, some third-party archive libs). Dispatch
-        // onto BlockingIoScheduler so the blocking await doesn't saturate the
-        // default thread-pool under concurrent sync-read load. See
-        // BlockingIoScheduler.cs for the rationale.
-        return BlockingIoScheduler.RunBlocking(() => ReadAsync(buffer, offset, count));
+        // rclone, Windows WebClient, some third-party archive libs). This
+        // blocks a threadpool thread for the full duration of the NNTP
+        // fetch — there is no way to avoid that for a sync API. We rely on
+        // the enlarged threadpool (min 50, max 1000, set in Program.cs) to
+        // absorb concurrent sync reads, and on /ready backpressure to drain
+        // nodes that get saturated. AmbientCancellationToken propagates
+        // client-disconnect so aborted clients free their thread promptly.
+        return ReadAsync(buffer, offset, count, AmbientCancellationToken).GetAwaiter().GetResult();
     }
 
     public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
