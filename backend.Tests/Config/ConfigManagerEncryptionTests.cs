@@ -82,4 +82,27 @@ public sealed class ConfigManagerEncryptionTests
 
         Assert.Contains("Double-encryption detected", ex.Message);
     }
+
+    [Fact]
+    public void PrepareForStorage_EncryptsSensitiveCopies_WithoutMutatingOriginals()
+    {
+        _fixture.SetKeys(masterKey: _fixture.CreateKey(), oldKey: null);
+        using var encryption = new ConfigEncryptionService();
+        var configManager = new ConfigManager(encryption);
+        var original = new List<ConfigItem>
+        {
+            new()
+            {
+                ConfigName = "cache.l2.secret-key",
+                ConfigValue = "plain-secret"
+            }
+        };
+
+        var prepared = configManager.PrepareForStorage(original);
+
+        Assert.Equal("plain-secret", original[0].ConfigValue);
+        Assert.False(original[0].IsEncrypted);
+        Assert.StartsWith("v1:", prepared[0].ConfigValue);
+        Assert.True(prepared[0].IsEncrypted);
+    }
 }

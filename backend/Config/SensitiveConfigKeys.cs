@@ -11,6 +11,8 @@ public static class SensitiveConfigKeys
         "arr.instances",
         "api.key",
         "api.strm-key",
+        "cache.l2.access-key",
+        "cache.l2.secret-key",
         "webdav.pass",
     };
 

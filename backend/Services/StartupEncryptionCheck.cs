@@ -20,7 +20,10 @@ public static class StartupEncryptionCheck
     {
         var allConfig = await db.ConfigItems.ToListAsync().ConfigureAwait(false);
         var hasEncryptedRows = allConfig.Any(c => c.IsEncrypted);
-        var isFreshInstall = allConfig.Count == 0 || allConfig.All(c => BootstrapConfigKeys.Contains(c.ConfigName));
+        var hasAdminAccount = await db.Accounts
+            .AnyAsync(a => a.Type == Account.AccountType.Admin)
+            .ConfigureAwait(false);
+        var isFreshInstall = allConfig.Count == 0 || !hasAdminAccount;
 
         if (!encryption.IsKeyConfigured)
         {

@@ -108,6 +108,39 @@ public class ConfigManager
         OnConfigChanged?.Invoke(this, new ConfigEventArgs { ChangedConfig = changedConfig });
     }
 
+    public List<ConfigItem> PrepareForStorage(List<ConfigItem> configItems)
+    {
+        return configItems.Select(item =>
+        {
+            var copy = new ConfigItem
+            {
+                ConfigName = item.ConfigName,
+                ConfigValue = item.ConfigValue,
+                IsEncrypted = item.IsEncrypted
+            };
+
+            if (!SensitiveConfigKeys.IsSensitive(copy.ConfigName) || !_encryption.IsKeyConfigured)
+            {
+                copy.IsEncrypted = false;
+                return copy;
+            }
+
+            if (ConfigEncryptionService.IsEncryptedFormat(copy.ConfigValue))
+            {
+                throw new InvalidOperationException(
+                    $"Double-encryption detected for config key '{copy.ConfigName}'. " +
+                    $"Value already has the v1: prefix before the encryption pass. " +
+                    $"This usually means the caller wrapped the value twice, or a " +
+                    $"plaintext value happens to start with 'v1:' and cannot be " +
+                    $"distinguished from ciphertext. Reject the write.");
+            }
+
+            copy.ConfigValue = _encryption.Encrypt(copy.ConfigValue);
+            copy.IsEncrypted = true;
+            return copy;
+        }).ToList();
+    }
+
     public string GetRcloneMountDir()
     {
         var mountDir = StringUtil.EmptyToNull(GetConfigValue("rclone.mount-dir"))

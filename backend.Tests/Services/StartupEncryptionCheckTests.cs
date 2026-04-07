@@ -83,6 +83,30 @@ public sealed class StartupEncryptionCheckTests
     }
 
     [Fact]
+    public async Task RunAsync_WithoutKey_WithBootstrapRowsAndExistingAdmin_WarnsInsteadOfThrowing()
+    {
+        await _fixture.ResetAsync();
+        _fixture.SetKeys(masterKey: null, oldKey: null);
+
+        await using (var setupContext = await _fixture.CreateMigratedContextAsync())
+        {
+            setupContext.Accounts.Add(new Account
+            {
+                Type = Account.AccountType.Admin,
+                Username = "admin",
+                PasswordHash = "hash",
+                RandomSalt = "salt"
+            });
+            await setupContext.SaveChangesAsync();
+        }
+
+        await using var dbContext = await _fixture.CreateMigratedContextAsync();
+        using var encryption = new ConfigEncryptionService();
+
+        await StartupEncryptionCheck.RunAsync(dbContext, encryption);
+    }
+
+    [Fact]
     public async Task RunAsync_WithoutKey_WhenEncryptedRowsExist_ThrowsLostKeyError()
     {
         await _fixture.ResetAsync();
