@@ -36,6 +36,7 @@ public sealed class NzbdavMetricsCollectorTests
             () => 1,
             () => 7,
             () => 1,
+            () => null,
             registry,
             factory
         );
@@ -60,6 +61,52 @@ public sealed class NzbdavMetricsCollectorTests
         Assert.Contains("nzbdav_nntp_providers_healthy 1", metricsText);
         Assert.Contains("nzbdav_warming_sessions_active 7", metricsText);
         Assert.Contains("nzbdav_queue_processing 1", metricsText);
+        Assert.Contains("nzbdav_l2_cache_enabled 0", metricsText);
+    }
+
+    [Fact]
+    public async Task CollectMetrics_ExportsL2State_WhenEnabled()
+    {
+        var registry = Prometheus.Metrics.NewCustomRegistry();
+        var factory = Prometheus.Metrics.WithCustomRegistry(registry);
+        using var l2 = new ObjectStorageSegmentCache(
+            bucketName: "bucket",
+            queueCapacity: 4,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
+            tryReadAsync: (_, _) => Task.FromResult<ObjectStorageSegmentCache.ReadResult?>(null),
+            writeAsync: (_, _) => Task.CompletedTask,
+            startWriter: false);
+
+        await l2.TryReadAsync("segment-a", CancellationToken.None);
+        l2.EnqueueWrite("segment-a", [1], SegmentCategory.Unknown, null, new UsenetSharp.Models.UsenetYencHeader
+        {
+            FileName = "segment.bin",
+            FileSize = 1,
+            LineLength = 128,
+            PartNumber = 1,
+            TotalParts = 1,
+            PartSize = 1,
+            PartOffset = 0
+        });
+
+        var collector = new NzbdavMetricsCollector(
+            () => new LiveSegmentCacheStats(0, 0, 0, 0, 0, 0, 0, 0, 0),
+            () => 0L,
+            () => null,
+            () => 0,
+            () => 0,
+            () => 0,
+            () => l2,
+            registry,
+            factory
+        );
+
+        await using var output = new MemoryStream();
+        await registry.CollectAndExportAsTextAsync(output);
+        var metricsText = Encoding.UTF8.GetString(output.ToArray());
+
+        Assert.Contains("nzbdav_l2_cache_enabled 1", metricsText);
+        Assert.Contains("nzbdav_l2_cache_misses_total 1", metricsText);
     }
 
     private static ConnectionPoolStats CreatePoolStats(int maxConnections, int live, int idle)

@@ -138,6 +138,14 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         _queueSignal.Release();
     }
 
+    public async Task DeleteByOwnerAsync(Guid ownerNzbId, CancellationToken ct)
+    {
+        if (_disposed)
+            return;
+
+        await DeleteByOwnerCoreAsync(ownerNzbId, ct).ConfigureAwait(false);
+    }
+
     public void Dispose()
     {
         if (_disposed)
@@ -281,6 +289,47 @@ public sealed class ObjectStorageSegmentCache : IDisposable
             .WithCredentials(configManager.GetL2AccessKey(), configManager.GetL2SecretKey())
             .WithSSL(configManager.IsL2SslEnabled())
             .Build();
+    }
+
+    private async Task DeleteByOwnerCoreAsync(Guid ownerNzbId, CancellationToken ct)
+    {
+        var client = CreateClientFromDelegates();
+        if (client is null)
+            return;
+
+        var listArgs = new ListObjectsArgs()
+            .WithBucket(BucketName)
+            .WithPrefix("segments/")
+            .WithRecursive(true)
+            .WithIncludeUserMetadata(true);
+
+        await foreach (var item in client.ListObjectsEnumAsync(listArgs, ct).ConfigureAwait(false))
+        {
+            if (!item.UserMetadata.TryGetValue("X-Amz-Meta-Owner-Nzb-Id", out var metadataValue) &&
+                !item.UserMetadata.TryGetValue("x-amz-meta-owner-nzb-id", out metadataValue))
+            {
+                continue;
+            }
+
+            if (!Guid.TryParse(metadataValue, out var parsedOwner) || parsedOwner != ownerNzbId)
+                continue;
+
+            var removeArgs = new RemoveObjectArgs()
+                .WithBucket(BucketName)
+                .WithObject(item.Key);
+            await client.RemoveObjectAsync(removeArgs, ct).ConfigureAwait(false);
+        }
+    }
+
+    private IMinioClient? CreateClientFromDelegates()
+    {
+        if (_tryReadAsync.Target is null || _writeAsync.Target is null)
+            return null;
+
+        var readTargetType = _tryReadAsync.Target.GetType();
+        var clientField = readTargetType.GetFields(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            .FirstOrDefault(x => typeof(IMinioClient).IsAssignableFrom(x.FieldType));
+        return clientField?.GetValue(_tryReadAsync.Target) as IMinioClient;
     }
 
     public readonly record struct WriteRequest(

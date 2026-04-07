@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Hosting;
+using NzbWebDAV.Clients.Usenet.Caching;
 using NzbWebDAV.Database;
 using Serilog;
 
@@ -9,7 +10,7 @@ namespace NzbWebDAV.Services;
 /// Background service that processes the blob cleanup queue.
 /// Continuously monitors BlobCleanupQueueItems table and deletes corresponding blobs.
 /// </summary>
-public class BlobCleanupService : BackgroundService
+public class BlobCleanupService(ObjectStorageSegmentCache? l2Cache = null) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -31,12 +32,7 @@ public class BlobCleanupService : BackgroundService
                     continue;
                 }
 
-                // Delete the blob
-                BlobStore.Delete(cleanupItem.Id);
-
-                // Remove the queue item from database
-                dbContext.BlobCleanupItems.Remove(cleanupItem);
-                await dbContext.SaveChangesAsync(stoppingToken).ConfigureAwait(false);
+                await ProcessCleanupItemAsync(dbContext, cleanupItem, stoppingToken).ConfigureAwait(false);
 
                 // Continue immediately to next iteration to process more items
             }
@@ -48,5 +44,18 @@ public class BlobCleanupService : BackgroundService
                 await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken).ConfigureAwait(false);
             }
         }
+    }
+
+    internal async Task ProcessCleanupItemAsync(
+        DavDatabaseContext dbContext,
+        Database.Models.BlobCleanupItem cleanupItem,
+        CancellationToken ct)
+    {
+        BlobStore.Delete(cleanupItem.Id);
+        if (l2Cache != null)
+            await l2Cache.DeleteByOwnerAsync(cleanupItem.Id, ct).ConfigureAwait(false);
+
+        dbContext.BlobCleanupItems.Remove(cleanupItem);
+        await dbContext.SaveChangesAsync(ct).ConfigureAwait(false);
     }
 }

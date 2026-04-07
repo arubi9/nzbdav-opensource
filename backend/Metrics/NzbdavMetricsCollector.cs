@@ -15,6 +15,7 @@ public sealed class NzbdavMetricsCollector
     private readonly Func<int> _getHealthyProviders;
     private readonly Func<int> _getWarmingSessions;
     private readonly Func<int> _getQueueProcessing;
+    private readonly Func<ObjectStorageSegmentCache?> _getL2Cache;
 
     private readonly Gauge _cachedBytes;
     private readonly Gauge _cacheMaxBytes;
@@ -24,6 +25,12 @@ public sealed class NzbdavMetricsCollector
     private readonly Counter _cacheMisses;
     private readonly Counter _cacheEvictions;
     private readonly Counter _cacheDedupes;
+    private readonly Counter _l2Hits;
+    private readonly Counter _l2Misses;
+    private readonly Counter _l2Writes;
+    private readonly Counter _l2WriteFailures;
+    private readonly Counter _l2WritesDropped;
+    private readonly Gauge _l2Enabled;
     private readonly Gauge _nntpLive;
     private readonly Gauge _nntpIdle;
     private readonly Gauge _nntpActive;
@@ -36,6 +43,11 @@ public sealed class NzbdavMetricsCollector
     private long _previousMisses;
     private long _previousEvictions;
     private long _previousDedupes;
+    private long _previousL2Hits;
+    private long _previousL2Misses;
+    private long _previousL2Writes;
+    private long _previousL2WriteFailures;
+    private long _previousL2WritesDropped;
 
     private static readonly Gauge ActiveStreamsGauge = Prometheus.Metrics.CreateGauge(
         "nzbdav_streams_active",
@@ -58,6 +70,7 @@ public sealed class NzbdavMetricsCollector
         () => usenetClient.HealthyProviderCount,
         () => warming.ActiveSessionCount,
         () => queue.GetInProgressQueueItem().queueItem != null ? 1 : 0,
+        () => null,
         Prometheus.Metrics.DefaultRegistry,
         Prometheus.Metrics.WithCustomRegistry(Prometheus.Metrics.DefaultRegistry)
     )
@@ -71,6 +84,7 @@ public sealed class NzbdavMetricsCollector
         Func<int> getHealthyProviders,
         Func<int> getWarmingSessions,
         Func<int> getQueueProcessing,
+        Func<ObjectStorageSegmentCache?> getL2Cache,
         CollectorRegistry registry,
         IMetricFactory metricFactory
     )
@@ -81,6 +95,7 @@ public sealed class NzbdavMetricsCollector
         _getHealthyProviders = getHealthyProviders;
         _getWarmingSessions = getWarmingSessions;
         _getQueueProcessing = getQueueProcessing;
+        _getL2Cache = getL2Cache;
 
         _cachedBytes = metricFactory.CreateGauge(
             "nzbdav_cache_bytes",
@@ -107,6 +122,24 @@ public sealed class NzbdavMetricsCollector
         _cacheDedupes = metricFactory.CreateCounter(
             "nzbdav_cache_dedupes_total",
             "Deduplicated inflight requests");
+        _l2Hits = metricFactory.CreateCounter(
+            "nzbdav_l2_cache_hits_total",
+            "L2 object-storage cache hits");
+        _l2Misses = metricFactory.CreateCounter(
+            "nzbdav_l2_cache_misses_total",
+            "L2 object-storage cache misses");
+        _l2Writes = metricFactory.CreateCounter(
+            "nzbdav_l2_cache_writes_total",
+            "L2 object-storage cache writes");
+        _l2WriteFailures = metricFactory.CreateCounter(
+            "nzbdav_l2_cache_write_failures_total",
+            "L2 object-storage write failures");
+        _l2WritesDropped = metricFactory.CreateCounter(
+            "nzbdav_l2_cache_writes_dropped_total",
+            "L2 object-storage writes dropped due to full queue");
+        _l2Enabled = metricFactory.CreateGauge(
+            "nzbdav_l2_cache_enabled",
+            "1 if L2 cache is enabled, 0 otherwise");
 
         _nntpLive = metricFactory.CreateGauge(
             "nzbdav_nntp_connections_live",
@@ -152,6 +185,17 @@ public sealed class NzbdavMetricsCollector
             IncrementCounter(_cacheMisses, stats.Misses, ref _previousMisses);
             IncrementCounter(_cacheEvictions, stats.Evictions, ref _previousEvictions);
             IncrementCounter(_cacheDedupes, stats.Dedupes, ref _previousDedupes);
+
+            var l2 = _getL2Cache();
+            _l2Enabled.Set(l2 != null ? 1 : 0);
+            if (l2 != null)
+            {
+                IncrementCounter(_l2Hits, l2.L2Hits, ref _previousL2Hits);
+                IncrementCounter(_l2Misses, l2.L2Misses, ref _previousL2Misses);
+                IncrementCounter(_l2Writes, l2.L2Writes, ref _previousL2Writes);
+                IncrementCounter(_l2WriteFailures, l2.L2WriteFailures, ref _previousL2WriteFailures);
+                IncrementCounter(_l2WritesDropped, l2.L2WritesDropped, ref _previousL2WritesDropped);
+            }
 
             var poolStats = _getPoolStats();
             if (poolStats != null)
