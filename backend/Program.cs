@@ -112,7 +112,28 @@ public partial class Program
             .AddWebdavBasicAuthentication(configManager)
             .AddSingleton(configManager)
             .AddSingleton(websocketManager)
-            .AddSingleton<LiveSegmentCache>()
+            .AddSingleton(typeof(ObjectStorageSegmentCache), sp =>
+            {
+                if (!configManager.IsL2Enabled())
+                    return null!;
+
+                var cache = new ObjectStorageSegmentCache(configManager);
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await cache.EnsureBucketExistsAsync(CancellationToken.None).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Warning(ex, "Failed to initialize L2 object-storage bucket.");
+                    }
+                });
+                return cache;
+            })
+            .AddSingleton(sp => new LiveSegmentCache(
+                configManager,
+                sp.GetService<ObjectStorageSegmentCache>()))
             .AddSingleton<UsenetStreamingClient>()
             .AddSingleton<QueueManager>()
             .AddSingleton<ReadAheadWarmingService>()

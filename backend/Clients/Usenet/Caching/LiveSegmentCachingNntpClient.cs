@@ -74,7 +74,7 @@ public sealed class LiveSegmentCachingNntpClient(
             throw;
         }
 
-        if (cacheResult.UsedExistingFetch)
+        if (cacheResult.UsedExistingFetch || cacheResult.Origin == LiveSegmentCache.BodyFetchOrigin.L2)
             onConnectionReadyAgain?.Invoke(ArticleBodyResult.Retrieved);
 
         return cacheResult.Response;
@@ -126,7 +126,7 @@ public sealed class LiveSegmentCachingNntpClient(
             throw;
         }
 
-        if (cacheResult.UsedExistingFetch)
+        if (cacheResult.UsedExistingFetch || cacheResult.Origin == LiveSegmentCache.BodyFetchOrigin.L2)
             onConnectionReadyAgain?.Invoke(ArticleBodyResult.Retrieved);
 
         await cacheResult.Response.Stream.DisposeAsync().ConfigureAwait(false);

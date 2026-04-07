@@ -1,17 +1,21 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Minio;
 using Minio.DataModel.Args;
 using NzbWebDAV.Config;
 using Serilog;
+using UsenetSharp.Models;
 
 namespace NzbWebDAV.Clients.Usenet.Caching;
 
 public sealed class ObjectStorageSegmentCache : IDisposable
 {
+    public sealed record ReadResult(byte[] Body, IReadOnlyDictionary<string, string> Metadata);
+
     private readonly Func<CancellationToken, Task> _ensureBucketExistsAsync;
-    private readonly Func<string, CancellationToken, Task<byte[]?>> _tryReadAsync;
+    private readonly Func<string, CancellationToken, Task<ReadResult?>> _tryReadAsync;
     private readonly Func<WriteRequest, CancellationToken, Task> _writeAsync;
     private readonly CancellationTokenSource _shutdownCts = new();
     private readonly SemaphoreSlim _queueSignal = new(0);
@@ -49,7 +53,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         string bucketName,
         int queueCapacity,
         Func<CancellationToken, Task> ensureBucketExistsAsync,
-        Func<string, CancellationToken, Task<byte[]?>> tryReadAsync,
+        Func<string, CancellationToken, Task<ReadResult?>> tryReadAsync,
         Func<WriteRequest, CancellationToken, Task> writeAsync,
         bool startWriter = true)
     {
@@ -80,28 +84,34 @@ public sealed class ObjectStorageSegmentCache : IDisposable
 
     public async Task<Stream?> TryReadAsync(string segmentId, CancellationToken ct)
     {
+        var result = await TryReadWithMetadataAsync(segmentId, ct).ConfigureAwait(false);
+        return result is null ? null : new MemoryStream(result.Body, writable: false);
+    }
+
+    public async Task<ReadResult?> TryReadWithMetadataAsync(string segmentId, CancellationToken ct)
+    {
         if (_disposed)
             return null;
 
-        byte[]? body;
+        ReadResult? result;
         try
         {
-            body = await _tryReadAsync(segmentId, ct).ConfigureAwait(false);
+            result = await _tryReadAsync(segmentId, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             Log.Debug(ex, "L2 read failed for segment {SegmentId}", segmentId);
-            body = null;
+            result = null;
         }
 
-        if (body is null)
+        if (result is null)
         {
             Interlocked.Increment(ref _l2Misses);
             return null;
         }
 
         Interlocked.Increment(ref _l2Hits);
-        return new MemoryStream(body, writable: false);
+        return result;
     }
 
     public void EnqueueWrite(
@@ -109,7 +119,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         byte[] body,
         SegmentCategory category,
         Guid? ownerNzbId,
-        string yencFileName)
+        UsenetYencHeader yencHeaders)
     {
         if (_disposed)
             return;
@@ -124,7 +134,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
             return;
         }
 
-        _writeQueue.Enqueue(new WriteRequest(segmentId, body, category, ownerNzbId, yencFileName));
+        _writeQueue.Enqueue(new WriteRequest(segmentId, body, category, ownerNzbId, yencHeaders));
         _queueSignal.Release();
     }
 
@@ -210,7 +220,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         };
     }
 
-    private static Func<string, CancellationToken, Task<byte[]?>> CreateReadDelegate(ConfigManager configManager)
+    private static Func<string, CancellationToken, Task<ReadResult?>> CreateReadDelegate(ConfigManager configManager)
     {
         var client = CreateClient(configManager);
         var bucketName = configManager.GetL2BucketName();
@@ -224,8 +234,8 @@ public sealed class ObjectStorageSegmentCache : IDisposable
                     .WithBucket(bucketName)
                     .WithObject(GetObjectKey(segmentId))
                     .WithCallbackStream(stream => stream.CopyTo(memory));
-                await client.GetObjectAsync(args, ct).ConfigureAwait(false);
-                return memory.ToArray();
+                var stat = await client.GetObjectAsync(args, ct).ConfigureAwait(false);
+                return new ReadResult(memory.ToArray(), stat.MetaData);
             }
             catch (Exception ex)
             {
@@ -246,7 +256,8 @@ public sealed class ObjectStorageSegmentCache : IDisposable
             var headers = new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["x-amz-meta-segment-id"] = request.SegmentId,
-                ["x-amz-meta-yenc-filename"] = request.YencFileName,
+                ["x-amz-meta-yenc-filename"] = request.YencHeaders.FileName,
+                ["x-amz-meta-yenc-header"] = JsonSerializer.Serialize(request.YencHeaders),
                 ["x-amz-meta-category"] = request.Category.ToString().ToLowerInvariant()
             };
             if (request.OwnerNzbId.HasValue)
@@ -277,5 +288,5 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         byte[] Body,
         SegmentCategory Category,
         Guid? OwnerNzbId,
-        string YencFileName);
+        UsenetYencHeader YencHeaders);
 }

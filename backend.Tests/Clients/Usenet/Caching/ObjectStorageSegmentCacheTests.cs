@@ -1,5 +1,6 @@
 using System.Text;
 using NzbWebDAV.Clients.Usenet.Caching;
+using UsenetSharp.Models;
 
 namespace NzbWebDAV.Tests.Clients.Usenet.Caching;
 
@@ -31,7 +32,8 @@ public sealed class ObjectStorageSegmentCacheTests
             tryReadAsync: (segmentId, ct) =>
             {
                 var body = Encoding.ASCII.GetBytes($"body:{segmentId}");
-                return Task.FromResult<byte[]?>(body);
+                return Task.FromResult<ObjectStorageSegmentCache.ReadResult?>(
+                    new ObjectStorageSegmentCache.ReadResult(body, new Dictionary<string, string>()));
             },
             writeAsync: (_, _) => Task.CompletedTask);
 
@@ -52,7 +54,7 @@ public sealed class ObjectStorageSegmentCacheTests
             bucketName: "bucket",
             queueCapacity: 4,
             ensureBucketExistsAsync: _ => Task.CompletedTask,
-            tryReadAsync: (_, _) => Task.FromResult<byte[]?>(null),
+            tryReadAsync: (_, _) => Task.FromResult<ObjectStorageSegmentCache.ReadResult?>(null),
             writeAsync: (_, _) => Task.CompletedTask);
 
         var stream = await cache.TryReadAsync("segment-a", CancellationToken.None);
@@ -87,12 +89,12 @@ public sealed class ObjectStorageSegmentCacheTests
             bucketName: "bucket",
             queueCapacity: 1,
             ensureBucketExistsAsync: _ => Task.CompletedTask,
-            tryReadAsync: (_, _) => Task.FromResult<byte[]?>(null),
+            tryReadAsync: (_, _) => Task.FromResult<ObjectStorageSegmentCache.ReadResult?>(null),
             writeAsync: async (_, _) => await gate.Task.ConfigureAwait(false),
             startWriter: false);
 
-        cache.EnqueueWrite("segment-a", [1, 2, 3], SegmentCategory.SmallFile, null, "a.bin");
-        cache.EnqueueWrite("segment-b", [4, 5, 6], SegmentCategory.SmallFile, null, "b.bin");
+        cache.EnqueueWrite("segment-a", [1, 2, 3], SegmentCategory.SmallFile, null, CreateHeader("a.bin"));
+        cache.EnqueueWrite("segment-b", [4, 5, 6], SegmentCategory.SmallFile, null, CreateHeader("b.bin"));
 
         Assert.Equal(1, cache.L2WritesDropped);
         gate.TrySetResult();
@@ -107,14 +109,14 @@ public sealed class ObjectStorageSegmentCacheTests
             bucketName: "bucket",
             queueCapacity: 4,
             ensureBucketExistsAsync: _ => Task.CompletedTask,
-            tryReadAsync: (_, _) => Task.FromResult<byte[]?>(null),
+            tryReadAsync: (_, _) => Task.FromResult<ObjectStorageSegmentCache.ReadResult?>(null),
             writeAsync: (_, _) =>
             {
                 wrote.TrySetResult();
                 return Task.CompletedTask;
             });
 
-        cache.EnqueueWrite("segment-a", [1, 2, 3], SegmentCategory.SmallFile, null, "a.bin");
+        cache.EnqueueWrite("segment-a", [1, 2, 3], SegmentCategory.SmallFile, null, CreateHeader("a.bin"));
         await wrote.Task.WaitAsync(TimeSpan.FromSeconds(1));
 
         Assert.Equal(1, cache.L2Writes);
@@ -129,16 +131,16 @@ public sealed class ObjectStorageSegmentCacheTests
             bucketName: "bucket",
             queueCapacity: 4,
             ensureBucketExistsAsync: _ => Task.CompletedTask,
-            tryReadAsync: (_, _) => Task.FromResult<byte[]?>(null),
+            tryReadAsync: (_, _) => Task.FromResult<ObjectStorageSegmentCache.ReadResult?>(null),
             writeAsync: async (_, _) =>
             {
                 await Task.Delay(50);
                 Interlocked.Increment(ref writes);
             });
 
-        cache.EnqueueWrite("segment-a", [1], SegmentCategory.Unknown, null, "a.bin");
-        cache.EnqueueWrite("segment-b", [2], SegmentCategory.Unknown, null, "b.bin");
-        cache.EnqueueWrite("segment-c", [3], SegmentCategory.Unknown, null, "c.bin");
+        cache.EnqueueWrite("segment-a", [1], SegmentCategory.Unknown, null, CreateHeader("a.bin"));
+        cache.EnqueueWrite("segment-b", [2], SegmentCategory.Unknown, null, CreateHeader("b.bin"));
+        cache.EnqueueWrite("segment-c", [3], SegmentCategory.Unknown, null, CreateHeader("c.bin"));
 
         cache.Dispose();
 
@@ -152,10 +154,24 @@ public sealed class ObjectStorageSegmentCacheTests
             bucketName: "bucket",
             queueCapacity: 4,
             ensureBucketExistsAsync: _ => Task.CompletedTask,
-            tryReadAsync: (_, _) => Task.FromResult<byte[]?>(null),
+            tryReadAsync: (_, _) => Task.FromResult<ObjectStorageSegmentCache.ReadResult?>(null),
             writeAsync: (_, _) => Task.CompletedTask);
 
         cache.Dispose();
         cache.Dispose();
+    }
+
+    private static UsenetYencHeader CreateHeader(string fileName)
+    {
+        return new UsenetYencHeader
+        {
+            FileName = fileName,
+            FileSize = 123,
+            LineLength = 128,
+            PartNumber = 1,
+            TotalParts = 1,
+            PartSize = 123,
+            PartOffset = 0
+        };
     }
 }

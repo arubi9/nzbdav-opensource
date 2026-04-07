@@ -1,6 +1,7 @@
 using System.Text;
 using NzbWebDAV.Clients.Usenet.Caching;
 using NzbWebDAV.Tests.TestDoubles;
+using UsenetSharp.Models;
 
 namespace NzbWebDAV.Tests.Clients.Usenet;
 
@@ -133,11 +134,87 @@ public class LiveSegmentCachingNntpClientTests
         await firstResponse.Stream.DisposeAsync();
     }
 
+    [Fact]
+    public async Task L1MissL2Hit_PromotesBodyToL1_WithoutCallingUnderlyingClient()
+    {
+        await using var cacheScope = new TempCacheScope();
+        var fakeNntpClient = new FakeNntpClient();
+        using var l2Cache = new ObjectStorageSegmentCache(
+            bucketName: "bucket",
+            queueCapacity: 4,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
+            tryReadAsync: (segmentId, _) => Task.FromResult<ObjectStorageSegmentCache.ReadResult?>(
+                new ObjectStorageSegmentCache.ReadResult(
+                    Encoding.ASCII.GetBytes("segment-a"),
+                    new Dictionary<string, string>
+                    {
+                        ["x-amz-meta-yenc-header"] = System.Text.Json.JsonSerializer.Serialize(CreateHeader("segment.bin"))
+                    })),
+            writeAsync: (_, _) => Task.CompletedTask);
+
+        using var liveCache = new LiveSegmentCache(cacheScope.Path, l2Cache: l2Cache);
+        using var client = new LiveSegmentCachingNntpClient(fakeNntpClient, liveCache);
+
+        var response = await client.DecodedBodyAsync("segment-a", CancellationToken.None);
+        await using (response.Stream)
+        {
+            Assert.Equal("segment-a", Encoding.ASCII.GetString(await ReadAllBytesAsync(response.Stream)));
+        }
+
+        Assert.Equal(0, fakeNntpClient.DecodedBodyCallCount);
+        Assert.True(liveCache.HasBody("segment-a"));
+        Assert.Equal(1, l2Cache.L2Hits);
+    }
+
+    [Fact]
+    public async Task L2Miss_FallsThroughToNntp_AndEnqueuesWriteBehind()
+    {
+        await using var cacheScope = new TempCacheScope();
+        var fakeNntpClient = new FakeNntpClient()
+            .AddSegment("segment-a", Encoding.ASCII.GetBytes("segment-a"), partOffset: 0);
+        var writes = new List<ObjectStorageSegmentCache.WriteRequest>();
+        using var l2Cache = new ObjectStorageSegmentCache(
+            bucketName: "bucket",
+            queueCapacity: 4,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
+            tryReadAsync: (_, _) => Task.FromResult<ObjectStorageSegmentCache.ReadResult?>(null),
+            writeAsync: (request, _) =>
+            {
+                writes.Add(request);
+                return Task.CompletedTask;
+            });
+
+        using var liveCache = new LiveSegmentCache(cacheScope.Path, l2Cache: l2Cache);
+        using var client = new LiveSegmentCachingNntpClient(fakeNntpClient, liveCache);
+
+        var response = await client.DecodedBodyAsync("segment-a", CancellationToken.None);
+        await response.Stream.DisposeAsync();
+        await Task.Delay(50);
+
+        Assert.Equal(1, fakeNntpClient.DecodedBodyCallCount);
+        Assert.Single(writes);
+        Assert.Equal("segment-a", writes[0].SegmentId);
+    }
+
     private static async Task<byte[]> ReadAllBytesAsync(Stream stream)
     {
         using var memoryStream = new MemoryStream();
         await stream.CopyToAsync(memoryStream);
         return memoryStream.ToArray();
+    }
+
+    private static UsenetYencHeader CreateHeader(string fileName)
+    {
+        return new UsenetYencHeader
+        {
+            FileName = fileName,
+            FileSize = 123,
+            LineLength = 128,
+            PartNumber = 1,
+            TotalParts = 1,
+            PartSize = 123,
+            PartOffset = 0
+        };
     }
 
     private sealed class TempCacheScope : IAsyncDisposable
