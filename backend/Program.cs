@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using NzbWebDAV.Api.Filters;
@@ -171,6 +172,10 @@ public partial class Program
         app.UseMiddleware<RequestTimeoutMiddleware>();
         app.UseMiddleware<ExceptionMiddleware>();
         app.UseWebSockets();
+        // /health — diagnostic endpoint. Healthy and Degraded both return 200
+        // so operators can inspect the JSON body to see current state (cache
+        // utilization, NNTP pool pressure, provider health). Unhealthy returns
+        // 503. Hit this from operator dashboards, not load balancers.
         app.MapHealthChecks("/health", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
         {
             ResponseWriter = async (context, report) =>
@@ -189,6 +194,34 @@ public partial class Program
                 };
                 await System.Text.Json.JsonSerializer.SerializeAsync(
                     context.Response.Body, result, cancellationToken: context.RequestAborted
+                ).ConfigureAwait(false);
+            }
+        }).AllowAnonymous();
+
+        // /ready — load-balancer readiness endpoint. Both Degraded AND
+        // Unhealthy map to 503 so HAProxy (or any upstream LB doing httpchk)
+        // drains the node while it's saturated. Once utilization drops back
+        // below the Degraded thresholds (<90% NNTP and cache), /ready starts
+        // returning 200 and the LB brings the node back into rotation.
+        //
+        // This is the "backpressure" signal for audit item 14: an overloaded
+        // node actively tells the LB "don't send me more work" instead of
+        // waiting for /health to fail outright. Tiny response body — httpchk
+        // just needs the status code.
+        app.MapHealthChecks("/ready", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+        {
+            ResultStatusCodes =
+            {
+                [Microsoft.Extensions.Diagnostics.HealthChecks.HealthStatus.Healthy]   = StatusCodes.Status200OK,
+                [Microsoft.Extensions.Diagnostics.HealthChecks.HealthStatus.Degraded]  = StatusCodes.Status503ServiceUnavailable,
+                [Microsoft.Extensions.Diagnostics.HealthChecks.HealthStatus.Unhealthy] = StatusCodes.Status503ServiceUnavailable,
+            },
+            ResponseWriter = async (context, report) =>
+            {
+                context.Response.ContentType = "text/plain";
+                await context.Response.WriteAsync(
+                    report.Status.ToString(),
+                    context.RequestAborted
                 ).ConfigureAwait(false);
             }
         }).AllowAnonymous();
