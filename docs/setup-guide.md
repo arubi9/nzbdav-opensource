@@ -145,6 +145,23 @@ NzbDav now keeps a backend live-stream cache at `/config/stream-cache` during ac
 * If multiple viewers are watching the same file, NzbDav can reuse already-fetched segments from this cache instead of fetching the same segment body again.
 * Make sure your `/config` volume has free **SSD/NVMe** space available. Slow or nearly-full storage will hurt streaming performance.
 
+### L2 Cache Setup
+
+If you use the multi-node deployment, the bundled MinIO service provides the shared L2 object cache for segment bodies.
+
+* Enable `cache.l2.enabled` in `Settings` > `WebDAV`.
+* Set `cache.l2.endpoint` to `minio:9000`.
+* Leave `cache.l2.ssl` disabled for the bundled MinIO service.
+* Keep `cache.l2.bucket-name` at the default `nzbdav-segments` unless you need to isolate deployments.
+* Set `cache.l2.access-key` and `cache.l2.secret-key` to the same credentials used by the MinIO service.
+* L1 remains the local disk cache on each node. L2 only stores shared segment bodies.
+
+Recommended MinIO lifecycle policy:
+
+```bash
+mc ilm rule add --expire-days 30 nzbdav-minio/nzbdav-segments
+```
+
 Now we mount the NzbDav web dav to the host file system using a sidecar container.
 
 ### 1. Prepare Host Directory
@@ -357,4 +374,3 @@ In the AIOStreams UI:
 ### 3. Install to Stremio
 
 Go to the **Save & Install** tab, click **Save**, and then install the addon to Stremio.
-

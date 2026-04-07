@@ -196,6 +196,92 @@ export function WebdavSettings({ config, setNewConfig }: SabnzbdSettingsProps) {
                 <Form.Check
                     className={styles.input}
                     type="checkbox"
+                    id="l2-enabled-checkbox"
+                    aria-describedby="l2-enabled-help"
+                    label="Enable Shared L2 Object Cache"
+                    checked={config["cache.l2.enabled"] === "true"}
+                    onChange={e => setNewConfig({ ...config, "cache.l2.enabled": "" + e.target.checked })} />
+                <Form.Text id="l2-enabled-help" muted>
+                    Store segment bodies in shared object storage so other nodes can reuse them after an L1 miss.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
+                <Form.Label htmlFor="l2-endpoint-input">L2 Endpoint</Form.Label>
+                <Form.Control
+                    {...className([styles.input, isL2Enabled(config) && !isNonEmpty(config["cache.l2.endpoint"]) && styles.error])}
+                    type="text"
+                    id="l2-endpoint-input"
+                    aria-describedby="l2-endpoint-help"
+                    placeholder="minio:9000"
+                    value={config["cache.l2.endpoint"]}
+                    onChange={e => setNewConfig({ ...config, "cache.l2.endpoint": e.target.value })} />
+                <Form.Text id="l2-endpoint-help" muted>
+                    S3-compatible endpoint for shared cache storage. Example: <code>minio:9000</code>.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
+                <Form.Label htmlFor="l2-bucket-name-input">L2 Bucket Name</Form.Label>
+                <Form.Control
+                    {...className([styles.input, isL2Enabled(config) && !isValidL2BucketName(config["cache.l2.bucket-name"]) && styles.error])}
+                    type="text"
+                    id="l2-bucket-name-input"
+                    aria-describedby="l2-bucket-name-help"
+                    placeholder="nzbdav-segments"
+                    value={config["cache.l2.bucket-name"]}
+                    onChange={e => setNewConfig({ ...config, "cache.l2.bucket-name": e.target.value })} />
+                <Form.Text id="l2-bucket-name-help" muted>
+                    Bucket names must be 3-63 characters of lowercase letters, numbers, and dashes.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
+                <Form.Label htmlFor="l2-access-key-input">L2 Access Key</Form.Label>
+                <Form.Control
+                    {...className([styles.input, isL2Enabled(config) && !isNonEmpty(config["cache.l2.access-key"]) && styles.error])}
+                    type="text"
+                    id="l2-access-key-input"
+                    aria-describedby="l2-access-key-help"
+                    value={config["cache.l2.access-key"]}
+                    onChange={e => setNewConfig({ ...config, "cache.l2.access-key": e.target.value })} />
+                <Form.Text id="l2-access-key-help" muted>
+                    Matches the MinIO root user or the access key for your S3-compatible backend.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
+                <Form.Label htmlFor="l2-secret-key-input">L2 Secret Key</Form.Label>
+                <Form.Control
+                    {...className([styles.input, isL2Enabled(config) && !isNonEmpty(config["cache.l2.secret-key"]) && styles.error])}
+                    type="password"
+                    id="l2-secret-key-input"
+                    aria-describedby="l2-secret-key-help"
+                    value={config["cache.l2.secret-key"]}
+                    onChange={e => setNewConfig({ ...config, "cache.l2.secret-key": e.target.value })} />
+                <Form.Text id="l2-secret-key-help" muted>
+                    Secret used with the access key to authenticate against shared object storage.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
+                <Form.Check
+                    className={styles.input}
+                    type="checkbox"
+                    id="l2-ssl-checkbox"
+                    aria-describedby="l2-ssl-help"
+                    label="Use SSL for L2"
+                    checked={config["cache.l2.ssl"] === "true"}
+                    onChange={e => setNewConfig({ ...config, "cache.l2.ssl": "" + e.target.checked })} />
+                <Form.Text id="l2-ssl-help" muted>
+                    Enable this only when the object storage endpoint requires TLS.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
+                <Form.Check
+                    className={styles.input}
+                    type="checkbox"
                     id="readonly-checkbox"
                     aria-describedby="readonly-help"
                     label={`Enforce Read-Only`}
@@ -253,6 +339,12 @@ export function isWebdavSettingsUpdated(config: Record<string, string>, newConfi
         || config["cache.precache-max-file-size-mb"] !== newConfig["cache.precache-max-file-size-mb"]
         || config["cache.read-ahead-enable"] !== newConfig["cache.read-ahead-enable"]
         || config["cache.read-ahead-segments"] !== newConfig["cache.read-ahead-segments"]
+        || config["cache.l2.enabled"] !== newConfig["cache.l2.enabled"]
+        || config["cache.l2.endpoint"] !== newConfig["cache.l2.endpoint"]
+        || config["cache.l2.bucket-name"] !== newConfig["cache.l2.bucket-name"]
+        || config["cache.l2.access-key"] !== newConfig["cache.l2.access-key"]
+        || config["cache.l2.secret-key"] !== newConfig["cache.l2.secret-key"]
+        || config["cache.l2.ssl"] !== newConfig["cache.l2.ssl"]
 }
 
 export function isWebdavSettingsValid(newConfig: Record<string, string>) {
@@ -263,7 +355,8 @@ export function isWebdavSettingsValid(newConfig: Record<string, string>) {
         && isPositiveInteger(newConfig["cache.max-size-gb"])
         && isPositiveInteger(newConfig["cache.max-age-hours"])
         && isPositiveInteger(newConfig["cache.precache-max-file-size-mb"])
-        && isPositiveInteger(newConfig["cache.read-ahead-segments"]);
+        && isPositiveInteger(newConfig["cache.read-ahead-segments"])
+        && isValidL2Settings(newConfig);
 }
 
 function isValidUser(user: string): boolean {
@@ -283,4 +376,28 @@ function isValidStreamingPriority(value: string): boolean {
 
 function isValidArticleBufferSize(value: string): boolean {
     return isPositiveInteger(value);
+}
+
+function isL2Enabled(config: Record<string, string>): boolean {
+    return config["cache.l2.enabled"] === "true";
+}
+
+function isValidL2Settings(config: Record<string, string>): boolean {
+    if (!isL2Enabled(config)) {
+        return true;
+    }
+
+    return isNonEmpty(config["cache.l2.endpoint"])
+        && isValidL2BucketName(config["cache.l2.bucket-name"])
+        && isNonEmpty(config["cache.l2.access-key"])
+        && isNonEmpty(config["cache.l2.secret-key"]);
+}
+
+function isValidL2BucketName(value: string): boolean {
+    const regex = /^[a-z0-9-]{3,63}$/;
+    return regex.test(value);
+}
+
+function isNonEmpty(value: string): boolean {
+    return value.trim() !== "";
 }
