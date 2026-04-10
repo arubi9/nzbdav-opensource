@@ -112,7 +112,6 @@ public sealed class DavDatabaseContext() : DbContext(CreateOptions())
     public DbSet<HealthCheckResult> HealthCheckResults => Set<HealthCheckResult>();
     public DbSet<HealthCheckStat> HealthCheckStats => Set<HealthCheckStat>();
     public DbSet<ConfigItem> ConfigItems => Set<ConfigItem>();
-    public DbSet<YencHeaderCacheEntry> YencHeaderCache => Set<YencHeaderCacheEntry>();
     public DbSet<WebsocketOutboxEntry> WebsocketOutbox => Set<WebsocketOutboxEntry>();
     public DbSet<AuthFailureEntry> AuthFailures => Set<AuthFailureEntry>();
     public DbSet<ConnectionPoolClaim> ConnectionPoolClaims => Set<ConnectionPoolClaim>();
@@ -601,21 +600,18 @@ public sealed class DavDatabaseContext() : DbContext(CreateOptions())
         {
             e.ToTable("yenc_header_cache");
             e.HasKey(x => x.SegmentId);
-
-            e.Property(x => x.FileSize)
-                .HasColumnType("BIGINT");
-
-            e.Property(x => x.PartSize)
-                .HasColumnType("BIGINT");
-
-            e.Property(x => x.PartOffset)
-                .HasColumnType("BIGINT");
-
+            e.Property(x => x.SegmentId).HasColumnName("segment_id");
+            e.Property(x => x.FileName).HasColumnName("file_name");
+            e.Property(x => x.FileSize).HasColumnName("file_size");
+            e.Property(x => x.LineLength).HasColumnName("line_length");
+            e.Property(x => x.PartNumber).HasColumnName("part_number");
+            e.Property(x => x.TotalParts).HasColumnName("total_parts");
+            e.Property(x => x.PartSize).HasColumnName("part_size");
+            e.Property(x => x.PartOffset).HasColumnName("part_offset");
             e.Property(x => x.CachedAt)
-                .HasColumnType("TIMESTAMPTZ")
-                .HasDefaultValueSql("now()");
-
-            e.HasIndex(x => x.CachedAt);
+                .HasColumnName("cached_at")
+                .HasDefaultValueSql("CURRENT_TIMESTAMP");
+            e.HasIndex(x => x.CachedAt).HasDatabaseName("ix_yenc_header_cache_cached_at");
         });
     }
 }
