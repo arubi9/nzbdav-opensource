@@ -84,6 +84,45 @@ Run the container
 docker compose up -d
 ```
 
+### 1.1 Encryption At Rest
+
+NzbDav encrypts sensitive config values in `ConfigItems` with AES-256-GCM when `NZBDAV_MASTER_KEY` is set.
+
+Generate a key before first boot:
+
+```bash
+openssl rand -base64 32
+```
+
+Add it to the `nzbdav` service environment:
+
+```yaml
+environment:
+  - NZBDAV_MASTER_KEY=<paste-generated-key>
+```
+
+Notes:
+
+* New installs should set this before storing Usenet passwords, Arr API keys, the NzbDav API key, or the WebDAV password hash.
+* Existing plaintext installs will migrate sensitive rows on startup once the key is configured.
+* Historical backups made before that migration remain plaintext. After the first encrypted startup, rotate any credentials that may exist in older backups.
+
+Rotation procedure:
+
+1. Set `NZBDAV_MASTER_KEY` and restart NzbDav.
+2. If startup reports that historical plaintext secrets were migrated, rotate:
+   * your Usenet provider password
+   * Radarr/Sonarr API keys
+   * the NzbDav API key
+   * any copied WebDAV credentials
+3. If you are rotating keys, set `NZBDAV_MASTER_KEY_OLD` temporarily alongside the new `NZBDAV_MASTER_KEY`, restart once, confirm startup reports rotation complete, then remove `NZBDAV_MASTER_KEY_OLD`.
+
+Lost-key procedure:
+
+* If `NZBDAV_MASTER_KEY` is lost and encrypted config rows already exist, NzbDav cannot decrypt them.
+* Restore the original key from your secret manager or deployment manifests.
+* If the key is unrecoverable, delete the config database and reconfigure the instance from scratch.
+
 ### 2. Core Configuration
 
 Navigate to `http://your-server-ip:3000`.
@@ -145,22 +184,64 @@ NzbDav now keeps a backend live-stream cache at `/config/stream-cache` during ac
 * If multiple viewers are watching the same file, NzbDav can reuse already-fetched segments from this cache instead of fetching the same segment body again.
 * Make sure your `/config` volume has free **SSD/NVMe** space available. Slow or nearly-full storage will hurt streaming performance.
 
+### PgBouncer Setup
+
+Multi-node deployments should point normal EF Core traffic at the
+transaction-pooled `pgbouncer` service and reserve `pgbouncer-session`
+for long-lived LISTEN/NOTIFY traffic.
+
+* `DATABASE_URL` should point at `pgbouncer`.
+* `DATABASE_URL_SESSION` should point at `pgbouncer-session`.
+* Run schema migrations against `postgres` directly, not through
+  transaction-pooled PgBouncer. For example:
+
+```bash
+docker compose exec nzbdav-ingest sh -c \
+  'DATABASE_URL="Host=postgres;Port=5432;Database=nzbdav;Username=nzbdav;Password=nzbdav" dotnet NzbWebDAV.dll --db-migration'
+```
+
+This keeps migration-time session features and locking semantics on the
+real Postgres connection while the application runtime still benefits from
+PgBouncer pooling.
+
 ### L2 Cache Setup
 
-If you use the multi-node deployment, the bundled MinIO service provides the shared L2 object cache for segment bodies.
+For multi-node deployments, you can add a shared L2 object-storage cache so all
+streaming nodes reuse the same segment bodies instead of refetching them from
+NNTP.
 
-* Enable `cache.l2.enabled` in `Settings` > `WebDAV`.
-* Set `cache.l2.endpoint` to `minio:9000`.
-* Leave `cache.l2.ssl` disabled for the bundled MinIO service.
-* Keep `cache.l2.bucket-name` at the default `nzbdav-segments` unless you need to isolate deployments.
-* Set `cache.l2.access-key` and `cache.l2.secret-key` to the same credentials used by the MinIO service.
-* L1 remains the local disk cache on each node. L2 only stores shared segment bodies.
+1. Add a MinIO service to your deployment and expose it on the internal
+   Docker network.
+2. In `Settings > WebDAV`, enable `Shared L2 Object Cache`.
+3. Set:
+   * **L2 Endpoint:** `minio:9000`
+   * **Use SSL for L2:** unchecked for the bundled MinIO sidecar
+   * **L2 Bucket Name:** `nzbdav-segments`
+   * **L2 Access Key / Secret Key:** your MinIO credentials
+4. Restart the NZBDAV services so the shared cache is initialized.
 
-Recommended MinIO lifecycle policy:
+Notes:
+
+* L1 remains the local disk cache on each node. L2 is strictly additive and
+  stores shared segment bodies only.
+* For the bundled MinIO service, pass the credentials through environment
+  variables such as `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD`.
+* Add a lifecycle policy so old L2 segments expire automatically, for example:
 
 ```bash
 mc ilm rule add --expire-days 30 nzbdav-minio/nzbdav-segments
 ```
+
+### Shared Header Cache
+
+In multi-node Postgres deployments, NZBDAV can also store yEnc header metadata in Postgres so cold streaming nodes do not re-fetch header metadata from NNTP after restarts.
+
+* `cache.metadata-shared-enabled` defaults to on in multi-node mode.
+* `cache.metadata-retention-days` defaults to `90`.
+* The shared cache only applies when NZBDAV is running against Postgres (`DATABASE_URL`) in a multi-node deployment. Single-node SQLite installs continue using the existing in-memory header cache only.
+* The ingest node runs a periodic sweeper that removes expired rows from `yenc_header_cache`.
+
+This cache is tiny compared to the segment-body cache: it only stores flattened `UsenetYencHeader` fields used for listings and seek planning.
 
 Now we mount the NzbDav web dav to the host file system using a sidecar container.
 

@@ -1,6 +1,5 @@
 using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Database;
-using NzbWebDAV.Database.Models;
 using Serilog;
 using UsenetSharp.Models;
 
@@ -11,22 +10,34 @@ public sealed class SharedHeaderCache
     private long _hits;
     private long _misses;
     private long _writeFailures;
+    private readonly Func<DavDatabaseContext> _dbContextFactory;
+
+    public SharedHeaderCache() : this(() => new DavDatabaseContext())
+    {
+    }
+
+    public SharedHeaderCache(Func<DavDatabaseContext> dbContextFactory)
+    {
+        _dbContextFactory = dbContextFactory;
+    }
 
     public long Hits => Interlocked.Read(ref _hits);
     public long Misses => Interlocked.Read(ref _misses);
     public long WriteFailures => Interlocked.Read(ref _writeFailures);
 
-    public async Task<UsenetYencHeader?> TryReadAsync(string segmentId, CancellationToken cancellationToken)
+    public async Task<UsenetYencHeader?> TryReadAsync(
+        string segmentId,
+        CancellationToken cancellationToken)
     {
         try
         {
-            await using var dbContext = new DavDatabaseContext();
-            var entry = await dbContext.Set<YencHeaderCacheEntry>()
+            await using var dbContext = _dbContextFactory();
+            var row = await dbContext.YencHeaderCache
                 .AsNoTracking()
                 .FirstOrDefaultAsync(x => x.SegmentId == segmentId, cancellationToken)
                 .ConfigureAwait(false);
 
-            if (entry == null)
+            if (row == null)
             {
                 Interlocked.Increment(ref _misses);
                 return null;
@@ -35,42 +46,49 @@ public sealed class SharedHeaderCache
             Interlocked.Increment(ref _hits);
             return new UsenetYencHeader
             {
-                FileName = entry.FileName,
-                FileSize = entry.FileSize,
-                LineLength = entry.LineLength,
-                PartNumber = entry.PartNumber,
-                TotalParts = entry.TotalParts,
-                PartSize = entry.PartSize,
-                PartOffset = entry.PartOffset,
+                FileName = row.FileName,
+                FileSize = row.FileSize,
+                LineLength = row.LineLength,
+                PartNumber = row.PartNumber,
+                TotalParts = row.TotalParts,
+                PartSize = row.PartSize,
+                PartOffset = row.PartOffset,
             };
         }
         catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
         {
-            Log.Debug(ex, "SharedHeaderCache read failed for segment {SegmentId}", segmentId);
+            Log.Debug(ex,
+                "SharedHeaderCache read failed for segment {SegmentId} - falling back to NNTP",
+                segmentId);
             Interlocked.Increment(ref _misses);
             return null;
         }
     }
 
-    public async Task WriteAsync(string segmentId, UsenetYencHeader header, CancellationToken cancellationToken)
+    public async Task WriteAsync(
+        string segmentId,
+        UsenetYencHeader header,
+        CancellationToken cancellationToken)
     {
         try
         {
-            await using var dbContext = new DavDatabaseContext();
+            await using var dbContext = _dbContextFactory();
             await dbContext.Database.ExecuteSqlInterpolatedAsync($@"
                 INSERT INTO yenc_header_cache
-                    (segment_id, file_name, file_size, line_length, part_number, total_parts, part_size, part_offset, cached_at)
+                    (segment_id, file_name, file_size, line_length,
+                     part_number, total_parts, part_size, part_offset, cached_at)
                 VALUES
-                    ({segmentId}, {header.FileName}, {header.FileSize}, {header.LineLength}, {header.PartNumber}, {header.TotalParts}, {header.PartSize}, {header.PartOffset}, now())
+                    ({segmentId}, {header.FileName}, {header.FileSize}, {header.LineLength},
+                     {header.PartNumber}, {header.TotalParts}, {header.PartSize}, {header.PartOffset}, CURRENT_TIMESTAMP)
                 ON CONFLICT (segment_id) DO UPDATE SET
-                    file_name = EXCLUDED.file_name,
-                    file_size = EXCLUDED.file_size,
-                    line_length = EXCLUDED.line_length,
-                    part_number = EXCLUDED.part_number,
-                    total_parts = EXCLUDED.total_parts,
-                    part_size = EXCLUDED.part_size,
-                    part_offset = EXCLUDED.part_offset,
-                    cached_at = now();
+                    file_name = excluded.file_name,
+                    file_size = excluded.file_size,
+                    line_length = excluded.line_length,
+                    part_number = excluded.part_number,
+                    total_parts = excluded.total_parts,
+                    part_size = excluded.part_size,
+                    part_offset = excluded.part_offset,
+                    cached_at = CURRENT_TIMESTAMP;
             ", cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (!cancellationToken.IsCancellationRequested)

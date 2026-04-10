@@ -12,8 +12,10 @@ public class UpdateConfigController(DavDatabaseClient dbClient, ConfigManager co
 {
     private async Task<UpdateConfigResponse> UpdateConfig(UpdateConfigRequest request)
     {
+        var itemsForStorage = configManager.PrepareForStorage(request.ConfigItems);
+
         // 1. Retrieve all ConfigItems from the database that match the ConfigNames in the request
-        var configNames = request.ConfigItems.Select(x => x.ConfigName).ToHashSet();
+        var configNames = itemsForStorage.Select(x => x.ConfigName).ToHashSet();
         var existingItems = await dbClient.Ctx.ConfigItems
             .Where(c => configNames.Contains(c.ConfigName))
             .ToListAsync(HttpContext.RequestAborted).ConfigureAwait(false);
@@ -22,11 +24,12 @@ public class UpdateConfigController(DavDatabaseClient dbClient, ConfigManager co
         var existingItemsDict = existingItems.ToDictionary(i => i.ConfigName);
         var itemsToUpdate = new List<ConfigItem>();
         var itemsToInsert = new List<ConfigItem>();
-        foreach (var item in request.ConfigItems)
+        foreach (var item in itemsForStorage)
         {
             if (existingItemsDict.TryGetValue(item.ConfigName, out ConfigItem? existingItem))
             {
                 existingItem.ConfigValue = item.ConfigValue;
+                existingItem.IsEncrypted = item.IsEncrypted;
                 itemsToUpdate.Add(existingItem);
             }
             else
@@ -42,7 +45,7 @@ public class UpdateConfigController(DavDatabaseClient dbClient, ConfigManager co
         // 4. Save changes in one call
         await dbClient.Ctx.SaveChangesAsync(HttpContext.RequestAborted).ConfigureAwait(false);
 
-        // 5. Update the ConfigManager
+        // 5. Update the in-memory cache only after the database write succeeds
         configManager.UpdateValues(request.ConfigItems);
 
         // return

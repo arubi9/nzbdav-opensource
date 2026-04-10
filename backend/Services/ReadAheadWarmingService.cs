@@ -8,6 +8,8 @@ namespace NzbWebDAV.Services;
 
 public class ReadAheadWarmingService : IDisposable
 {
+    private static readonly TimeSpan InitialPositionGracePeriod = TimeSpan.FromMilliseconds(50);
+
     private readonly INntpClient _usenetClient;
     private readonly LiveSegmentCache _liveSegmentCache;
     private readonly ConfigManager _configManager;
@@ -94,6 +96,17 @@ public class ReadAheadWarmingService : IDisposable
 
         try
         {
+            try
+            {
+                await session.PositionChanged
+                    .WaitAsync(InitialPositionGracePeriod, ct)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
             while (!ct.IsCancellationRequested)
             {
                 var currentPosition = session.CurrentPosition;

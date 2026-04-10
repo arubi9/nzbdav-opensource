@@ -138,6 +138,92 @@ export function WebdavSettings({ config, setNewConfig }: SabnzbdSettingsProps) {
                 <Form.Check
                     className={styles.input}
                     type="checkbox"
+                    id="l2-cache-enabled-checkbox"
+                    aria-describedby="l2-cache-enabled-help"
+                    label="Enable Shared L2 Object Cache"
+                    checked={config["cache.l2.enabled"] === "true"}
+                    onChange={e => setNewConfig({ ...config, "cache.l2.enabled": "" + e.target.checked })} />
+                <Form.Text id="l2-cache-enabled-help" muted>
+                    Stores segment bodies in shared S3-compatible object storage so multiple streaming nodes can reuse the same cache.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
+                <Form.Label htmlFor="l2-endpoint-input">L2 Endpoint</Form.Label>
+                <Form.Control
+                    {...className([styles.input, !isValidL2Endpoint(config) && styles.error])}
+                    type="text"
+                    id="l2-endpoint-input"
+                    aria-describedby="l2-endpoint-help"
+                    placeholder="minio:9000"
+                    value={config["cache.l2.endpoint"]}
+                    onChange={e => setNewConfig({ ...config, "cache.l2.endpoint": e.target.value })} />
+                <Form.Text id="l2-endpoint-help" muted>
+                    S3-compatible endpoint such as <code>minio:9000</code> or <code>https://s3.example.com</code>.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
+                <Form.Label htmlFor="l2-bucket-name-input">L2 Bucket Name</Form.Label>
+                <Form.Control
+                    {...className([styles.input, !isValidL2BucketName(config) && styles.error])}
+                    type="text"
+                    id="l2-bucket-name-input"
+                    aria-describedby="l2-bucket-name-help"
+                    placeholder="nzbdav-segments"
+                    value={config["cache.l2.bucket-name"]}
+                    onChange={e => setNewConfig({ ...config, "cache.l2.bucket-name": e.target.value })} />
+                <Form.Text id="l2-bucket-name-help" muted>
+                    Lowercase bucket name used to store shared segment bodies.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
+                <Form.Label htmlFor="l2-access-key-input">L2 Access Key</Form.Label>
+                <Form.Control
+                    {...className([styles.input, !isValidL2AccessKey(config) && styles.error])}
+                    type="text"
+                    id="l2-access-key-input"
+                    aria-describedby="l2-access-key-help"
+                    value={config["cache.l2.access-key"]}
+                    onChange={e => setNewConfig({ ...config, "cache.l2.access-key": e.target.value })} />
+                <Form.Text id="l2-access-key-help" muted>
+                    Access key for the shared object-storage backend.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
+                <Form.Label htmlFor="l2-secret-key-input">L2 Secret Key</Form.Label>
+                <Form.Control
+                    {...className([styles.input, !isValidL2SecretKey(config) && styles.error])}
+                    type="password"
+                    id="l2-secret-key-input"
+                    aria-describedby="l2-secret-key-help"
+                    value={config["cache.l2.secret-key"]}
+                    onChange={e => setNewConfig({ ...config, "cache.l2.secret-key": e.target.value })} />
+                <Form.Text id="l2-secret-key-help" muted>
+                    Secret key for the shared object-storage backend.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
+                <Form.Check
+                    className={styles.input}
+                    type="checkbox"
+                    id="l2-ssl-checkbox"
+                    aria-describedby="l2-ssl-help"
+                    label="Use SSL for L2"
+                    checked={config["cache.l2.ssl"] === "true"}
+                    onChange={e => setNewConfig({ ...config, "cache.l2.ssl": "" + e.target.checked })} />
+                <Form.Text id="l2-ssl-help" muted>
+                    Enable this when the L2 endpoint is exposed over HTTPS.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
+                <Form.Check
+                    className={styles.input}
+                    type="checkbox"
                     id="precache-checkbox"
                     aria-describedby="precache-help"
                     label="Pre-cache Small Files"
@@ -196,85 +282,28 @@ export function WebdavSettings({ config, setNewConfig }: SabnzbdSettingsProps) {
                 <Form.Check
                     className={styles.input}
                     type="checkbox"
-                    id="l2-enabled-checkbox"
-                    aria-describedby="l2-enabled-help"
-                    label="Enable Shared L2 Object Cache"
-                    checked={config["cache.l2.enabled"] === "true"}
-                    onChange={e => setNewConfig({ ...config, "cache.l2.enabled": "" + e.target.checked })} />
-                <Form.Text id="l2-enabled-help" muted>
-                    Store segment bodies in shared object storage so other nodes can reuse them after an L1 miss.
+                    id="metadata-cache-enabled-checkbox"
+                    aria-describedby="metadata-cache-enabled-help"
+                    label="Share Header Cache Across Nodes"
+                    checked={config["cache.metadata-shared-enabled"] === "true"}
+                    onChange={e => setNewConfig({ ...config, "cache.metadata-shared-enabled": "" + e.target.checked })} />
+                <Form.Text id="metadata-cache-enabled-help" muted>
+                    Stores yEnc header metadata in Postgres so cold streaming nodes reuse header lookups across restarts in multi-node mode.
                 </Form.Text>
             </Form.Group>
             <hr />
             <Form.Group>
-                <Form.Label htmlFor="l2-endpoint-input">L2 Endpoint</Form.Label>
+                <Form.Label htmlFor="metadata-retention-days-input">Header Cache Retention (Days)</Form.Label>
                 <Form.Control
-                    {...className([styles.input, isL2Enabled(config) && !isNonEmpty(config["cache.l2.endpoint"]) && styles.error])}
+                    {...className([styles.input, !isPositiveInteger(config["cache.metadata-retention-days"]) && styles.error])}
                     type="text"
-                    id="l2-endpoint-input"
-                    aria-describedby="l2-endpoint-help"
-                    placeholder="minio:9000"
-                    value={config["cache.l2.endpoint"]}
-                    onChange={e => setNewConfig({ ...config, "cache.l2.endpoint": e.target.value })} />
-                <Form.Text id="l2-endpoint-help" muted>
-                    S3-compatible endpoint for shared cache storage. Example: <code>minio:9000</code>.
-                </Form.Text>
-            </Form.Group>
-            <hr />
-            <Form.Group>
-                <Form.Label htmlFor="l2-bucket-name-input">L2 Bucket Name</Form.Label>
-                <Form.Control
-                    {...className([styles.input, isL2Enabled(config) && !isValidL2BucketName(config["cache.l2.bucket-name"]) && styles.error])}
-                    type="text"
-                    id="l2-bucket-name-input"
-                    aria-describedby="l2-bucket-name-help"
-                    placeholder="nzbdav-segments"
-                    value={config["cache.l2.bucket-name"]}
-                    onChange={e => setNewConfig({ ...config, "cache.l2.bucket-name": e.target.value })} />
-                <Form.Text id="l2-bucket-name-help" muted>
-                    Bucket names must be 3-63 characters of lowercase letters, numbers, and dashes.
-                </Form.Text>
-            </Form.Group>
-            <hr />
-            <Form.Group>
-                <Form.Label htmlFor="l2-access-key-input">L2 Access Key</Form.Label>
-                <Form.Control
-                    {...className([styles.input, isL2Enabled(config) && !isNonEmpty(config["cache.l2.access-key"]) && styles.error])}
-                    type="text"
-                    id="l2-access-key-input"
-                    aria-describedby="l2-access-key-help"
-                    value={config["cache.l2.access-key"]}
-                    onChange={e => setNewConfig({ ...config, "cache.l2.access-key": e.target.value })} />
-                <Form.Text id="l2-access-key-help" muted>
-                    Matches the MinIO root user or the access key for your S3-compatible backend.
-                </Form.Text>
-            </Form.Group>
-            <hr />
-            <Form.Group>
-                <Form.Label htmlFor="l2-secret-key-input">L2 Secret Key</Form.Label>
-                <Form.Control
-                    {...className([styles.input, isL2Enabled(config) && !isNonEmpty(config["cache.l2.secret-key"]) && styles.error])}
-                    type="password"
-                    id="l2-secret-key-input"
-                    aria-describedby="l2-secret-key-help"
-                    value={config["cache.l2.secret-key"]}
-                    onChange={e => setNewConfig({ ...config, "cache.l2.secret-key": e.target.value })} />
-                <Form.Text id="l2-secret-key-help" muted>
-                    Secret used with the access key to authenticate against shared object storage.
-                </Form.Text>
-            </Form.Group>
-            <hr />
-            <Form.Group>
-                <Form.Check
-                    className={styles.input}
-                    type="checkbox"
-                    id="l2-ssl-checkbox"
-                    aria-describedby="l2-ssl-help"
-                    label="Use SSL for L2"
-                    checked={config["cache.l2.ssl"] === "true"}
-                    onChange={e => setNewConfig({ ...config, "cache.l2.ssl": "" + e.target.checked })} />
-                <Form.Text id="l2-ssl-help" muted>
-                    Enable this only when the object storage endpoint requires TLS.
+                    id="metadata-retention-days-input"
+                    aria-describedby="metadata-retention-days-help"
+                    placeholder="90"
+                    value={config["cache.metadata-retention-days"]}
+                    onChange={e => setNewConfig({ ...config, "cache.metadata-retention-days": e.target.value })} />
+                <Form.Text id="metadata-retention-days-help" muted>
+                    Applies to multi-node Postgres deployments. Expired shared yEnc header rows are removed by the ingest-node sweeper.
                 </Form.Text>
             </Form.Group>
             <hr />
@@ -335,16 +364,18 @@ export function isWebdavSettingsUpdated(config: Record<string, string>, newConfi
         || config["cache.max-size-gb"] !== newConfig["cache.max-size-gb"]
         || config["cache.max-age-hours"] !== newConfig["cache.max-age-hours"]
         || config["cache.directory"] !== newConfig["cache.directory"]
-        || config["cache.precache-enable"] !== newConfig["cache.precache-enable"]
-        || config["cache.precache-max-file-size-mb"] !== newConfig["cache.precache-max-file-size-mb"]
-        || config["cache.read-ahead-enable"] !== newConfig["cache.read-ahead-enable"]
-        || config["cache.read-ahead-segments"] !== newConfig["cache.read-ahead-segments"]
         || config["cache.l2.enabled"] !== newConfig["cache.l2.enabled"]
         || config["cache.l2.endpoint"] !== newConfig["cache.l2.endpoint"]
         || config["cache.l2.bucket-name"] !== newConfig["cache.l2.bucket-name"]
         || config["cache.l2.access-key"] !== newConfig["cache.l2.access-key"]
         || config["cache.l2.secret-key"] !== newConfig["cache.l2.secret-key"]
         || config["cache.l2.ssl"] !== newConfig["cache.l2.ssl"]
+        || config["cache.precache-enable"] !== newConfig["cache.precache-enable"]
+        || config["cache.precache-max-file-size-mb"] !== newConfig["cache.precache-max-file-size-mb"]
+        || config["cache.read-ahead-enable"] !== newConfig["cache.read-ahead-enable"]
+        || config["cache.read-ahead-segments"] !== newConfig["cache.read-ahead-segments"]
+        || config["cache.metadata-shared-enabled"] !== newConfig["cache.metadata-shared-enabled"]
+        || config["cache.metadata-retention-days"] !== newConfig["cache.metadata-retention-days"]
 }
 
 export function isWebdavSettingsValid(newConfig: Record<string, string>) {
@@ -354,9 +385,13 @@ export function isWebdavSettingsValid(newConfig: Record<string, string>) {
         && isValidArticleBufferSize(newConfig["usenet.article-buffer-size"])
         && isPositiveInteger(newConfig["cache.max-size-gb"])
         && isPositiveInteger(newConfig["cache.max-age-hours"])
+        && isValidL2Endpoint(newConfig)
+        && isValidL2BucketName(newConfig)
+        && isValidL2AccessKey(newConfig)
+        && isValidL2SecretKey(newConfig)
         && isPositiveInteger(newConfig["cache.precache-max-file-size-mb"])
         && isPositiveInteger(newConfig["cache.read-ahead-segments"])
-        && isValidL2Settings(newConfig);
+        && isPositiveInteger(newConfig["cache.metadata-retention-days"]);
 }
 
 function isValidUser(user: string): boolean {
@@ -382,22 +417,19 @@ function isL2Enabled(config: Record<string, string>): boolean {
     return config["cache.l2.enabled"] === "true";
 }
 
-function isValidL2Settings(config: Record<string, string>): boolean {
-    if (!isL2Enabled(config)) {
-        return true;
-    }
-
-    return isNonEmpty(config["cache.l2.endpoint"])
-        && isValidL2BucketName(config["cache.l2.bucket-name"])
-        && isNonEmpty(config["cache.l2.access-key"])
-        && isNonEmpty(config["cache.l2.secret-key"]);
+function isValidL2Endpoint(config: Record<string, string>): boolean {
+    return !isL2Enabled(config) || config["cache.l2.endpoint"].trim() !== "";
 }
 
-function isValidL2BucketName(value: string): boolean {
-    const regex = /^[a-z0-9-]{3,63}$/;
-    return regex.test(value);
+function isValidL2BucketName(config: Record<string, string>): boolean {
+    if (!isL2Enabled(config)) return true;
+    return /^[a-z0-9-]{3,63}$/.test(config["cache.l2.bucket-name"]);
 }
 
-function isNonEmpty(value: string): boolean {
-    return value.trim() !== "";
+function isValidL2AccessKey(config: Record<string, string>): boolean {
+    return !isL2Enabled(config) || config["cache.l2.access-key"].trim() !== "";
+}
+
+function isValidL2SecretKey(config: Record<string, string>): boolean {
+    return !isL2Enabled(config) || config["cache.l2.secret-key"].trim() !== "";
 }

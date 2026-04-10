@@ -3,7 +3,9 @@ using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Clients.Usenet.Concurrency;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
+using NzbWebDAV.Services;
 using NzbWebDAV.Utils;
+using Serilog;
 
 namespace NzbWebDAV.Config;
 
@@ -11,8 +13,18 @@ public class ConfigManager
 {
     public static readonly string AppVersion = EnvironmentUtil.GetEnvironmentVariable("NZBDAV_VERSION") ?? "unknown";
 
+    private readonly ConfigEncryptionService _encryption;
     private readonly Dictionary<string, string> _config = new();
     public event EventHandler<ConfigEventArgs>? OnConfigChanged;
+
+    public ConfigManager() : this(new ConfigEncryptionService())
+    {
+    }
+
+    public ConfigManager(ConfigEncryptionService encryption)
+    {
+        _encryption = encryption;
+    }
 
     public async Task LoadConfig()
     {
@@ -23,7 +35,22 @@ public class ConfigManager
             _config.Clear();
             foreach (var configItem in configItems)
             {
-                _config[configItem.ConfigName] = configItem.ConfigValue;
+                var value = configItem.ConfigValue;
+                if (configItem.IsEncrypted)
+                {
+                    var (plaintext, usedOldKey) = _encryption.Decrypt(configItem.ConfigValue);
+                    value = plaintext;
+
+                    if (usedOldKey)
+                    {
+                        Log.Warning(
+                            "Config key '{Name}' was decrypted with NZBDAV_MASTER_KEY_OLD outside the startup rotation pass. " +
+                            "A full rotation requires a restart; keep NZBDAV_MASTER_KEY_OLD set until then.",
+                            configItem.ConfigName);
+                    }
+                }
+
+                _config[configItem.ConfigName] = value;
             }
         }
     }
@@ -44,16 +71,74 @@ public class ConfigManager
 
     public void UpdateValues(List<ConfigItem> configItems)
     {
+        var changedConfig = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var item in configItems)
+        {
+            changedConfig[item.ConfigName] = item.ConfigValue;
+
+            if (!SensitiveConfigKeys.IsSensitive(item.ConfigName) || !_encryption.IsKeyConfigured)
+            {
+                item.IsEncrypted = false;
+                continue;
+            }
+
+            if (ConfigEncryptionService.IsEncryptedFormat(item.ConfigValue))
+            {
+                throw new InvalidOperationException(
+                    $"Double-encryption detected for config key '{item.ConfigName}'. " +
+                    $"Value already has the v1: prefix before the encryption pass. " +
+                    $"This usually means the caller wrapped the value twice, or a " +
+                    $"plaintext value happens to start with 'v1:' and cannot be " +
+                    $"distinguished from ciphertext. Reject the write.");
+            }
+
+            item.ConfigValue = _encryption.Encrypt(item.ConfigValue);
+            item.IsEncrypted = true;
+        }
+
         lock (_config)
         {
             foreach (var configItem in configItems)
             {
-                _config[configItem.ConfigName] = configItem.ConfigValue;
+                _config[configItem.ConfigName] = changedConfig[configItem.ConfigName];
             }
         }
 
-        var changedConfig = configItems.ToDictionary(x => x.ConfigName, x => x.ConfigValue);
         OnConfigChanged?.Invoke(this, new ConfigEventArgs { ChangedConfig = changedConfig });
+    }
+
+    public List<ConfigItem> PrepareForStorage(List<ConfigItem> configItems)
+    {
+        return configItems.Select(item =>
+        {
+            var copy = new ConfigItem
+            {
+                ConfigName = item.ConfigName,
+                ConfigValue = item.ConfigValue,
+                IsEncrypted = item.IsEncrypted
+            };
+
+            if (!SensitiveConfigKeys.IsSensitive(copy.ConfigName) || !_encryption.IsKeyConfigured)
+            {
+                copy.IsEncrypted = false;
+                return copy;
+            }
+
+            if (ConfigEncryptionService.IsEncryptedFormat(copy.ConfigValue))
+            {
+                throw new InvalidOperationException(
+                    $"Double-encryption detected for config key '{copy.ConfigName}'. " +
+                    $"Value already has the v1: prefix before the encryption pass. " +
+                    $"This usually means the caller wrapped the value twice, or a " +
+                    $"plaintext value happens to start with 'v1:' and cannot be " +
+                    $"distinguished from ciphertext. Reject the write.");
+            }
+
+            copy.ConfigValue = _encryption.Encrypt(copy.ConfigValue);
+            copy.IsEncrypted = true;
+            return copy;
+        }).ToList();
     }
 
     public string GetRcloneMountDir()
@@ -67,6 +152,8 @@ public class ConfigManager
 
     public string GetApiKey()
     {
+        // This env fallback is load-bearing during onboarding/bootstrap before
+        // the persisted ConfigItems row exists.
         return StringUtil.EmptyToNull(GetConfigValue("api.key"))
                ?? EnvironmentUtil.GetRequiredVariable("FRONTEND_BACKEND_API_KEY");
     }
@@ -256,6 +343,18 @@ public class ConfigManager
     public string? GetCacheDirectory()
         => StringUtil.EmptyToNull(GetConfigValue("cache.directory"));
 
+    public bool IsSharedHeaderCacheEnabled()
+    {
+        if (string.IsNullOrEmpty(EnvironmentUtil.GetEnvironmentVariable("DATABASE_URL")))
+            return false;
+
+        var value = StringUtil.EmptyToNull(GetConfigValue("cache.metadata-shared-enabled"));
+        return value == null || bool.Parse(value);
+    }
+
+    public int GetMetadataRetentionDays()
+        => int.Parse(StringUtil.EmptyToNull(GetConfigValue("cache.metadata-retention-days")) ?? "90");
+
     public bool IsPrecacheEnabled()
     {
         var val = StringUtil.EmptyToNull(GetConfigValue("cache.precache-enable"));
@@ -276,6 +375,35 @@ public class ConfigManager
 
     public int GetSnapshotDebounceSeconds()
         => int.Parse(StringUtil.EmptyToNull(GetConfigValue("cache.snapshot-debounce-seconds")) ?? "5");
+
+    public bool IsL2Enabled()
+    {
+        var val = StringUtil.EmptyToNull(GetConfigValue("cache.l2.enabled"));
+        return val != null ? bool.Parse(val) : false;
+    }
+
+    public string? GetL2Endpoint()
+        => StringUtil.EmptyToNull(GetConfigValue("cache.l2.endpoint"));
+
+    public string GetL2BucketName()
+        => StringUtil.EmptyToNull(GetConfigValue("cache.l2.bucket-name")) ?? "nzbdav-segments";
+
+    public string? GetL2AccessKey()
+        => StringUtil.EmptyToNull(GetConfigValue("cache.l2.access-key"))
+           ?? EnvironmentUtil.GetEnvironmentVariable("NZBDAV_L2_ACCESS_KEY");
+
+    public string? GetL2SecretKey()
+        => StringUtil.EmptyToNull(GetConfigValue("cache.l2.secret-key"))
+           ?? EnvironmentUtil.GetEnvironmentVariable("NZBDAV_L2_SECRET_KEY");
+
+    public bool IsL2SslEnabled()
+    {
+        var val = StringUtil.EmptyToNull(GetConfigValue("cache.l2.ssl"));
+        return val != null ? bool.Parse(val) : false;
+    }
+
+    public int GetL2WriteQueueCapacity()
+        => int.Parse(StringUtil.EmptyToNull(GetConfigValue("cache.l2.write-queue-capacity")) ?? "2048");
 
     public class ConfigEventArgs : EventArgs
     {

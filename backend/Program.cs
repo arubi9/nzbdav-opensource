@@ -1,9 +1,9 @@
-global using Microsoft.EntityFrameworkCore;
-
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using NzbWebDAV.Api.Filters;
 using NWebDav.Server;
 using NWebDav.Server.Stores;
@@ -23,13 +23,11 @@ using NzbWebDAV.Utils;
 using NzbWebDAV.WebDav;
 using NzbWebDAV.WebDav.Base;
 using Microsoft.AspNetCore.HttpOverrides;
-using Microsoft.Extensions.Hosting;
 using NzbWebDAV.Websocket;
 using Prometheus;
 using Serilog;
 using Serilog.Events;
 using Serilog.Sinks.SystemConsole.Themes;
-using System.Reflection;
 
 namespace NzbWebDAV;
 
@@ -68,21 +66,21 @@ public partial class Program
         {
             var argIndex = args.ToList().IndexOf("--db-migration");
             var targetMigration = args.Length > argIndex + 1 ? args[argIndex + 1] : null;
-            await databaseContext.Database
-                .MigrateAsync(targetMigration, SigtermUtil.GetCancellationToken())
+            await DatabaseInitialization
+                .InitializeAsync(databaseContext, SigtermUtil.GetCancellationToken(), targetMigration)
                 .ConfigureAwait(false);
             return;
         }
 
-        if (!string.IsNullOrEmpty(EnvironmentUtil.GetEnvironmentVariable("DATABASE_URL")))
-        {
-            await databaseContext.Database
-                .EnsureCreatedAsync(SigtermUtil.GetCancellationToken())
-                .ConfigureAwait(false);
-        }
+        await DatabaseInitialization
+            .InitializeAsync(databaseContext, SigtermUtil.GetCancellationToken())
+            .ConfigureAwait(false);
+
+        var encryptionService = new ConfigEncryptionService();
+        await StartupEncryptionCheck.RunAsync(databaseContext, encryptionService).ConfigureAwait(false);
 
         // initialize the config-manager
-        var configManager = new ConfigManager();
+        var configManager = new ConfigManager(encryptionService);
         await configManager.LoadConfig().ConfigureAwait(false);
         ContentIndexSnapshotInterceptor.SetDebounceInterval(
             TimeSpan.FromSeconds(configManager.GetSnapshotDebounceSeconds()));
@@ -112,24 +110,78 @@ public partial class Program
             .AddCheck<NzbdavHealthCheck>("nzbdav");
         builder.Services
             .AddWebdavBasicAuthentication(configManager)
+            .AddSingleton(encryptionService)
             .AddSingleton(configManager)
             .AddSingleton(websocketManager)
-            .AddSingleton<LiveSegmentCache>()
-            .AddSingleton<SharedHeaderCache>()
+            .AddSingleton(typeof(ObjectStorageSegmentCache), sp =>
+            {
+                if (!configManager.IsL2Enabled())
+                    return null!;
+
+                var cache = new ObjectStorageSegmentCache(configManager);
+                var applicationStopping = sp.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping;
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await cache.EnsureBucketExistsAsync(applicationStopping).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Warning(ex, "Failed to initialize L2 object-storage bucket.");
+                    }
+                });
+                return cache;
+            })
             .AddSingleton<UsenetStreamingClient>()
             .AddSingleton<QueueManager>()
             .AddSingleton<ReadAheadWarmingService>()
             .AddSingleton<StreamExecutionService>()
-            .AddSingleton<NzbdavMetricsCollector>()
             .AddScoped<DavDatabaseContext>()
             .AddScoped<DavDatabaseClient>()
             .AddScoped<DatabaseStore>()
             .AddScoped<IStore, DatabaseStore>()
             .AddScoped<GetAndHeadHandlerPatch>()
             .AddSingleton<AuthFailureTracker>()
-            .AddHostedService<AuthFailureTrackerSweeper>()
             .AddSingleton<ApiKeyAuthFilter>()
             .AddScoped<SabApiController>();
+
+        if (MultiNodeMode.IsEnabled)
+        {
+            builder.Services
+                .AddSingleton<IAuthFailureTracker, PostgresAuthFailureTracker>()
+                .AddHostedService<ConnectionPoolCoordinator>()
+                .AddHostedService<WebsocketOutboxListener>();
+
+            if (NodeRoleConfig.RunsIngest)
+            {
+                builder.Services
+                    .AddHostedService<AuthFailuresSweeper>()
+                    .AddHostedService<ConnectionPoolClaimSweeper>()
+                    .AddHostedService<WebsocketOutboxSweeper>();
+            }
+        }
+        else
+        {
+            builder.Services
+                .AddSingleton<IAuthFailureTracker>(sp => sp.GetRequiredService<AuthFailureTracker>())
+                .AddHostedService<AuthFailureTrackerSweeper>();
+        }
+
+        if (configManager.IsSharedHeaderCacheEnabled())
+            builder.Services.AddSingleton<SharedHeaderCache>();
+
+        builder.Services.AddSingleton(sp => new LiveSegmentCache(
+            configManager,
+            sp.GetService<ObjectStorageSegmentCache>(),
+            sp.GetService<SharedHeaderCache>()));
+        builder.Services.AddSingleton(sp => new NzbdavMetricsCollector(
+            sp.GetRequiredService<LiveSegmentCache>(),
+            sp.GetRequiredService<UsenetStreamingClient>(),
+            sp.GetRequiredService<ReadAheadWarmingService>(),
+            sp.GetRequiredService<QueueManager>(),
+            sp.GetService<ObjectStorageSegmentCache>(),
+            sp.GetService<SharedHeaderCache>()));
 
         if (NodeRoleConfig.RunsIngest)
         {
@@ -141,11 +193,8 @@ public partial class Program
                 .AddHostedService<SmallFilePrecacheService>()
                 .AddHostedService<MediaProbeService>();
 
-            if (!string.IsNullOrEmpty(EnvironmentUtil.GetEnvironmentVariable("DATABASE_URL")) &&
-                IsSharedHeaderCacheEnabled(configManager))
-            {
+            if (configManager.IsSharedHeaderCacheEnabled())
                 builder.Services.AddHostedService<YencHeaderCacheSweeper>();
-            }
 
             // Registered LAST among ingest services so its StopAsync runs
             // FIRST on shutdown — the host stops hosted services in reverse
@@ -253,23 +302,5 @@ public partial class Program
         // await cleanly under the host's graceful-stop budget.
         app.Lifetime.ApplicationStopping.Register(SigtermUtil.Cancel);
         await app.RunAsync().ConfigureAwait(false);
-    }
-
-    private static bool IsSharedHeaderCacheEnabled(ConfigManager configManager)
-    {
-        var value = TryGetConfigValue(configManager, "cache.metadata-shared-enabled");
-        return value == null || bool.Parse(value);
-    }
-
-    private static string? TryGetConfigValue(ConfigManager configManager, string configName)
-    {
-        var method = typeof(ConfigManager).GetMethod(
-            "GetConfigValue",
-            BindingFlags.Instance | BindingFlags.NonPublic,
-            binder: null,
-            types: [typeof(string)],
-            modifiers: null);
-
-        return method?.Invoke(configManager, [configName]) as string;
     }
 }

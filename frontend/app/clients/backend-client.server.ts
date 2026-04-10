@@ -186,6 +186,36 @@ class BackendClient {
         return data.status;
     }
 
+    public async getEncryptionStatus(): Promise<EncryptionStatus> {
+        const url = process.env.BACKEND_URL + "/api/encryption-status";
+
+        const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
+        const response = await fetch(url, {
+            method: "GET",
+            headers: { "x-api-key": apiKey }
+        });
+
+        if (!response.ok) {
+            throw new Error(`Failed to get encryption status: ${(await response.json()).error}`);
+        }
+
+        return await response.json();
+    }
+
+    public async acknowledgePostMigration(): Promise<void> {
+        const url = process.env.BACKEND_URL + "/api/encryption-status/acknowledge-post-migration";
+
+        const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
+        const response = await fetch(url, {
+            method: "POST",
+            headers: { "x-api-key": apiKey }
+        });
+
+        if (!response.ok) {
+            throw new Error(`Failed to acknowledge post migration banner: ${(await response.json()).error}`);
+        }
+    }
+
     public async getHealthCheckQueue(pageSize?: number): Promise<HealthCheckQueueResponse> {
         let url = process.env.BACKEND_URL + "/api/get-health-check-queue";
 
@@ -272,6 +302,15 @@ export type DirectoryItem = {
 export type ConfigItem = {
     configName: string,
     configValue: string,
+}
+
+export type EncryptionStatus = {
+    keySet: boolean,
+    plaintextSecretsCount: number,
+    bannerSeverity: "none" | "info" | "warning",
+    migrationCompletedAt: string | null,
+    postMigrationAcknowledged: boolean,
+    postMigrationAcknowledgedAt: string | null,
 }
 
 export type TestUsenetConnectionRequest = {

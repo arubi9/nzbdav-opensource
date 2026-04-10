@@ -24,10 +24,16 @@ namespace NzbWebDAV.Clients.Usenet;
 public class MultiConnectionNntpClient(ConnectionPool<INntpClient> connectionPool, ProviderType type) : NntpClient
 {
     public ProviderType ProviderType { get; } = type;
+    public int MaxConnections => connectionPool.MaxConnections;
     public int LiveConnections => connectionPool.LiveConnections;
     public int IdleConnections => connectionPool.IdleConnections;
     public int ActiveConnections => connectionPool.ActiveConnections;
     public int AvailableConnections => connectionPool.AvailableConnections;
+
+    public void Resize(int newMaxConnections)
+    {
+        connectionPool.Resize(newMaxConnections);
+    }
 
     public override Task ConnectAsync(string host, int port, bool useSsl, CancellationToken cancellationToken)
     {

@@ -8,9 +8,10 @@ public class ConnectionPoolStats
 {
     private readonly int[] _live;
     private readonly int[] _idle;
-    private readonly int _max;
+    private readonly int[] _max;
     private int _totalLive;
     private int _totalIdle;
+    private int _totalMax;
     private readonly UsenetProviderConfig _providerConfig;
     private readonly WebsocketManager _websocketManager;
 
@@ -20,9 +21,9 @@ public class ConnectionPoolStats
         _live = new int[count];
         _idle = new int[count];
         _max = providerConfig.Providers
-            .Where(x => x.Type == ProviderType.Pooled)
-            .Select(x => x.MaxConnections)
-            .Sum();
+            .Select(x => x.Type == ProviderType.Pooled ? x.MaxConnections : 0)
+            .ToArray();
+        _totalMax = _max.Sum();
 
         _providerConfig = providerConfig;
         _websocketManager = websocketManager;
@@ -40,12 +41,14 @@ public class ConnectionPoolStats
                 {
                     _live[providerIndex] = args.Live;
                     _idle[providerIndex] = args.Idle;
+                    _max[providerIndex] = args.Max;
                     _totalLive = _live.Sum();
                     _totalIdle = _idle.Sum();
+                    _totalMax = _max.Sum();
                 }
             }
 
-            var message = $"{providerIndex}|{args.Live}|{args.Idle}|{_totalLive}|{_max}|{_totalIdle}";
+            var message = $"{providerIndex}|{args.Live}|{args.Idle}|{_totalLive}|{_totalMax}|{_totalIdle}";
             _websocketManager.SendMessage(WebsocketTopic.UsenetConnections, message);
         }
     }
@@ -60,7 +63,10 @@ public class ConnectionPoolStats
         get { lock (this) return _totalIdle; }
     }
 
-    public int MaxPooled => _max;
+    public int MaxPooled
+    {
+        get { lock (this) return _totalMax; }
+    }
     public int TotalActive => TotalLive - TotalIdle;
 
     public sealed class ConnectionPoolChangedEventArgs(int live, int idle, int max) : EventArgs

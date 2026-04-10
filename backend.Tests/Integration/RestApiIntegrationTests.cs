@@ -1,4 +1,6 @@
 using System.Net;
+using System.Net.Http.Headers;
+using Microsoft.Data.Sqlite;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Database;
@@ -52,6 +54,21 @@ public class RestApiIntegrationTests : IClassFixture<RestApiFactoryFixture>
         var response = await _client.GetAsync($"/api/stream/{Guid.NewGuid()}");
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
+
+    [Fact]
+    public async Task EncryptionStatus_WithApiKey_ReturnsStatusPayload()
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/api/encryption-status");
+        request.Headers.Add("x-api-key", "integration-test-api-key");
+
+        var response = await _client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var content = await response.Content.ReadAsStringAsync();
+        Assert.Contains("\"keySet\":true", content);
+        Assert.Contains("\"bannerSeverity\":\"none\"", content);
+    }
 }
 
 public sealed class RestApiFactoryFixture : IAsyncLifetime
@@ -59,18 +76,25 @@ public sealed class RestApiFactoryFixture : IAsyncLifetime
     private readonly string _configPath = Path.Combine(Path.GetTempPath(), "nzbdav-tests", "rest-api-integration");
     private readonly string? _previousConfigPath = Environment.GetEnvironmentVariable("CONFIG_PATH");
     private readonly string? _previousApiKey = Environment.GetEnvironmentVariable("FRONTEND_BACKEND_API_KEY");
+    private readonly string? _previousMasterKey = Environment.GetEnvironmentVariable("NZBDAV_MASTER_KEY");
 
     public WebApplicationFactory<NzbWebDAV.Program> Factory { get; private set; } = null!;
 
     public async Task InitializeAsync()
     {
         Directory.CreateDirectory(_configPath);
+        ResetDatabaseFiles();
         Environment.SetEnvironmentVariable("CONFIG_PATH", _configPath);
         Environment.SetEnvironmentVariable("FRONTEND_BACKEND_API_KEY", "integration-test-api-key");
+        Environment.SetEnvironmentVariable("NZBDAV_MASTER_KEY", Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)));
 
         await using (var dbContext = new DavDatabaseContext())
         {
             await dbContext.Database.MigrateAsync();
+            var apiKeyRow = await dbContext.ConfigItems.SingleAsync(x => x.ConfigName == "api.key");
+            apiKeyRow.ConfigValue = "integration-test-api-key";
+            apiKeyRow.IsEncrypted = false;
+            await dbContext.SaveChangesAsync();
         }
 
         Factory = new WebApplicationFactory<NzbWebDAV.Program>();
@@ -81,6 +105,7 @@ public sealed class RestApiFactoryFixture : IAsyncLifetime
         Factory.Dispose();
         Environment.SetEnvironmentVariable("CONFIG_PATH", _previousConfigPath);
         Environment.SetEnvironmentVariable("FRONTEND_BACKEND_API_KEY", _previousApiKey);
+        Environment.SetEnvironmentVariable("NZBDAV_MASTER_KEY", _previousMasterKey);
         await Task.Yield();
 
         try
@@ -92,6 +117,20 @@ public sealed class RestApiFactoryFixture : IAsyncLifetime
         {
             // Best-effort cleanup.
         }
+    }
+
+    private void ResetDatabaseFiles()
+    {
+        SqliteConnection.ClearAllPools();
+        DeleteIfExists(Path.Combine(_configPath, "db.sqlite"));
+        DeleteIfExists(Path.Combine(_configPath, "db.sqlite-wal"));
+        DeleteIfExists(Path.Combine(_configPath, "db.sqlite-shm"));
+    }
+
+    private static void DeleteIfExists(string path)
+    {
+        if (File.Exists(path))
+            File.Delete(path);
     }
 }
 

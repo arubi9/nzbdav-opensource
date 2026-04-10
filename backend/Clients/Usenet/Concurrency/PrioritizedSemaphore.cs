@@ -172,10 +172,24 @@ public class PrioritizedSemaphore : IDisposable
 
     public void UpdateMaxAllowed(int newMaxAllowed)
     {
+        List<TaskCompletionSource<bool>> toRelease = [];
         lock (_lock)
         {
             _maxAllowed = newMaxAllowed;
+
+            while (_enteredCount < _maxAllowed)
+            {
+                var next = Release(_highPriorityWaiters) ?? Release(_lowPriorityWaiters);
+                if (next == null)
+                    break;
+
+                _enteredCount++;
+                toRelease.Add(next);
+            }
         }
+
+        foreach (var waiter in toRelease)
+            waiter.TrySetResult(true);
     }
 
     public void UpdatePriorityOdds(SemaphorePriorityOdds newPriorityOdds)

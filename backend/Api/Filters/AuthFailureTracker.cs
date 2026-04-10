@@ -3,6 +3,12 @@ using Serilog;
 
 namespace NzbWebDAV.Api.Filters;
 
+public interface IAuthFailureTracker
+{
+    Task<bool> IsBlockedAsync(string ipAddress);
+    Task RecordFailureAsync(string ipAddress);
+}
+
 /// <summary>
 /// In-memory per-IP tracker for failed auth attempts.
 /// Only counts FAILED attempts — successful requests are not tracked.
@@ -15,7 +21,7 @@ namespace NzbWebDAV.Api.Filters;
 /// are dropped silently (the attacker already can't achieve blocking at
 /// single-failure rates, so there's nothing to track).
 /// </summary>
-public sealed class AuthFailureTracker
+public sealed class AuthFailureTracker : IAuthFailureTracker
 {
     private const int MaxFailures = 10;
     private const int MaxTrackedIps = 100_000;
@@ -93,6 +99,17 @@ public sealed class AuthFailureTracker
                 removed, _failures.Count);
 
         return removed;
+    }
+
+    public Task<bool> IsBlockedAsync(string ipAddress)
+    {
+        return Task.FromResult(IsBlocked(ipAddress));
+    }
+
+    public Task RecordFailureAsync(string ipAddress)
+    {
+        RecordFailure(ipAddress);
+        return Task.CompletedTask;
     }
 
     private sealed record FailureRecord(int Count, DateTime WindowStart)

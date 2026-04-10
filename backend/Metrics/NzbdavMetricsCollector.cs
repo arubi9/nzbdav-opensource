@@ -1,4 +1,3 @@
-using System.Reflection;
 using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Clients.Usenet.Caching;
 using NzbWebDAV.Clients.Usenet.Connections;
@@ -17,7 +16,7 @@ public sealed class NzbdavMetricsCollector
     private readonly Func<int> _getWarmingSessions;
     private readonly Func<int> _getQueueProcessing;
     private readonly Func<ObjectStorageSegmentCache?> _getL2Cache;
-    private readonly SharedHeaderCache? _sharedHeaderCache;
+    private readonly Func<SharedHeaderCache?> _getSharedHeaderCache;
 
     private readonly Gauge _cachedBytes;
     private readonly Gauge _cacheMaxBytes;
@@ -27,12 +26,12 @@ public sealed class NzbdavMetricsCollector
     private readonly Counter _cacheMisses;
     private readonly Counter _cacheEvictions;
     private readonly Counter _cacheDedupes;
-    private readonly Gauge _l2Enabled;
     private readonly Counter _l2Hits;
     private readonly Counter _l2Misses;
     private readonly Counter _l2Writes;
     private readonly Counter _l2WriteFailures;
     private readonly Counter _l2WritesDropped;
+    private readonly Gauge _l2Enabled;
     private readonly Counter _sharedHeaderHits;
     private readonly Counter _sharedHeaderMisses;
     private readonly Counter _sharedHeaderWriteFailures;
@@ -71,6 +70,7 @@ public sealed class NzbdavMetricsCollector
         UsenetStreamingClient usenetClient,
         ReadAheadWarmingService warming,
         QueueManager queue,
+        ObjectStorageSegmentCache? l2Cache = null,
         SharedHeaderCache? sharedHeaderCache = null
     ) : this(
         () => cache.GetStats(),
@@ -79,10 +79,10 @@ public sealed class NzbdavMetricsCollector
         () => usenetClient.HealthyProviderCount,
         () => warming.ActiveSessionCount,
         () => queue.GetInProgressQueueItem().queueItem != null ? 1 : 0,
-        () => TryGetL2Cache(cache),
+        () => l2Cache,
+        () => sharedHeaderCache,
         Prometheus.Metrics.DefaultRegistry,
-        Prometheus.Metrics.WithCustomRegistry(Prometheus.Metrics.DefaultRegistry),
-        sharedHeaderCache
+        Prometheus.Metrics.WithCustomRegistry(Prometheus.Metrics.DefaultRegistry)
     )
     {
     }
@@ -95,9 +95,9 @@ public sealed class NzbdavMetricsCollector
         Func<int> getWarmingSessions,
         Func<int> getQueueProcessing,
         Func<ObjectStorageSegmentCache?> getL2Cache,
+        Func<SharedHeaderCache?> getSharedHeaderCache,
         CollectorRegistry registry,
-        IMetricFactory metricFactory,
-        SharedHeaderCache? sharedHeaderCache = null
+        IMetricFactory metricFactory
     )
     {
         _getCacheStats = getCacheStats;
@@ -106,8 +106,8 @@ public sealed class NzbdavMetricsCollector
         _getHealthyProviders = getHealthyProviders;
         _getWarmingSessions = getWarmingSessions;
         _getQueueProcessing = getQueueProcessing;
-        _getL2Cache = getL2Cache ?? (() => null);
-        _sharedHeaderCache = sharedHeaderCache;
+        _getL2Cache = getL2Cache;
+        _getSharedHeaderCache = getSharedHeaderCache;
 
         _cachedBytes = metricFactory.CreateGauge(
             "nzbdav_cache_bytes",
@@ -134,9 +134,6 @@ public sealed class NzbdavMetricsCollector
         _cacheDedupes = metricFactory.CreateCounter(
             "nzbdav_cache_dedupes_total",
             "Deduplicated inflight requests");
-        _l2Enabled = metricFactory.CreateGauge(
-            "nzbdav_l2_cache_enabled",
-            "1 if L2 object-storage cache is enabled, 0 otherwise");
         _l2Hits = metricFactory.CreateCounter(
             "nzbdav_l2_cache_hits_total",
             "L2 object-storage cache hits");
@@ -148,10 +145,13 @@ public sealed class NzbdavMetricsCollector
             "L2 object-storage cache writes");
         _l2WriteFailures = metricFactory.CreateCounter(
             "nzbdav_l2_cache_write_failures_total",
-            "L2 object-storage cache write failures");
+            "L2 object-storage write failures");
         _l2WritesDropped = metricFactory.CreateCounter(
             "nzbdav_l2_cache_writes_dropped_total",
-            "L2 object-storage cache writes dropped due to full queue");
+            "L2 object-storage writes dropped due to full queue");
+        _l2Enabled = metricFactory.CreateGauge(
+            "nzbdav_l2_cache_enabled",
+            "1 if L2 cache is enabled, 0 otherwise");
         _sharedHeaderHits = metricFactory.CreateCounter(
             "nzbdav_shared_header_cache_hits_total",
             "Shared (Postgres) header cache hits");
@@ -207,22 +207,23 @@ public sealed class NzbdavMetricsCollector
             IncrementCounter(_cacheEvictions, stats.Evictions, ref _previousEvictions);
             IncrementCounter(_cacheDedupes, stats.Dedupes, ref _previousDedupes);
 
-            var l2Cache = _getL2Cache();
-            _l2Enabled.Set(l2Cache is null ? 0 : 1);
-            if (l2Cache != null)
+            var l2 = _getL2Cache();
+            _l2Enabled.Set(l2 != null ? 1 : 0);
+            if (l2 != null)
             {
-                IncrementCounter(_l2Hits, l2Cache.L2Hits, ref _previousL2Hits);
-                IncrementCounter(_l2Misses, l2Cache.L2Misses, ref _previousL2Misses);
-                IncrementCounter(_l2Writes, l2Cache.L2Writes, ref _previousL2Writes);
-                IncrementCounter(_l2WriteFailures, l2Cache.L2WriteFailures, ref _previousL2WriteFailures);
-                IncrementCounter(_l2WritesDropped, l2Cache.L2WritesDropped, ref _previousL2WritesDropped);
+                IncrementCounter(_l2Hits, l2.L2Hits, ref _previousL2Hits);
+                IncrementCounter(_l2Misses, l2.L2Misses, ref _previousL2Misses);
+                IncrementCounter(_l2Writes, l2.L2Writes, ref _previousL2Writes);
+                IncrementCounter(_l2WriteFailures, l2.L2WriteFailures, ref _previousL2WriteFailures);
+                IncrementCounter(_l2WritesDropped, l2.L2WritesDropped, ref _previousL2WritesDropped);
             }
 
-            if (_sharedHeaderCache != null)
+            var sharedHeaderCache = _getSharedHeaderCache();
+            if (sharedHeaderCache != null)
             {
-                IncrementCounter(_sharedHeaderHits, _sharedHeaderCache.Hits, ref _previousSharedHeaderHits);
-                IncrementCounter(_sharedHeaderMisses, _sharedHeaderCache.Misses, ref _previousSharedHeaderMisses);
-                IncrementCounter(_sharedHeaderWriteFailures, _sharedHeaderCache.WriteFailures, ref _previousSharedHeaderWriteFailures);
+                IncrementCounter(_sharedHeaderHits, sharedHeaderCache.Hits, ref _previousSharedHeaderHits);
+                IncrementCounter(_sharedHeaderMisses, sharedHeaderCache.Misses, ref _previousSharedHeaderMisses);
+                IncrementCounter(_sharedHeaderWriteFailures, sharedHeaderCache.WriteFailures, ref _previousSharedHeaderWriteFailures);
             }
 
             var poolStats = _getPoolStats();
@@ -255,12 +256,6 @@ public sealed class NzbdavMetricsCollector
 
     public static void IncrementActiveStreams() => ActiveStreamsGauge.Inc();
     public static void DecrementActiveStreams() => ActiveStreamsGauge.Dec();
-
-    private static ObjectStorageSegmentCache? TryGetL2Cache(LiveSegmentCache cache)
-    {
-        var field = typeof(LiveSegmentCache).GetField("_l2Cache", BindingFlags.Instance | BindingFlags.NonPublic);
-        return field?.GetValue(cache) as ObjectStorageSegmentCache;
-    }
 
     // No IDisposable — this is a singleton that lives for the app lifetime.
     // The AddBeforeCollectCallback registration is never removed.

@@ -23,7 +23,26 @@ public sealed class LiveSegmentCache : IDisposable
 
     public readonly record struct BodyFetchResult(
         UsenetDecodedBodyResponse Response,
-        bool UsedExistingFetch
+        bool UsedExistingFetch,
+        BodyFetchOrigin Origin
+    );
+
+    public enum BodyFetchOrigin
+    {
+        L1,
+        L2,
+        Nntp
+    }
+
+    private readonly record struct BodyFetchOutcome(
+        CacheEntry Entry,
+        BodyFetchOrigin Origin
+    );
+
+    private readonly record struct L2BodyFetchSource(
+        BodyFetchSource Source,
+        SegmentCategory Category,
+        Guid? OwnerNzbId
     );
 
     private sealed class CacheEntry
@@ -95,10 +114,12 @@ public sealed class LiveSegmentCache : IDisposable
     }
 
     private readonly ConcurrentDictionary<string, CacheEntry> _cachedSegments = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, Lazy<Task<CacheEntry>>> _inflightBodies = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, Lazy<Task<BodyFetchOutcome>>> _inflightBodies = new(StringComparer.Ordinal);
     private readonly MemoryCache _headerCache;
     private readonly SemaphoreSlim _pruneLock = new(1, 1);
     private readonly object _headerCacheLock = new();
+    private readonly ObjectStorageSegmentCache? _l2Cache;
+    private readonly SharedHeaderCache? _sharedHeaderCache;
     private long _maxCacheSizeBytes;
     private TimeSpan _maxAge;
     private bool _disposed;
@@ -109,8 +130,13 @@ public sealed class LiveSegmentCache : IDisposable
     private long _dedupes;
     private long _evictions;
 
-    public LiveSegmentCache(ConfigManager configManager)
+    public LiveSegmentCache(
+        ConfigManager configManager,
+        ObjectStorageSegmentCache? l2Cache = null,
+        SharedHeaderCache? sharedHeaderCache = null)
     {
+        _l2Cache = l2Cache;
+        _sharedHeaderCache = sharedHeaderCache;
         var configuredDir = configManager.GetCacheDirectory();
         CacheDirectory = configuredDir ?? Path.Join(DavDatabaseContext.ConfigPath, "stream-cache");
         _maxCacheSizeBytes = (long)configManager.GetCacheMaxSizeGb() * 1024 * 1024 * 1024;
@@ -140,9 +166,13 @@ public sealed class LiveSegmentCache : IDisposable
     public LiveSegmentCache(
         string cacheDirectory,
         long maxCacheSizeBytes = 10L * 1024 * 1024 * 1024,
-        TimeSpan? maxAge = null
+        TimeSpan? maxAge = null,
+        ObjectStorageSegmentCache? l2Cache = null,
+        SharedHeaderCache? sharedHeaderCache = null
     )
     {
+        _l2Cache = l2Cache;
+        _sharedHeaderCache = sharedHeaderCache;
         CacheDirectory = cacheDirectory;
         _maxCacheSizeBytes = maxCacheSizeBytes;
         _maxAge = maxAge ?? TimeSpan.FromHours(6);
@@ -226,12 +256,12 @@ public sealed class LiveSegmentCache : IDisposable
     )
     {
         if (TryReadBody(segmentId, out var cachedResponse))
-            return new BodyFetchResult(cachedResponse, UsedExistingFetch: false);
+            return new BodyFetchResult(cachedResponse, UsedExistingFetch: false, Origin: BodyFetchOrigin.L1);
 
         Interlocked.Increment(ref _misses);
 
-        var createdLazy = new Lazy<Task<CacheEntry>>(
-            () => FetchAndStoreBodyAsync(segmentId, fetchBodyAsync, cancellationToken, category, ownerNzbId),
+        var createdLazy = new Lazy<Task<BodyFetchOutcome>>(
+            () => LoadBodyThroughCacheOrNetworkAsync(segmentId, fetchBodyAsync, cancellationToken, category, ownerNzbId),
             LazyThreadSafetyMode.ExecutionAndPublication
         );
 
@@ -243,17 +273,17 @@ public sealed class LiveSegmentCache : IDisposable
         if (!usedExistingFetch)
         {
             _ = activeLazy.Value.ContinueWith(
-                _ => _inflightBodies.TryRemove(segmentId, out Lazy<Task<CacheEntry>>? _),
+                _ => _inflightBodies.TryRemove(segmentId, out Lazy<Task<BodyFetchOutcome>>? _),
                 CancellationToken.None,
                 TaskContinuationOptions.ExecuteSynchronously,
                 TaskScheduler.Default
             );
         }
 
-        var entry = await activeLazy.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
-        var response = OpenBodyResponse(segmentId, entry);
+        var outcome = await activeLazy.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var response = OpenBodyResponse(segmentId, outcome.Entry);
         await PruneAsync(cancellationToken).ConfigureAwait(false);
-        return new BodyFetchResult(response, usedExistingFetch);
+        return new BodyFetchResult(response, usedExistingFetch, outcome.Origin);
     }
 
     public async Task<UsenetDecodedArticleResponse> CreateArticleResponseAsync(
@@ -383,9 +413,58 @@ public sealed class LiveSegmentCache : IDisposable
         CancellationToken cancellationToken
     )
     {
+        if (_sharedHeaderCache != null)
+        {
+            var sharedHeader = await _sharedHeaderCache.TryReadAsync(segmentId, cancellationToken).ConfigureAwait(false);
+            if (sharedHeader != null)
+            {
+                StoreHeader(segmentId, sharedHeader);
+                return sharedHeader;
+            }
+        }
+
         var header = await headerFactory(cancellationToken).ConfigureAwait(false);
         StoreHeader(segmentId, header);
+        if (_sharedHeaderCache != null)
+            _ = _sharedHeaderCache.WriteAsync(segmentId, header, CancellationToken.None);
         return header;
+    }
+
+    private async Task<BodyFetchOutcome> LoadBodyThroughCacheOrNetworkAsync(
+        string segmentId,
+        Func<CancellationToken, Task<BodyFetchSource>> fetchBodyAsync,
+        CancellationToken cancellationToken,
+        SegmentCategory category,
+        Guid? ownerNzbId)
+    {
+        if (_l2Cache != null)
+        {
+            var l2Read = await _l2Cache.TryReadWithMetadataAsync(segmentId, cancellationToken).ConfigureAwait(false);
+            if (l2Read != null)
+            {
+                var l2Source = BuildBodyFetchSourceFromL2(segmentId, l2Read);
+                if (l2Source != null)
+                {
+                    var promoted = await StoreBodySourceAsync(
+                        segmentId,
+                        l2Source.Value.Source,
+                        cancellationToken,
+                        l2Source.Value.Category,
+                        l2Source.Value.OwnerNzbId,
+                        enqueueL2Write: false).ConfigureAwait(false);
+                    return new BodyFetchOutcome(promoted, BodyFetchOrigin.L2);
+                }
+            }
+        }
+
+        var entry = await FetchAndStoreBodyAsync(
+            segmentId,
+            fetchBodyAsync,
+            cancellationToken,
+            category,
+            ownerNzbId,
+            enqueueL2Write: true).ConfigureAwait(false);
+        return new BodyFetchOutcome(entry, BodyFetchOrigin.Nntp);
     }
 
     private async Task<CacheEntry> FetchAndStoreBodyAsync(
@@ -393,10 +472,28 @@ public sealed class LiveSegmentCache : IDisposable
         Func<CancellationToken, Task<BodyFetchSource>> fetchBodyAsync,
         CancellationToken cancellationToken,
         SegmentCategory category = SegmentCategory.Unknown,
-        Guid? ownerNzbId = null
+        Guid? ownerNzbId = null,
+        bool enqueueL2Write = true
     )
     {
         var bodyFetch = await fetchBodyAsync(cancellationToken).ConfigureAwait(false);
+        return await StoreBodySourceAsync(
+            segmentId,
+            bodyFetch,
+            cancellationToken,
+            category,
+            ownerNzbId,
+            enqueueL2Write).ConfigureAwait(false);
+    }
+
+    private async Task<CacheEntry> StoreBodySourceAsync(
+        string segmentId,
+        BodyFetchSource bodyFetch,
+        CancellationToken cancellationToken,
+        SegmentCategory category,
+        Guid? ownerNzbId,
+        bool enqueueL2Write)
+    {
         await using var bodyStream = bodyFetch.Stream;
 
         var tempPath = Path.Join(CacheDirectory, $"{Guid.NewGuid():N}.tmp");
@@ -440,6 +537,17 @@ public sealed class LiveSegmentCache : IDisposable
                 Interlocked.Add(ref _cachedBytes, cacheEntry.SizeBytes);
                 StoreHeader(segmentId, bodyFetch.YencHeaders);
 
+                if (enqueueL2Write && _l2Cache != null)
+                {
+                    var bodyBytes = await File.ReadAllBytesAsync(finalPath, cancellationToken).ConfigureAwait(false);
+                    _l2Cache.EnqueueWrite(
+                        segmentId,
+                        bodyBytes,
+                        category,
+                        ownerNzbId,
+                        bodyFetch.YencHeaders);
+                }
+
                 // Persist metadata sidecar
                 await WriteMetadataAsync(finalPath, cacheEntry).ConfigureAwait(false);
 
@@ -453,6 +561,52 @@ public sealed class LiveSegmentCache : IDisposable
             DeleteFileQuietly(tempPath);
             throw;
         }
+    }
+
+    private static L2BodyFetchSource? BuildBodyFetchSourceFromL2(
+        string segmentId,
+        ObjectStorageSegmentCache.ReadResult readResult)
+    {
+        if (!readResult.Metadata.TryGetValue("x-amz-meta-yenc-header", out var headerJson))
+        {
+            Log.Debug("L2 metadata missing yEnc header for segment {SegmentId}; falling back to NNTP.", segmentId);
+            return null;
+        }
+
+        var yencHeader = JsonSerializer.Deserialize<UsenetYencHeader>(headerJson);
+        if (yencHeader is null)
+        {
+            Log.Debug("L2 metadata contains invalid yEnc header for segment {SegmentId}; falling back to NNTP.", segmentId);
+            return null;
+        }
+
+        var category = SegmentCategory.Unknown;
+        if (readResult.Metadata.TryGetValue("x-amz-meta-category", out var categoryValue))
+        {
+            category = categoryValue switch
+            {
+                "smallfile" => SegmentCategory.SmallFile,
+                "small_file" => SegmentCategory.SmallFile,
+                "video" => SegmentCategory.VideoSegment,
+                "videosegment" => SegmentCategory.VideoSegment,
+                _ => SegmentCategory.Unknown
+            };
+        }
+
+        Guid? ownerNzbId = null;
+        if (readResult.Metadata.TryGetValue("x-amz-meta-owner-nzb-id", out var ownerValue) &&
+            Guid.TryParse(ownerValue, out var parsedOwner))
+        {
+            ownerNzbId = parsedOwner;
+        }
+
+        return new L2BodyFetchSource(
+            new BodyFetchSource(
+                new MemoryStream(readResult.Body, writable: false),
+                yencHeader,
+                ArticleHeaders: null),
+            category,
+            ownerNzbId);
     }
 
     private bool TryGetFreshEntry(string segmentId, out CacheEntry entry)
@@ -662,7 +816,7 @@ public sealed class LiveSegmentCache : IDisposable
         }
         catch (Exception e)
         {
-            Log.Warning($"Error rehydrating cache: {e.Message}");
+            Log.Warning(e, "Error rehydrating cache");
         }
 
         if (rehydrated > 0 || orphansRemoved > 0)

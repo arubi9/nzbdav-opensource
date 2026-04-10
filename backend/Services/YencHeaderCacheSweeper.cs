@@ -1,4 +1,3 @@
-using System.Reflection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Hosting;
 using NzbWebDAV.Config;
@@ -7,62 +6,52 @@ using Serilog;
 
 namespace NzbWebDAV.Services;
 
-public sealed class YencHeaderCacheSweeper : BackgroundService
+public sealed class YencHeaderCacheSweeper(ConfigManager configManager) : BackgroundService
 {
     private static readonly TimeSpan SweepInterval = TimeSpan.FromHours(1);
-    private readonly ConfigManager _configManager;
-
-    public YencHeaderCacheSweeper(ConfigManager configManager)
-    {
-        _configManager = configManager;
-    }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         using var timer = new PeriodicTimer(SweepInterval);
-
-        while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false))
+        try
         {
-            await SweepOnceAsync(stoppingToken).ConfigureAwait(false);
+            await SweepOnce(stoppingToken).ConfigureAwait(false);
+            while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false))
+                await SweepOnce(stoppingToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // normal shutdown
         }
     }
 
-    public async Task SweepOnceAsync(CancellationToken cancellationToken)
+    public async Task SweepOnce(CancellationToken cancellationToken)
     {
         try
         {
-            var retentionDays = GetMetadataRetentionDays();
+            var retentionDays = configManager.GetMetadataRetentionDays();
+            // Use a parameterized UTC cutoff instead of Postgres-specific
+            // date arithmetic so this cleanup stays portable across SQLite
+            // tests and Postgres production runs.
             var cutoff = DateTime.UtcNow.AddDays(-retentionDays);
 
             await using var dbContext = new DavDatabaseContext();
-            await dbContext.YencHeaderCache
-                .Where(entry => entry.CachedAt < cutoff)
-                .ExecuteDeleteAsync(cancellationToken)
-                .ConfigureAwait(false);
+            var deleted = await dbContext.Database.ExecuteSqlInterpolatedAsync($@"
+                DELETE FROM yenc_header_cache
+                WHERE cached_at < {cutoff};
+            ", cancellationToken).ConfigureAwait(false);
+
+            if (deleted > 0)
+            {
+                Log.Debug(
+                    "YencHeaderCacheSweeper removed {Count} expired entries (retention {Days} days)",
+                    deleted,
+                    retentionDays);
+            }
         }
         catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
         {
             Log.Warning(ex, "YencHeaderCacheSweeper failed");
         }
-    }
-
-    private int GetMetadataRetentionDays()
-    {
-        var value = TryGetConfigValue("cache.metadata-retention-days");
-        return int.TryParse(value, out var retentionDays) && retentionDays > 0
-            ? retentionDays
-            : 90;
-    }
-
-    private string? TryGetConfigValue(string configName)
-    {
-        var method = typeof(ConfigManager).GetMethod(
-            "GetConfigValue",
-            BindingFlags.Instance | BindingFlags.NonPublic,
-            binder: null,
-            types: [typeof(string)],
-            modifiers: null);
-
-        return method?.Invoke(_configManager, [configName]) as string;
     }
 }
