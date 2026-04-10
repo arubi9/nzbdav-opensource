@@ -66,11 +66,15 @@ public partial class Program
         {
             var argIndex = args.ToList().IndexOf("--db-migration");
             var targetMigration = args.Length > argIndex + 1 ? args[argIndex + 1] : null;
-            await databaseContext.Database
-                .MigrateAsync(targetMigration, SigtermUtil.GetCancellationToken())
+            await DatabaseInitialization
+                .InitializeAsync(databaseContext, SigtermUtil.GetCancellationToken(), targetMigration)
                 .ConfigureAwait(false);
             return;
         }
+
+        await DatabaseInitialization
+            .InitializeAsync(databaseContext, SigtermUtil.GetCancellationToken())
+            .ConfigureAwait(false);
 
         var encryptionService = new ConfigEncryptionService();
         await StartupEncryptionCheck.RunAsync(databaseContext, encryptionService).ConfigureAwait(false);
@@ -146,11 +150,16 @@ public partial class Program
         {
             builder.Services
                 .AddSingleton<IAuthFailureTracker, PostgresAuthFailureTracker>()
-                .AddHostedService<AuthFailuresSweeper>()
                 .AddHostedService<ConnectionPoolCoordinator>()
-                .AddHostedService<ConnectionPoolClaimSweeper>()
-                .AddHostedService<WebsocketOutboxListener>()
-                .AddHostedService<WebsocketOutboxSweeper>();
+                .AddHostedService<WebsocketOutboxListener>();
+
+            if (NodeRoleConfig.RunsIngest)
+            {
+                builder.Services
+                    .AddHostedService<AuthFailuresSweeper>()
+                    .AddHostedService<ConnectionPoolClaimSweeper>()
+                    .AddHostedService<WebsocketOutboxSweeper>();
+            }
         }
         else
         {

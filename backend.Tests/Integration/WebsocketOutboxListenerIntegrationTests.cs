@@ -45,6 +45,38 @@ public sealed class WebsocketOutboxListenerIntegrationTests : IClassFixture<Post
     }
 
     [SkippableFact]
+    public async Task CatchUpOnce_AdvancesPastUnknownTopics()
+    {
+        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
+
+        await _fixture.ResetAsync();
+        using var environment = new backend.Tests.Config.TemporaryEnvironment(
+            ("DATABASE_URL", _fixture.ConnectionString),
+            ("DATABASE_URL_SESSION", _fixture.ConnectionString));
+
+        long poisonSeq;
+        await using (var dbContext = new DavDatabaseContext())
+        {
+            dbContext.WebsocketOutbox.Add(new NzbWebDAV.Database.Models.WebsocketOutboxEntry
+            {
+                Topic = "unknown.topic",
+                Payload = "poison"
+            });
+            await dbContext.SaveChangesAsync();
+            poisonSeq = await dbContext.WebsocketOutbox
+                .OrderByDescending(x => x.Seq)
+                .Select(x => x.Seq)
+                .FirstAsync();
+        }
+
+        var manager = new WebsocketManager();
+        var listener = new WebsocketOutboxListener(manager);
+        await listener.CatchUpOnce(CancellationToken.None);
+
+        Assert.Equal(poisonSeq, GetLastSeenSeq(listener));
+    }
+
+    [SkippableFact]
     public async Task InitializeStateFromOutbox_RestoresLatestStatefulMessages_WithoutReplayingEvents()
     {
         Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
@@ -81,6 +113,35 @@ public sealed class WebsocketOutboxListenerIntegrationTests : IClassFixture<Post
 
         Assert.Equal("item-1|Downloading", GetLastMessage(manager, WebsocketTopic.QueueItemStatus));
         Assert.Null(GetLastMessage(manager, WebsocketTopic.QueueItemAdded));
+    }
+
+    [SkippableFact]
+    public async Task RunListenerLoop_WithoutSessionDatabase_RunsInPollOnlyMode()
+    {
+        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
+
+        await _fixture.ResetAsync();
+        using var environment = new backend.Tests.Config.TemporaryEnvironment(
+            ("DATABASE_URL", _fixture.ConnectionString),
+            ("DATABASE_URL_SESSION", null));
+
+        await using (var dbContext = new DavDatabaseContext())
+        {
+            dbContext.WebsocketOutbox.Add(new NzbWebDAV.Database.Models.WebsocketOutboxEntry
+            {
+                Topic = WebsocketTopic.QueueItemStatus.Name,
+                Payload = "item-1|Queued"
+            });
+            await dbContext.SaveChangesAsync();
+        }
+
+        var manager = new WebsocketManager();
+        var listener = new WebsocketOutboxListener(manager);
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => InvokeRunListenerLoopAsync(listener, cancellation.Token));
+
+        Assert.Equal("item-1|Queued", GetLastMessage(manager, WebsocketTopic.QueueItemStatus));
     }
 
     [SkippableFact]
@@ -128,5 +189,17 @@ public sealed class WebsocketOutboxListenerIntegrationTests : IClassFixture<Post
         var field = typeof(WebsocketManager).GetField("_lastMessage", BindingFlags.Instance | BindingFlags.NonPublic);
         var value = (Dictionary<WebsocketTopic, string>)field!.GetValue(manager)!;
         return value.TryGetValue(topic, out var message) ? message : null;
+    }
+
+    private static long GetLastSeenSeq(WebsocketOutboxListener listener)
+    {
+        var field = typeof(WebsocketOutboxListener).GetField("_lastSeenSeq", BindingFlags.Instance | BindingFlags.NonPublic);
+        return (long)field!.GetValue(listener)!;
+    }
+
+    private static Task InvokeRunListenerLoopAsync(WebsocketOutboxListener listener, CancellationToken cancellationToken)
+    {
+        var method = typeof(WebsocketOutboxListener).GetMethod("RunListenerLoop", BindingFlags.Instance | BindingFlags.NonPublic);
+        return (Task)method!.Invoke(listener, new object?[] { cancellationToken })!;
     }
 }

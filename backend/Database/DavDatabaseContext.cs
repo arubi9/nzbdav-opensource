@@ -1,5 +1,6 @@
 ﻿using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql;
 using NzbWebDAV.Config;
@@ -23,6 +24,7 @@ public sealed class DavDatabaseContext() : DbContext(CreateOptions())
         {
             var connectionString = BuildPostgresConnectionString(databaseUrl);
             builder.UseNpgsql(connectionString);
+            builder.ConfigureWarnings(w => w.Ignore(RelationalEventId.PendingModelChangesWarning));
         }
         else
         {

@@ -9,7 +9,7 @@ namespace NzbWebDAV.Api.Filters;
 public sealed class PostgresAuthFailureTracker : IAuthFailureTracker
 {
     private static readonly TimeSpan Window = TimeSpan.FromSeconds(60);
-    private static readonly TimeSpan NegativeCacheTtl = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan NegativeCacheTtl = TimeSpan.FromSeconds(10);
 
     private readonly Func<DavDatabaseContext> _dbContextFactory;
     private readonly AuthFailureTracker _inMemoryFallback;
@@ -30,16 +30,19 @@ public sealed class PostgresAuthFailureTracker : IAuthFailureTracker
 
         try
         {
+            var cutoff = DateTime.UtcNow.Subtract(Window);
             await using var dbContext = _dbContextFactory();
             var blocked = await dbContext.AuthFailures
                 .AnyAsync(x =>
                     x.IpAddress == ipAddress &&
                     x.FailureCount >= 10 &&
-                    x.WindowStart > DateTime.UtcNow.Subtract(Window))
+                    x.WindowStart > cutoff)
                 .ConfigureAwait(false);
 
             if (!blocked)
                 _negativeCache.Set(ipAddress, true, NegativeCacheTtl);
+            else
+                _negativeCache.Remove(ipAddress);
 
             return blocked;
         }
@@ -68,7 +71,6 @@ public sealed class PostgresAuthFailureTracker : IAuthFailureTracker
                         ELSE auth_failures.window_start
                     END;
             ").ConfigureAwait(false);
-
             _negativeCache.Remove(ipAddress);
         }
         catch (Exception ex) when (IsTransientDbError(ex))
@@ -80,6 +82,6 @@ public sealed class PostgresAuthFailureTracker : IAuthFailureTracker
 
     private static bool IsTransientDbError(Exception ex)
     {
-        return ex is NpgsqlException or TimeoutException or InvalidOperationException;
+        return ex is NpgsqlException or TimeoutException;
     }
 }

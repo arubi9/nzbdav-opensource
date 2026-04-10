@@ -816,7 +816,7 @@ public sealed class LiveSegmentCache : IDisposable
         }
         catch (Exception e)
         {
-            Log.Warning($"Error rehydrating cache: {e.Message}");
+            Log.Warning(e, "Error rehydrating cache");
         }
 
         if (rehydrated > 0 || orphansRemoved > 0)

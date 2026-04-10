@@ -45,11 +45,15 @@ public sealed class WebsocketOutboxListener(WebsocketManager websocketManager) :
 
         foreach (var row in rows)
         {
+            _lastSeenSeq = row.Seq;
+
             if (!WebsocketTopic.TryFromName(row.Topic, out var topic) || topic is null)
+            {
+                Log.Warning("Skipping websocket outbox row {Seq} with unknown topic '{Topic}'", row.Seq, row.Topic);
                 continue;
+            }
 
             await websocketManager.FanoutToLocalSockets(topic, row.Payload).ConfigureAwait(false);
-            _lastSeenSeq = row.Seq;
         }
     }
 
@@ -88,7 +92,14 @@ public sealed class WebsocketOutboxListener(WebsocketManager websocketManager) :
     {
         var sessionConnectionString = EnvironmentUtil.GetDatabaseUrlSession();
         if (string.IsNullOrEmpty(sessionConnectionString))
-            throw new InvalidOperationException("DATABASE_URL_SESSION is required for WebsocketOutboxListener.");
+        {
+            Log.Warning("DATABASE_URL_SESSION is not configured; WebsocketOutboxListener is running in poll-only mode.");
+            await InitializeStateFromOutbox(cancellationToken).ConfigureAwait(false);
+            using var pollOnlyTimer = new PeriodicTimer(PollInterval);
+            while (await pollOnlyTimer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
+                await CatchUpOnce(cancellationToken).ConfigureAwait(false);
+            return;
+        }
 
         await using var connection = new NpgsqlConnection(sessionConnectionString);
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);

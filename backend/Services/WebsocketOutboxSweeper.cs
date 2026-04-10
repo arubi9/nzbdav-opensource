@@ -8,7 +8,7 @@ namespace NzbWebDAV.Services;
 public sealed class WebsocketOutboxSweeper : BackgroundService
 {
     private static readonly TimeSpan SweepInterval = TimeSpan.FromSeconds(30);
-    private static readonly TimeSpan RetentionWindow = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan RetentionWindow = TimeSpan.FromMinutes(5);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {

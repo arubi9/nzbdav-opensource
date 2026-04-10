@@ -140,7 +140,7 @@ public sealed class ConnectionPoolCoordinator : BackgroundService
             {
                 var degradedClaim = _lastKnownClaims.TryGetValue(providerIndex, out var previousClaim)
                     ? previousClaim
-                    : Math.Max(1, Math.Min(1, totalSlots));
+                    : Math.Max(1, totalSlots);
                 _applyClaim(providerIndex, degradedClaim);
                 Log.Warning(ex,
                     "ConnectionPoolCoordinator falling back to degraded claim {Claim} for provider {ProviderIndex}",
@@ -152,7 +152,7 @@ public sealed class ConnectionPoolCoordinator : BackgroundService
 
         var fallbackClaim = _lastKnownClaims.TryGetValue(providerIndex, out var cachedClaim)
             ? cachedClaim
-            : Math.Max(1, Math.Min(1, totalSlots));
+            : Math.Max(1, totalSlots);
         _applyClaim(providerIndex, fallbackClaim);
     }
 

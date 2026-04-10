@@ -291,7 +291,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
                     .WithObject(GetObjectKey(segmentId))
                     .WithCallbackStream(stream => stream.CopyTo(memory));
                 var stat = await client.GetObjectAsync(args, ct).ConfigureAwait(false);
-                return new ReadResult(memory.ToArray(), stat.MetaData);
+                return new ReadResult(memory.ToArray(), NormalizeMetadata(stat.MetaData));
             }
             catch (Exception ex)
             {
@@ -359,6 +359,21 @@ public sealed class ObjectStorageSegmentCache : IDisposable
                 await client.RemoveObjectAsync(removeArgs, ct).ConfigureAwait(false);
             }
         };
+    }
+
+    private static IReadOnlyDictionary<string, string> NormalizeMetadata(IReadOnlyDictionary<string, string> metadata)
+    {
+        var normalized = new Dictionary<string, string>(metadata, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (key, value) in metadata)
+        {
+            if (key.StartsWith("x-amz-meta-", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            normalized[$"x-amz-meta-{key}"] = value;
+        }
+
+        return normalized;
     }
 
     private static IMinioClient CreateClient(

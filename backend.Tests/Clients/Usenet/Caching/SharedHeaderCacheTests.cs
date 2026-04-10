@@ -4,6 +4,8 @@ using DotNet.Testcontainers.Containers;
 using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Clients.Usenet.Caching;
 using NzbWebDAV.Database;
+using NzbWebDAV.Services;
+using Testcontainers.PostgreSql;
 using UsenetSharp.Models;
 
 namespace NzbWebDAV.Tests.Clients.Usenet.Caching;
@@ -104,7 +106,7 @@ public sealed class SharedHeaderCacheTests : IClassFixture<PostgresHeaderCacheFi
 public sealed class PostgresHeaderCacheFixture : IAsyncLifetime
 {
     private readonly string? _previousDatabaseUrl = Environment.GetEnvironmentVariable("DATABASE_URL");
-    private readonly TestcontainersContainer? _container;
+    private readonly PostgreSqlContainer? _container;
 
     public PostgresHeaderCacheFixture()
     {
@@ -112,13 +114,11 @@ public sealed class PostgresHeaderCacheFixture : IAsyncLifetime
         if (!IsAvailable)
             return;
 
-        _container = new TestcontainersBuilder<TestcontainersContainer>()
-            .WithImage("postgres:17")
+        _container = new PostgreSqlBuilder("postgres:17")
             .WithName($"nzbdav-header-cache-{Guid.NewGuid():N}")
-            .WithPortBinding(5432, true)
-            .WithEnvironment("POSTGRES_DB", "nzbdav")
-            .WithEnvironment("POSTGRES_USER", "nzbdav")
-            .WithEnvironment("POSTGRES_PASSWORD", "nzbdav")
+            .WithDatabase("nzbdav")
+            .WithUsername("nzbdav")
+            .WithPassword("nzbdav")
             .WithCleanUp(true)
             .Build();
     }
@@ -132,12 +132,10 @@ public sealed class PostgresHeaderCacheFixture : IAsyncLifetime
             return;
 
         await _container.StartAsync();
-        Environment.SetEnvironmentVariable(
-            "DATABASE_URL",
-            $"Host={_container.Hostname};Port={_container.GetMappedPublicPort(5432)};Database=nzbdav;Username=nzbdav;Password=nzbdav");
+        Environment.SetEnvironmentVariable("DATABASE_URL", _container.GetConnectionString());
 
         await using var dbContext = new DavDatabaseContext();
-        await dbContext.Database.MigrateAsync();
+        await DatabaseInitialization.InitializeAsync(dbContext, CancellationToken.None);
     }
 
     public async Task DisposeAsync()

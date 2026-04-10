@@ -50,6 +50,9 @@ public sealed class ObjectStorageIntegrationTests
             Guid.NewGuid(),
             CreateHeader("segment.bin"));
 
+        var initialL2Read = await WaitForReadResultAsync(fixture.Cache, "segment-a");
+        Assert.NotNull(initialL2Read);
+
         await using var cacheScope = new TempCacheScope();
         using var liveCache = new LiveSegmentCache(cacheScope.Path, l2Cache: fixture.Cache);
 
@@ -123,7 +126,7 @@ public sealed class ObjectStorageIntegrationTests
 
         var result = await WaitForReadResultAsync(fixture.Cache, "segment-a");
         Assert.NotNull(result);
-        Assert.Equal("smallfile", result!.Metadata["x-amz-meta-category"]);
+        Assert.Equal("small_file", result!.Metadata["x-amz-meta-category"]);
         Assert.Equal(ownerId.ToString(), result.Metadata["x-amz-meta-owner-nzb-id"]);
         Assert.True(result.Metadata.ContainsKey("x-amz-meta-yenc-header"));
     }
@@ -207,9 +210,9 @@ public sealed class MinioFixture : IAsyncDisposable
 {
     private readonly string _accessKey;
     private readonly string _secretKey;
-    private readonly TestcontainersContainer _container;
+    private readonly IContainer _container;
 
-    private MinioFixture(string accessKey, string secretKey, TestcontainersContainer container)
+    private MinioFixture(string accessKey, string secretKey, IContainer container)
     {
         _accessKey = accessKey;
         _secretKey = secretKey;
@@ -217,7 +220,7 @@ public sealed class MinioFixture : IAsyncDisposable
         Cache = CreateCache();
     }
 
-    public TestcontainersContainer Container => _container;
+    public IContainer Container => _container;
     public ObjectStorageSegmentCache Cache { get; }
 
     public static async Task<MinioFixture> StartAsync()
@@ -225,13 +228,15 @@ public sealed class MinioFixture : IAsyncDisposable
         var accessKey = "nzbdav";
         var secretKey = "nzbdav-secret-123";
 
-        var container = new TestcontainersBuilder<TestcontainersContainer>()
-            .WithImage("minio/minio:latest")
+        var container = new ContainerBuilder("minio/minio:latest")
             .WithName($"nzbdav-minio-{Guid.NewGuid():N}")
             .WithPortBinding(9000, true)
             .WithEnvironment("MINIO_ROOT_USER", accessKey)
             .WithEnvironment("MINIO_ROOT_PASSWORD", secretKey)
             .WithCommand("server", "/data")
+            .WithWaitStrategy(Wait.ForUnixContainer().UntilHttpRequestIsSucceeded(request => request
+                .ForPort(9000)
+                .ForPath("/minio/health/ready")))
             .WithCleanUp(true)
             .Build();
 
@@ -261,7 +266,11 @@ public sealed class MinioFixture : IAsyncDisposable
             ["x-amz-meta-segment-id"] = segmentId,
             ["x-amz-meta-yenc-filename"] = header.FileName,
             ["x-amz-meta-yenc-header"] = System.Text.Json.JsonSerializer.Serialize(header),
-            ["x-amz-meta-category"] = category.ToString().ToLowerInvariant()
+            ["x-amz-meta-category"] = category == SegmentCategory.SmallFile
+                ? "small_file"
+                : category == SegmentCategory.VideoSegment
+                    ? "video"
+                    : "unknown"
         };
         if (ownerNzbId.HasValue)
             headers["x-amz-meta-owner-nzb-id"] = ownerNzbId.Value.ToString();
@@ -282,7 +291,7 @@ public sealed class MinioFixture : IAsyncDisposable
         config.UpdateValues(
         [
             new ConfigItem { ConfigName = "cache.l2.enabled", ConfigValue = "true" },
-            new ConfigItem { ConfigName = "cache.l2.endpoint", ConfigValue = $"{_container.Hostname}:{_container.GetMappedPublicPort(9000)}" },
+            new ConfigItem { ConfigName = "cache.l2.endpoint", ConfigValue = $"127.0.0.1:{_container.GetMappedPublicPort(9000)}" },
             new ConfigItem { ConfigName = "cache.l2.access-key", ConfigValue = _accessKey },
             new ConfigItem { ConfigName = "cache.l2.secret-key", ConfigValue = _secretKey },
             new ConfigItem { ConfigName = "cache.l2.bucket-name", ConfigValue = "nzbdav-segments" },
@@ -294,7 +303,7 @@ public sealed class MinioFixture : IAsyncDisposable
     private IMinioClient CreateClient()
     {
         return new MinioClient()
-            .WithEndpoint($"{_container.Hostname}:{_container.GetMappedPublicPort(9000)}")
+            .WithEndpoint($"127.0.0.1:{_container.GetMappedPublicPort(9000)}")
             .WithCredentials(_accessKey, _secretKey)
             .WithSSL(false)
             .Build();

@@ -30,13 +30,40 @@ public sealed class PostgresAuthFailureTrackerTests : IClassFixture<PostgresHead
         Assert.True(await tracker.IsBlockedAsync("203.0.113.5"));
     }
 
+    [SkippableFact]
+    public async Task IsBlockedAsync_RefreshesAfterNegativeCacheExpires()
+    {
+        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
+
+        await _fixture.ResetAsync();
+        using var environment = new backend.Tests.Config.TemporaryEnvironment(("DATABASE_URL", _fixture.ConnectionString));
+        var tracker = new PostgresAuthFailureTracker(new AuthFailureTracker());
+
+        Assert.False(await tracker.IsBlockedAsync("203.0.113.6"));
+
+        await using (var dbContext = new DavDatabaseContext())
+        {
+            dbContext.AuthFailures.Add(new NzbWebDAV.Database.Models.AuthFailureEntry
+            {
+                IpAddress = "203.0.113.6",
+                FailureCount = 10,
+                WindowStart = DateTime.UtcNow
+            });
+            await dbContext.SaveChangesAsync();
+        }
+
+        Assert.False(await tracker.IsBlockedAsync("203.0.113.6"));
+        await Task.Delay(TimeSpan.FromSeconds(11));
+        Assert.True(await tracker.IsBlockedAsync("203.0.113.6"));
+    }
+
     [Fact]
     public async Task RecordFailure_FallsBackToInMemory_OnDbError()
     {
         var fallback = new AuthFailureTracker();
         var tracker = new PostgresAuthFailureTracker(
             fallback,
-            dbContextFactory: () => throw new InvalidOperationException("db down"));
+            dbContextFactory: () => throw new TimeoutException("db down"));
 
         await tracker.RecordFailureAsync("203.0.113.8");
 

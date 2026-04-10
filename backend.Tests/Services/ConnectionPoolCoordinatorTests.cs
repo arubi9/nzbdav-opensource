@@ -43,7 +43,7 @@ public sealed class ConnectionPoolCoordinatorTests : IClassFixture<PostgresHeade
     }
 
     [Fact]
-    public async Task RebalanceAllOnce_FallsBackToSingleSlot_WhenDatabaseUnavailable()
+    public async Task RebalanceAllOnce_FallsBackToConfiguredSlots_WhenDatabaseUnavailable()
     {
         var configManager = CreateConfigManager(maxConnections: 8);
         var appliedClaims = new Dictionary<int, int>();
@@ -55,7 +55,7 @@ public sealed class ConnectionPoolCoordinatorTests : IClassFixture<PostgresHeade
 
         await coordinator.RebalanceAllOnce(CancellationToken.None);
 
-        Assert.Equal(1, appliedClaims[0]);
+        Assert.Equal(8, appliedClaims[0]);
     }
 
     [SkippableFact]
