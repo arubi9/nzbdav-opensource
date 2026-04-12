@@ -28,7 +28,8 @@ public sealed class DavDatabaseContext() : DbContext(CreateOptions())
         }
         else
         {
-            builder.UseSqlite($"Data Source={DatabaseFilePath}")
+            builder.UseSqlite($"Data Source={DatabaseFilePath}",
+                    o => o.MaxBatchSize(50))
                 .AddInterceptors(new SqliteForeignKeyEnabler());
         }
 

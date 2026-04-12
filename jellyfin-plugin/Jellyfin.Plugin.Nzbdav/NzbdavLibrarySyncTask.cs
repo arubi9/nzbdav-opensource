@@ -130,9 +130,7 @@ public class NzbdavLibrarySyncTask : IScheduledTask
     {
         // Build the filesystem path from the manifest path
         // e.g., /content/movies/MovieName/movie.mkv → {LibraryPath}/movies/MovieName/movie.strm
-        var relativePath = videoFile.Path;
-        if (relativePath.StartsWith("/content/", StringComparison.OrdinalIgnoreCase))
-            relativePath = relativePath["/content/".Length..];
+        var relativePath = BuildStrmRelativePath(videoFile, allItems);
 
         var strmRelativePath = Path.ChangeExtension(relativePath, ".strm");
         var strmPath = Path.Combine(config.LibraryPath, strmRelativePath);
@@ -194,5 +192,51 @@ public class NzbdavLibrarySyncTask : IScheduledTask
         var ext = Path.GetExtension(filename)?.ToLowerInvariant();
         return ext is ".mkv" or ".mp4" or ".avi" or ".mov" or ".wmv" or ".flv"
             or ".m4v" or ".ts" or ".m2ts" or ".webm" or ".mpg" or ".mpeg";
+    }
+
+    private static string BuildStrmRelativePath(ManifestItem videoFile, IReadOnlyDictionary<Guid, ManifestItem> allItems)
+    {
+        var relativePath = videoFile.Path;
+        if (relativePath.StartsWith("/content/", StringComparison.OrdinalIgnoreCase))
+            relativePath = relativePath["/content/".Length..];
+
+        var fileName = Path.GetFileNameWithoutExtension(relativePath);
+        var ext = Path.GetExtension(videoFile.Name);
+        if (LooksObfuscated(fileName) && videoFile.ParentId.HasValue
+            && allItems.TryGetValue(videoFile.ParentId.Value, out var parent)
+            && parent.Type == "directory")
+        {
+            var parentDir = Path.GetDirectoryName(relativePath);
+            relativePath = Path.Combine(parentDir ?? "", parent.Name + ext);
+        }
+
+        return relativePath;
+    }
+
+    /// <summary>
+    /// Detects obfuscated filenames — random alphanumeric strings that Usenet uploaders
+    /// use to evade DMCA bots. Real release names contain dots or hyphens as separators
+    /// (e.g., "Family.Guy.S24E07.1080p"); obfuscated names are a single run of letters/digits
+    /// (e.g., "W6Ss3ROn1dPrVxlU916rJLYwTk6QbtDe").
+    /// </summary>
+    private static bool LooksObfuscated(string name)
+    {
+        if (name.Length < 12) return false;
+        // Real release names have dots, hyphens, spaces, or underscores as word separators
+        if (name.IndexOfAny(['.', '-', ' ', '_']) >= 0) return false;
+
+        var hasDigit = false;
+        var hasUpper = false;
+        var hasLower = false;
+        foreach (var c in name)
+        {
+            if (!char.IsLetterOrDigit(c))
+                return false;
+            if (char.IsDigit(c)) hasDigit = true;
+            if (char.IsUpper(c)) hasUpper = true;
+            if (char.IsLower(c)) hasLower = true;
+        }
+
+        return hasDigit && hasUpper && hasLower;
     }
 }
