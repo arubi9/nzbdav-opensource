@@ -1,12 +1,19 @@
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
 using NzbWebDAV.Config;
 using NzbWebDAV.Services;
+using NzbWebDAV.Utils;
 
 namespace NzbWebDAV.Api.Filters;
 
 public class ApiKeyAuthFilter(ConfigManager configManager, IAuthFailureTracker failureTracker) : IAsyncActionFilter
 {
+    private static readonly string[] InternalKeyAllowedPathPrefixes =
+    [
+        "/api/encryption-status"
+    ];
+
     // Thread-safe: immutable record swapped atomically via volatile reference.
     // Singleton filter accessed by concurrent requests.
     private volatile CachedKeyData? _cachedKey;
@@ -42,7 +49,7 @@ public class ApiKeyAuthFilter(ConfigManager configManager, IAuthFailureTracker f
             }
         }
 
-        if (string.IsNullOrEmpty(providedKey) || !ValidateApiKey(providedKey))
+        if (string.IsNullOrEmpty(providedKey) || !ValidateApiKey(request, providedKey))
         {
             await failureTracker.RecordFailureAsync(ip).ConfigureAwait(false);
             context.Result = new UnauthorizedObjectResult(new { error = "Invalid or missing API key" });
@@ -52,27 +59,43 @@ public class ApiKeyAuthFilter(ConfigManager configManager, IAuthFailureTracker f
         await next().ConfigureAwait(false);
     }
 
-    private bool ValidateApiKey(string providedKey)
+    private bool ValidateApiKey(HttpRequest request, string providedKey)
     {
-        try
-        {
-            var expectedKey = configManager.GetApiKey();
-            var cached = _cachedKey;
-            if (cached is null || cached.Source != expectedKey)
-            {
-                cached = new CachedKeyData(expectedKey, System.Text.Encoding.UTF8.GetBytes(expectedKey));
-                _cachedKey = cached;
-            }
+        var providedBytes = System.Text.Encoding.UTF8.GetBytes(providedKey);
 
-            var providedBytes = System.Text.Encoding.UTF8.GetBytes(providedKey);
-            // FixedTimeEquals returns false immediately for different-length spans.
-            // This leaks key length, which is acceptable for API keys (length is not secret).
-            return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
-                providedBytes, cached.Bytes);
-        }
-        catch
+        // Accept the persisted user-facing API key (used by external clients: Jellyfin, etc.)
+        var expectedKey = configManager.GetApiKey();
+        var cached = _cachedKey;
+        if (cached is null || cached.Source != expectedKey)
         {
-            return false;
+            cached = new CachedKeyData(expectedKey, System.Text.Encoding.UTF8.GetBytes(expectedKey));
+            _cachedKey = cached;
         }
+
+        // FixedTimeEquals returns false immediately for different-length spans.
+        // This leaks key length, which is acceptable for API keys (length is not secret).
+        if (System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(providedBytes, cached.Bytes))
+            return true;
+
+        if (!AllowsInternalKey(request.Path))
+            return false;
+
+        var internalKey = EnvironmentUtil.GetEnvironmentVariable("FRONTEND_BACKEND_API_KEY");
+        if (string.IsNullOrEmpty(internalKey))
+            return false;
+
+        var internalBytes = System.Text.Encoding.UTF8.GetBytes(internalKey);
+        return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(providedBytes, internalBytes);
+    }
+
+    private static bool AllowsInternalKey(PathString path)
+    {
+        foreach (var prefix in InternalKeyAllowedPathPrefixes)
+        {
+            if (path.StartsWithSegments(prefix, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
     }
 }

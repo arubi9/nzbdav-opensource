@@ -1,8 +1,5 @@
 using NzbWebDAV.Clients.Usenet.Caching;
 using NzbWebDAV.Clients.Usenet.Models;
-using NzbWebDAV.Models;
-using NzbWebDAV.Models.Nzb;
-using NzbWebDAV.Streams;
 using UsenetSharp.Models;
 
 namespace NzbWebDAV.Clients.Usenet;
@@ -75,27 +72,13 @@ public class WrappingNntpClient(INntpClient usenetClient) : NntpClient, ICachedS
         return false;
     }
 
-    public override NzbFileStream GetFileStream(
-        NzbFile nzbFile,
-        long fileSize,
-        StreamingBufferSettings streamingBufferSettings,
-        Action<int>? onSegmentIndexChanged
-    ) => _usenetClient.GetFileStream(nzbFile, fileSize, streamingBufferSettings, onSegmentIndexChanged);
-
-    public override NzbFileStream GetFileStream(
-        string[] segmentIds,
-        long fileSize,
-        StreamingBufferSettings streamingBufferSettings,
-        Action<int>? onSegmentIndexChanged
-    ) => _usenetClient.GetFileStream(segmentIds, fileSize, streamingBufferSettings, onSegmentIndexChanged);
-
-    public override NzbFileStream GetFileStream(
-        string[] segmentIds,
-        long fileSize,
-        StreamingBufferSettings streamingBufferSettings,
-        Action<int>? onSegmentIndexChanged,
-        RequestHint requestHint
-    ) => _usenetClient.GetFileStream(segmentIds, fileSize, streamingBufferSettings, onSegmentIndexChanged, requestHint);
+    // GetFileStream is intentionally NOT overridden here.
+    // NntpClient.GetFileStream passes `this` to NzbFileStream, which is what we want:
+    // the outermost wrapper (e.g. UsenetStreamingClient) is stored in NzbFileStream so that
+    // all layers (caching, connection-limiting) are applied when MultiSegmentStream calls
+    // AcquireExclusiveConnectionAsync and DecodedBodyAsync. Delegating to _usenetClient
+    // would instead hand NzbFileStream the innermost client (MultiProviderNntpClient), which
+    // does not implement AcquireExclusiveConnectionAsync.
 
     protected void ReplaceUnderlyingClient(INntpClient usenetClient)
     {
