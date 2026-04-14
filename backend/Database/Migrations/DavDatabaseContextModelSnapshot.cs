@@ -90,6 +90,103 @@ namespace NzbWebDAV.Database.Migrations
                     b.ToTable("ConfigItems", (string)null);
                 });
 
+            modelBuilder.Entity("NzbWebDAV.Database.Models.NntpConnectionLease", b =>
+                {
+                    b.Property<string>("NodeId")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("node_id");
+
+                    b.Property<int>("ProviderIndex")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("provider_index");
+
+                    b.Property<int>("Role")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("role");
+
+                    b.Property<int>("BorrowedSlots")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("borrowed_slots");
+
+                    b.Property<long>("Epoch")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("epoch");
+
+                    b.Property<int>("GrantedSlots")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("granted_slots");
+
+                    b.Property<DateTime>("LeaseUntil")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("lease_until");
+
+                    b.Property<int>("ReservedSlots")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("reserved_slots");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT")
+                        .HasColumnName("updated_at")
+                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+                    b.HasKey("NodeId", "ProviderIndex");
+
+                    b.HasIndex("LeaseUntil")
+                        .HasDatabaseName("ix_nntp_connection_leases_lease_until");
+
+                    b.ToTable("nntp_connection_leases", (string)null);
+                });
+
+            modelBuilder.Entity("NzbWebDAV.Database.Models.NntpNodeHeartbeat", b =>
+                {
+                    b.Property<string>("NodeId")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("node_id");
+
+                    b.Property<int>("ProviderIndex")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("provider_index");
+
+                    b.Property<int>("Role")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("role");
+
+                    b.Property<int>("ActiveSlots")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("active_slots");
+
+                    b.Property<int>("DesiredSlots")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("desired_slots");
+
+                    b.Property<bool>("HasDemand")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("has_demand");
+
+                    b.Property<DateTime>("HeartbeatAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT")
+                        .HasColumnName("heartbeat_at")
+                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+                    b.Property<int>("LiveSlots")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("live_slots");
+
+                    b.Property<string>("Region")
+                        .IsRequired()
+                        .HasColumnType("TEXT")
+                        .HasColumnName("region");
+
+                    b.HasKey("NodeId", "ProviderIndex");
+
+                    b.HasIndex("HeartbeatAt")
+                        .HasDatabaseName("ix_nntp_node_heartbeats_heartbeat_at");
+
+                    b.ToTable("nntp_node_heartbeats", (string)null);
+                });
+
             modelBuilder.Entity("NzbWebDAV.Database.Models.ConnectionPoolClaim", b =>
                 {
                     b.Property<string>("NodeId")
