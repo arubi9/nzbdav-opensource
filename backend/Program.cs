@@ -116,6 +116,7 @@ public partial class Program
             .AddSingleton(encryptionService)
             .AddSingleton(configManager)
             .AddSingleton(websocketManager)
+            .AddSingleton<NntpLeaseState>()
             .AddSingleton(typeof(ObjectStorageSegmentCache), sp =>
             {
                 if (!configManager.IsL2Enabled())
@@ -161,7 +162,6 @@ public partial class Program
             if (usePerNodeLeasing)
             {
                 builder.Services
-                    .AddSingleton<NntpLeaseState>()
                     .AddHostedService<NntpLeaseAllocator>()
                     .AddHostedService<NntpLeaseAgent>();
             }

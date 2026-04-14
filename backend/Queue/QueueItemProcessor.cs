@@ -8,7 +8,9 @@ using NzbWebDAV.Clients.Usenet.Contexts;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
+using NzbWebDAV.Exceptions;
 using NzbWebDAV.Extensions;
+using NzbWebDAV.Models;
 using NzbWebDAV.Models.Nzb;
 using NzbWebDAV.Queue.DeobfuscationSteps._1.FetchFirstSegment;
 using NzbWebDAV.Queue.DeobfuscationSteps._2.GetPar2FileDescriptors;
@@ -17,6 +19,7 @@ using NzbWebDAV.Queue.FileAggregators;
 using NzbWebDAV.Queue.FileProcessors;
 using NzbWebDAV.Queue.PostProcessors;
 using NzbWebDAV.Services;
+using NzbWebDAV.Services.NntpLeasing;
 using NzbWebDAV.Utils;
 using NzbWebDAV.Websocket;
 using Serilog;
@@ -30,6 +33,8 @@ public class QueueItemProcessor(
     INntpClient usenetClient,
     ConfigManager configManager,
     WebsocketManager websocketManager,
+    NntpLeaseState leaseState,
+    bool usePerNodeLeasing,
     IProgress<int> progress,
     CancellationToken ct
 )
@@ -131,27 +136,33 @@ public class QueueItemProcessor(
         var articlesToPrecheck = nzbFiles.SelectMany(x => x.GetSegmentIds());
         await HealthCheckService.CheckMissingSegmentIdsAsync(dbClient.Ctx, articlesToPrecheck, ct)
             .ConfigureAwait(false);
+        var backgroundConcurrency = BackgroundNntpConcurrency.GetEffectiveConcurrency(
+            configManager,
+            leaseState,
+            usePerNodeLeasing,
+            configManager.GetMaxDownloadConnections() + 5);
+        BackgroundNntpConcurrency.ThrowIfLeaseCapacityUnavailable(usePerNodeLeasing, backgroundConcurrency);
 
         // step 1 -- get name and size of each nzb file
         var part1Progress = progress
             .Scale(50, 100)
             .ToPercentage(nzbFiles.Count);
         var segments = await FetchFirstSegmentsStep.FetchFirstSegments(
-            nzbFiles, usenetClient, configManager, ct, part1Progress).ConfigureAwait(false);
+            nzbFiles, usenetClient, backgroundConcurrency, ct, part1Progress).ConfigureAwait(false);
         var par2FileDescriptors = await GetPar2FileDescriptorsStep.GetPar2FileDescriptors(
             segments, usenetClient, ct).ConfigureAwait(false);
         var fileInfos = GetFileInfosStep.GetFileInfos(
             segments, par2FileDescriptors);
 
         // step 2 -- perform file processing
-        var fileProcessors = GetFileProcessors(fileInfos, archivePassword).ToList();
+        var fileProcessors = GetFileProcessors(fileInfos, archivePassword, backgroundConcurrency).ToList();
         var part2Progress = progress
             .Offset(50)
             .Scale(50, 100)
             .ToMultiProgress(fileProcessors.Count);
         var fileProcessingResultsAll = await fileProcessors
             .Select(x => x!.ProcessAsync(part2Progress.SubProgress))
-            .WithConcurrencyAsync(configManager.GetMaxDownloadConnections() + 5)
+            .WithConcurrencyAsync(backgroundConcurrency)
             .GetAllAsync(ct).ConfigureAwait(false);
         var fileProcessingResults = fileProcessingResultsAll
             .Where(x => x is not null)
@@ -170,9 +181,12 @@ public class QueueItemProcessor(
             var part3Progress = progress
                 .Offset(100)
                 .ToPercentage(articlesToCheck.Count);
-            var healthCheckConcurrency = configManager
-                .GetUsenetProviderConfig()
-                .TotalPooledConnections;
+            var healthCheckConcurrency = BackgroundNntpConcurrency.GetEffectiveConcurrency(
+                configManager,
+                leaseState,
+                usePerNodeLeasing,
+                configManager.GetUsenetProviderConfig().TotalPooledConnections);
+            BackgroundNntpConcurrency.ThrowIfLeaseCapacityUnavailable(usePerNodeLeasing, healthCheckConcurrency);
             await usenetClient
                 .CheckAllSegmentsAsync(articlesToCheck, healthCheckConcurrency, part3Progress, ct)
                 .ConfigureAwait(false);
@@ -212,7 +226,8 @@ public class QueueItemProcessor(
     private IEnumerable<BaseProcessor> GetFileProcessors
     (
         List<GetFileInfosStep.FileInfo> fileInfos,
-        string? archivePassword
+        string? archivePassword,
+        int backgroundConcurrency
     )
     {
         var groups = fileInfos
@@ -222,7 +237,7 @@ public class QueueItemProcessor(
         foreach (var group in groups)
         {
             if (group.Key == "7z")
-                yield return new SevenZipProcessor(group.ToList(), usenetClient, configManager, archivePassword, ct);
+                yield return new SevenZipProcessor(group.ToList(), usenetClient, backgroundConcurrency, archivePassword, ct);
 
             else if (group.Key == "rar")
                 foreach (var fileInfo in group)
@@ -388,5 +403,40 @@ public class QueueItemProcessor(
         {
             Log.Debug($"Could not refresh monitored downloads for Arr instance: `{arrClient.Host}`. {e.Message}");
         }
+    }
+}
+
+public static class BackgroundNntpConcurrency
+{
+    public static int GetEffectiveConcurrency(
+        ConfigManager configManager,
+        NntpLeaseState leaseState,
+        bool usePerNodeLeasing,
+        int legacyFallback,
+        DateTime? utcNow = null)
+    {
+        ArgumentNullException.ThrowIfNull(configManager);
+        ArgumentNullException.ThrowIfNull(leaseState);
+
+        if (!usePerNodeLeasing)
+            return legacyFallback;
+
+        var pooledProviderIndexes = configManager
+            .GetUsenetProviderConfig()
+            .Providers
+            .Select((provider, providerIndex) => (provider, providerIndex))
+            .Where(x => x.provider.Type == ProviderType.Pooled)
+            .Select(x => x.providerIndex);
+
+        return leaseState.GetFreshTotalGrantedSlots(pooledProviderIndexes, utcNow ?? DateTime.UtcNow);
+    }
+
+    public static void ThrowIfLeaseCapacityUnavailable(bool usePerNodeLeasing, int concurrency)
+    {
+        if (!usePerNodeLeasing || concurrency > 0)
+            return;
+
+        throw new CouldNotConnectToUsenetException(
+            "No fresh NNTP lease capacity is currently available for background ingest work.");
     }
 }

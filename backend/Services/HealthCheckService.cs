@@ -7,7 +7,9 @@ using NzbWebDAV.Database.Models;
 using NzbWebDAV.Exceptions;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Models.Nzb;
+using NzbWebDAV.Queue;
 using NzbWebDAV.Queue.PostProcessors;
+using NzbWebDAV.Services.NntpLeasing;
 using NzbWebDAV.Utils;
 using NzbWebDAV.Websocket;
 using Serilog;
@@ -22,17 +24,22 @@ public class HealthCheckService : BackgroundService
     private readonly ConfigManager _configManager;
     private readonly INntpClient _usenetClient;
     private readonly WebsocketManager _websocketManager;
+    private readonly NntpLeaseState _leaseState;
+    private readonly bool _usePerNodeLeasing;
 
     public HealthCheckService
     (
         ConfigManager configManager,
         UsenetStreamingClient usenetClient,
-        WebsocketManager websocketManager
+        WebsocketManager websocketManager,
+        NntpLeaseState leaseState
     )
     {
         _configManager = configManager;
         _usenetClient = usenetClient;
         _websocketManager = websocketManager;
+        _leaseState = leaseState;
+        _usePerNodeLeasing = NntpLeaseAgent.ShouldUsePerNodeLeasing(MultiNodeMode.IsEnabled, NodeRoleConfig.Current);
 
         _configManager.OnConfigChanged += (_, configEventArgs) =>
         {
@@ -67,7 +74,17 @@ public class HealthCheckService : BackgroundService
                 }
 
                 // get concurrency
-                var concurrency = _configManager.GetUsenetProviderConfig().TotalPooledConnections;
+                var concurrency = BackgroundNntpConcurrency.GetEffectiveConcurrency(
+                    _configManager,
+                    _leaseState,
+                    _usePerNodeLeasing,
+                    _configManager.GetUsenetProviderConfig().TotalPooledConnections);
+                if (_usePerNodeLeasing && concurrency <= 0)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken).ConfigureAwait(false);
+                    continue;
+                }
+
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
 
                 // get the davItem to health-check
