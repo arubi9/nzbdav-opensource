@@ -164,12 +164,13 @@ public class NzbdavHealthCheck : IHealthCheck
             status = HealthStatus.Unhealthy;
 
         var localLeases = _leaseState.GetProviderLeaseObservations(_utcNow());
+        var freshLocalLeases = localLeases.Where(x => x.IsFresh).ToArray();
         data["node_role"] = _nodeRole.ToString();
         data["nntp_leasing_mode"] = GetLeasingMode(_nodeRole, _isMultiNode);
         data["nntp_local_leases"] = localLeases;
-        data["nntp_local_lease_total_granted_slots"] = localLeases.Sum(x => x.GrantedSlots);
-        data["nntp_local_lease_total_reserved_slots"] = localLeases.Sum(x => x.ReservedSlots);
-        data["nntp_local_lease_total_borrowed_slots"] = localLeases.Sum(x => x.BorrowedSlots);
+        data["nntp_local_lease_total_granted_slots"] = freshLocalLeases.Sum(x => x.GrantedSlots);
+        data["nntp_local_lease_total_reserved_slots"] = freshLocalLeases.Sum(x => x.ReservedSlots);
+        data["nntp_local_lease_total_borrowed_slots"] = freshLocalLeases.Sum(x => x.BorrowedSlots);
 
         return new HealthCheckResult(status, "NZBDAV health check", data: data);
     }

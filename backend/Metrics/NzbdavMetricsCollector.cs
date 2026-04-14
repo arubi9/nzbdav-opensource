@@ -290,9 +290,10 @@ public sealed class NzbdavMetricsCollector
 
     private void UpdateLeaseMetrics(IReadOnlyList<NntpLeaseState.ProviderLeaseObservation> observations)
     {
-        var totalGranted = observations.Sum(x => x.GrantedSlots);
-        var totalReserved = observations.Sum(x => x.ReservedSlots);
-        var totalBorrowed = observations.Sum(x => x.BorrowedSlots);
+        var freshObservations = observations.Where(x => x.IsFresh).ToList();
+        var totalGranted = freshObservations.Sum(x => x.GrantedSlots);
+        var totalReserved = freshObservations.Sum(x => x.ReservedSlots);
+        var totalBorrowed = freshObservations.Sum(x => x.BorrowedSlots);
 
         _nntpLeaseSlotsTotal.WithLabels("granted").Set(totalGranted);
         _nntpLeaseSlotsTotal.WithLabels("reserved").Set(totalReserved);

@@ -25,6 +25,7 @@ public sealed class NzbdavHealthCheckTests
         using var usenetClient = new UsenetStreamingClient(CreateConfigManager(), new WebsocketManager(), liveCache);
         var leaseState = new NntpLeaseState();
         leaseState.Apply(providerIndex: 0, grantedSlots: 4, epoch: 9, leaseUntil: harness.Now.AddSeconds(30), reservedSlots: 3, borrowedSlots: 1);
+        leaseState.Apply(providerIndex: 1, grantedSlots: 2, epoch: 5, leaseUntil: harness.Now.AddSeconds(-5), reservedSlots: 2, borrowedSlots: 1);
 
         var healthCheck = new NzbdavHealthCheck(
             liveCache,
@@ -45,14 +46,18 @@ public sealed class NzbdavHealthCheckTests
         Assert.Equal(1, Assert.IsType<int>(result.Data["nntp_local_lease_total_borrowed_slots"]));
 
         var leases = Assert.IsType<NntpLeaseState.ProviderLeaseObservation[]>(result.Data["nntp_local_leases"]);
-        var lease = Assert.Single(leases);
-        Assert.Equal(0, lease.ProviderIndex);
-        Assert.Equal(4, lease.GrantedSlots);
-        Assert.Equal(3, lease.ReservedSlots);
-        Assert.Equal(1, lease.BorrowedSlots);
-        Assert.Equal(9, lease.Epoch);
-        Assert.True(lease.IsFresh);
-        Assert.Equal(30, lease.SecondsUntilExpiry);
+        Assert.Equal(2, leases.Length);
+        var freshLease = leases.Single(x => x.ProviderIndex == 0);
+        Assert.Equal(4, freshLease.GrantedSlots);
+        Assert.Equal(3, freshLease.ReservedSlots);
+        Assert.Equal(1, freshLease.BorrowedSlots);
+        Assert.Equal(9, freshLease.Epoch);
+        Assert.True(freshLease.IsFresh);
+        Assert.Equal(30, freshLease.SecondsUntilExpiry);
+
+        var staleLease = leases.Single(x => x.ProviderIndex == 1);
+        Assert.False(staleLease.IsFresh);
+        Assert.Equal(0, staleLease.SecondsUntilExpiry);
     }
 
     private static ConfigManager CreateConfigManager()

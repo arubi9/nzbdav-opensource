@@ -27,7 +27,7 @@ public sealed class NzbdavMetricsCollectorTests
         var now = new DateTime(2026, 4, 14, 12, 0, 0, DateTimeKind.Utc);
         var leaseState = new NntpLeaseState();
         leaseState.Apply(providerIndex: 0, grantedSlots: 4, epoch: 9, leaseUntil: now.AddSeconds(30), reservedSlots: 3, borrowedSlots: 1);
-        leaseState.Apply(providerIndex: 1, grantedSlots: 2, epoch: 5, leaseUntil: now.AddSeconds(-5), reservedSlots: 2, borrowedSlots: 0);
+        leaseState.Apply(providerIndex: 1, grantedSlots: 2, epoch: 5, leaseUntil: now.AddSeconds(-5), reservedSlots: 2, borrowedSlots: 1);
 
         var collector = new NzbdavMetricsCollector(
             () => new LiveSegmentCacheStats(
@@ -78,8 +78,8 @@ public sealed class NzbdavMetricsCollectorTests
         Assert.Contains("nzbdav_nntp_lease_expires_in_seconds{provider_index=\"0\"} 30", metricsText);
         Assert.Contains("nzbdav_nntp_lease_fresh{provider_index=\"1\"} 0", metricsText);
         Assert.Contains("nzbdav_nntp_lease_expires_in_seconds{provider_index=\"1\"} 0", metricsText);
-        Assert.Contains("nzbdav_nntp_lease_slots_total{kind=\"granted\"} 6", metricsText);
-        Assert.Contains("nzbdav_nntp_lease_slots_total{kind=\"reserved\"} 5", metricsText);
+        Assert.Contains("nzbdav_nntp_lease_slots_total{kind=\"granted\"} 4", metricsText);
+        Assert.Contains("nzbdav_nntp_lease_slots_total{kind=\"reserved\"} 3", metricsText);
         Assert.Contains("nzbdav_nntp_lease_slots_total{kind=\"borrowed\"} 1", metricsText);
         Assert.Contains("nzbdav_warming_sessions_active 7", metricsText);
         Assert.Contains("nzbdav_queue_processing 1", metricsText);
