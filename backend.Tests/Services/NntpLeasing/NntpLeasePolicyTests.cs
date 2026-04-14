@@ -10,8 +10,8 @@ public sealed class NntpLeasePolicyTests
         var grants = NntpLeasePolicy.Compute(
             100,
             [
-                new NntpLeasePolicy.LeaseHeartbeat("stream-1", NntpLeaseNodeRole.Streaming, true, 100),
-                new NntpLeasePolicy.LeaseHeartbeat("ingest-1", NntpLeaseNodeRole.Ingest, true, 100)
+                new NntpLeasePolicy.LeaseHeartbeat("stream-1", NntpLeaseNodeRole.Streaming, true),
+                new NntpLeasePolicy.LeaseHeartbeat("ingest-1", NntpLeaseNodeRole.Ingest, true)
             ],
             currentEpoch: 42);
 
@@ -26,8 +26,8 @@ public sealed class NntpLeasePolicyTests
         var grants = NntpLeasePolicy.Compute(
             100,
             [
-                new NntpLeasePolicy.LeaseHeartbeat("stream-1", NntpLeaseNodeRole.Streaming, true, 100),
-                new NntpLeasePolicy.LeaseHeartbeat("ingest-1", NntpLeaseNodeRole.Ingest, false, 100)
+                new NntpLeasePolicy.LeaseHeartbeat("stream-1", NntpLeaseNodeRole.Streaming, true),
+                new NntpLeasePolicy.LeaseHeartbeat("ingest-1", NntpLeaseNodeRole.Ingest, false)
             ],
             currentEpoch: 42);
 
@@ -42,8 +42,8 @@ public sealed class NntpLeasePolicyTests
         var grants = NntpLeasePolicy.Compute(
             100,
             [
-                new NntpLeasePolicy.LeaseHeartbeat("stream-1", NntpLeaseNodeRole.Streaming, false, 100),
-                new NntpLeasePolicy.LeaseHeartbeat("ingest-1", NntpLeaseNodeRole.Ingest, true, 100)
+                new NntpLeasePolicy.LeaseHeartbeat("stream-1", NntpLeaseNodeRole.Streaming, false),
+                new NntpLeasePolicy.LeaseHeartbeat("ingest-1", NntpLeaseNodeRole.Ingest, true)
             ],
             currentEpoch: 42);
 
@@ -58,9 +58,9 @@ public sealed class NntpLeasePolicyTests
         var grants = NntpLeasePolicy.Compute(
             10,
             [
-                new NntpLeasePolicy.LeaseHeartbeat("stream-c", NntpLeaseNodeRole.Streaming, true, 10),
-                new NntpLeasePolicy.LeaseHeartbeat("stream-a", NntpLeaseNodeRole.Streaming, true, 10),
-                new NntpLeasePolicy.LeaseHeartbeat("stream-b", NntpLeaseNodeRole.Streaming, true, 10)
+                new NntpLeasePolicy.LeaseHeartbeat("stream-c", NntpLeaseNodeRole.Streaming, true),
+                new NntpLeasePolicy.LeaseHeartbeat("stream-a", NntpLeaseNodeRole.Streaming, true),
+                new NntpLeasePolicy.LeaseHeartbeat("stream-b", NntpLeaseNodeRole.Streaming, true)
             ],
             currentEpoch: 42);
 
@@ -75,14 +75,18 @@ public sealed class NntpLeasePolicyTests
         var grants = NntpLeasePolicy.Compute(
             17,
             [
-                new NntpLeasePolicy.LeaseHeartbeat("stream-a", NntpLeaseNodeRole.Streaming, true, 10),
-                new NntpLeasePolicy.LeaseHeartbeat("stream-b", NntpLeaseNodeRole.Streaming, true, 10),
-                new NntpLeasePolicy.LeaseHeartbeat("ingest-a", NntpLeaseNodeRole.Ingest, true, 10),
-                new NntpLeasePolicy.LeaseHeartbeat("ingest-b", NntpLeaseNodeRole.Ingest, true, 10)
+                new NntpLeasePolicy.LeaseHeartbeat("stream-a", NntpLeaseNodeRole.Streaming, true),
+                new NntpLeasePolicy.LeaseHeartbeat("stream-b", NntpLeaseNodeRole.Streaming, true),
+                new NntpLeasePolicy.LeaseHeartbeat("ingest-a", NntpLeaseNodeRole.Ingest, true),
+                new NntpLeasePolicy.LeaseHeartbeat("ingest-b", NntpLeaseNodeRole.Ingest, true)
             ],
             currentEpoch: 42);
 
-        Assert.Equal(17, grants.Sum(x => x.GrantedSlots));
+        Assert.Equal(6, grants.Single(x => x.NodeId == "stream-a").GrantedSlots);
+        Assert.Equal(5, grants.Single(x => x.NodeId == "stream-b").GrantedSlots);
+        Assert.Equal(3, grants.Single(x => x.NodeId == "ingest-a").GrantedSlots);
+        Assert.Equal(2, grants.Single(x => x.NodeId == "ingest-b").GrantedSlots);
+        Assert.Equal(16, grants.Sum(x => x.GrantedSlots));
         Assert.True(grants.Sum(x => x.GrantedSlots) <= 17);
     }
 }

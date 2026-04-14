@@ -10,8 +10,7 @@ public static class NntpLeasePolicy
     public sealed record LeaseHeartbeat(
         string NodeId,
         NntpLeaseNodeRole NodeRole,
-        bool HasDemand,
-        int DesiredSlots);
+        bool HasDemand);
 
     public sealed record LeaseGrant(
         string NodeId,
@@ -39,8 +38,11 @@ public static class NntpLeasePolicy
 
         if (streamingHeartbeats.Count > 0 && ingestHeartbeats.Count > 0)
         {
-            AllocateRoleBudget(grants, streamingHeartbeats, totalSlots * StreamingReservePercent / 100, currentEpoch);
-            AllocateRoleBudget(grants, ingestHeartbeats, totalSlots - totalSlots * StreamingReservePercent / 100, currentEpoch);
+            var streamingBudget = totalSlots * StreamingReservePercent / 100;
+            var ingestBudget = totalSlots * IngestReservePercent / 100;
+
+            AllocateRoleBudget(grants, streamingHeartbeats, streamingBudget, currentEpoch);
+            AllocateRoleBudget(grants, ingestHeartbeats, ingestBudget, currentEpoch);
             return grants;
         }
 
