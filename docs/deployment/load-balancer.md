@@ -41,7 +41,7 @@ labels:
 |---|---|
 | `/api/*`, WebDAV PROPFIND/GET/HEAD | Streaming nodes (consistent hash by URI) |
 | `/api?mode=addfile`, `/api?mode=addurl` | Ingest node (direct) |
-| `/health`, `/metrics` | All nodes (round-robin) |
+| `/health`, `/metrics` | Any node for generic uptime checks; query individual nodes directly when you need that node's local lease state |
 | `/ws` | Any node (WebSocket sticky) |
 
 ## Private Network
@@ -95,6 +95,7 @@ NNTP connections stay node-local:
 - each node opens and closes its own provider TCP sessions
 - each node enforces only its own currently granted lease
 - `/health` and `/metrics` on a node show that node's local applied lease state
+- scrape or query each node directly when operators need current lease observability; a round-robin load balancer view is not sufficient for that
 
 ## Transitional Combined Fallback
 

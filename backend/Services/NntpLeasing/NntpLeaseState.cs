@@ -92,6 +92,15 @@ public sealed class NntpLeaseState
         }
     }
 
+    public void PruneProviders(IReadOnlyCollection<int> providerIndexes)
+    {
+        lock (_lock)
+        {
+            foreach (var staleProviderIndex in _leases.Keys.Except(providerIndexes).ToList())
+                _leases.Remove(staleProviderIndex);
+        }
+    }
+
     public ProviderLeaseObservation[] GetProviderLeaseObservations(DateTime utcNow)
     {
         lock (_lock)

@@ -167,6 +167,7 @@ public sealed class NntpLeaseAgent : BackgroundService
             return;
 
         var providerIndexes = GetPooledProviders().Select(x => x.providerIndex).ToHashSet();
+        _leaseState.PruneProviders(providerIndexes);
         ReapplyCurrentFreshLimits(providerIndexes, _utcNow());
     }
 
@@ -183,6 +184,7 @@ public sealed class NntpLeaseAgent : BackgroundService
         IEnumerable<NntpConnectionLease> leases,
         DateTime now)
     {
+        _leaseState.PruneProviders(providerIndexes);
         var leaseByProviderIndex = leases.ToDictionary(x => x.ProviderIndex);
 
         foreach (var providerIndex in providerIndexes)

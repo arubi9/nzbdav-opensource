@@ -211,6 +211,63 @@ public sealed class NntpLeaseAgentTests
     }
 
     [Fact]
+    public async Task ProviderConfigChange_PrunesRemovedProvidersFromLocalLeaseStateImmediately()
+    {
+        using var cacheScope = new TempCacheScope();
+        var now = new DateTime(2026, 4, 14, 12, 0, 0, DateTimeKind.Utc);
+        var configManager = CreateConfigManager((ProviderType.Pooled, 10), (ProviderType.Pooled, 8));
+        using var liveCache = new LiveSegmentCache(cacheScope.Path);
+        var websocketManager = new WebsocketManager();
+        using var client = new UsenetStreamingClient(configManager, websocketManager, liveCache);
+        var leaseState = new NntpLeaseState();
+        leaseState.Apply(providerIndex: 0, grantedSlots: 4, epoch: 9, now.AddSeconds(30));
+        leaseState.Apply(providerIndex: 1, grantedSlots: 2, epoch: 5, now.AddSeconds(30));
+
+        var agent = new NntpLeaseAgent(
+            configManager,
+            leaseState,
+            client.ResizeProviderPool,
+            client.UpdateMaxDownloadConnections,
+            () => throw new InvalidOperationException("db down"),
+            nodeIdFactory: () => "stream-node",
+            nodeRole: NodeRole.Streaming,
+            region: "test-region",
+            tickInterval: TimeSpan.FromMinutes(1),
+            utcNow: () => now);
+
+        await agent.RunOnce(CancellationToken.None);
+        Assert.Equal([0, 1], leaseState.GetProviderLeaseObservations(now).Select(x => x.ProviderIndex));
+
+        configManager.UpdateValues(
+        [
+            new ConfigItem
+            {
+                ConfigName = "usenet.providers",
+                ConfigValue = JsonSerializer.Serialize(new UsenetProviderConfig
+                {
+                    Providers =
+                    [
+                        new UsenetProviderConfig.ConnectionDetails
+                        {
+                            Type = ProviderType.Pooled,
+                            Host = "news-0.example.test",
+                            Port = 563,
+                            UseSsl = true,
+                            User = "user",
+                            Pass = "pass",
+                            MaxConnections = 8
+                        }
+                    ]
+                })
+            }
+        ]);
+
+        var observations = leaseState.GetProviderLeaseObservations(now);
+        var observation = Assert.Single(observations);
+        Assert.Equal(0, observation.ProviderIndex);
+    }
+
+    [Fact]
     public async Task RunOnce_WhenSuccessfulRefreshReturnsNoLeaseForProvider_ClampsGrantToZeroImmediately()
     {
         await using var harness = await SqliteLeaseAgentHarness.CreateAsync(CreateConfigManager((ProviderType.Pooled, 10)));
