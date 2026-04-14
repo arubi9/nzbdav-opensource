@@ -25,6 +25,7 @@ public sealed class NntpLeaseAllocator : BackgroundService
     private readonly TimeSpan _leaseTtl;
     private readonly TimeSpan _tickInterval;
     private readonly Func<DateTime> _utcNow;
+    private readonly Dictionary<int, long> _lastEpochByProvider = [];
 
     public NntpLeaseAllocator(ConfigManager configManager)
         : this(
@@ -78,10 +79,6 @@ public sealed class NntpLeaseAllocator : BackgroundService
             .Select((provider, providerIndex) => new { provider, providerIndex })
             .Where(x => x.provider.Type == ProviderType.Pooled)
             .ToList();
-
-        if (pooledProviders.Count == 0)
-            return;
-
         var now = _utcNow();
         var heartbeatCutoff = now.Subtract(_heartbeatTtl);
         var leaseUntil = now.Add(_leaseTtl);
@@ -102,10 +99,17 @@ public sealed class NntpLeaseAllocator : BackgroundService
                 .ConfigureAwait(false);
 
             var existingLeases = await dbContext.NntpConnectionLeases
-                .Where(x => providerIndexes.Contains(x.ProviderIndex))
                 .AsTracking()
                 .ToListAsync(cancellationToken)
                 .ConfigureAwait(false);
+
+            SeedEpochCache(existingLeases);
+
+            var staleProviderLeases = existingLeases
+                .Where(x => !providerIndexes.Contains(x.ProviderIndex))
+                .ToList();
+            if (staleProviderLeases.Count > 0)
+                dbContext.NntpConnectionLeases.RemoveRange(staleProviderLeases);
 
             foreach (var pooledProvider in pooledProviders)
             {
@@ -141,10 +145,12 @@ public sealed class NntpLeaseAllocator : BackgroundService
         DateTime now,
         DateTime leaseUntil)
     {
-        var nextEpoch = existingLeases.Count == 0 ? 1 : existingLeases.Max(x => x.Epoch) + 1;
+        var observedEpoch = existingLeases.Count == 0 ? 0 : existingLeases.Max(x => x.Epoch);
+        var nextEpoch = GetNextEpoch(providerIndex, observedEpoch);
 
         if (activeHeartbeats.Count == 0)
         {
+            RememberEpoch(providerIndex, observedEpoch);
             if (existingLeases.Count > 0)
                 dbContext.NntpConnectionLeases.RemoveRange(existingLeases);
             return;
@@ -153,11 +159,22 @@ public sealed class NntpLeaseAllocator : BackgroundService
         var orderedHeartbeats = activeHeartbeats
             .OrderBy(x => x.NodeId, StringComparer.Ordinal)
             .ThenBy(x => x.Role)
+            .Select(TryToLeaseHeartbeat)
+            .Where(x => x != null)
+            .Select(x => x!)
             .ToList();
+
+        if (orderedHeartbeats.Count == 0)
+        {
+            RememberEpoch(providerIndex, observedEpoch);
+            if (existingLeases.Count > 0)
+                dbContext.NntpConnectionLeases.RemoveRange(existingLeases);
+            return;
+        }
 
         var grants = NntpLeasePolicy.Compute(
             totalSlots,
-            orderedHeartbeats.Select(ToLeaseHeartbeat).ToList(),
+            orderedHeartbeats,
             nextEpoch);
 
         var leaseByNodeId = existingLeases.ToDictionary(x => x.NodeId, StringComparer.Ordinal);
@@ -186,23 +203,60 @@ public sealed class NntpLeaseAllocator : BackgroundService
             lease.LeaseUntil = leaseUntil;
             lease.UpdatedAt = now;
         }
+
+        RememberEpoch(providerIndex, nextEpoch);
     }
 
-    private static NntpLeasePolicy.LeaseHeartbeat ToLeaseHeartbeat(NntpNodeHeartbeat heartbeat)
+    private void SeedEpochCache(IEnumerable<NntpConnectionLease> existingLeases)
     {
+        foreach (var providerEpoch in existingLeases
+                     .GroupBy(x => x.ProviderIndex)
+                     .Select(x => new { ProviderIndex = x.Key, Epoch = x.Max(y => y.Epoch) }))
+        {
+            RememberEpoch(providerEpoch.ProviderIndex, providerEpoch.Epoch);
+        }
+    }
+
+    private long GetNextEpoch(int providerIndex, long observedEpoch)
+    {
+        var cachedEpoch = _lastEpochByProvider.GetValueOrDefault(providerIndex);
+        return Math.Max(cachedEpoch, observedEpoch) + 1;
+    }
+
+    private void RememberEpoch(int providerIndex, long epoch)
+    {
+        if (_lastEpochByProvider.TryGetValue(providerIndex, out var currentEpoch) && currentEpoch >= epoch)
+            return;
+
+        _lastEpochByProvider[providerIndex] = epoch;
+    }
+
+    private static NntpLeasePolicy.LeaseHeartbeat? TryToLeaseHeartbeat(NntpNodeHeartbeat heartbeat)
+    {
+        var nodeRole = TryToLeaseNodeRole(heartbeat.Role);
+        if (nodeRole == null)
+        {
+            Log.Warning(
+                "NntpLeaseAllocator skipping heartbeat for node {NodeId} provider {ProviderIndex} with unsupported role {Role}",
+                heartbeat.NodeId,
+                heartbeat.ProviderIndex,
+                heartbeat.Role);
+            return null;
+        }
+
         return new NntpLeasePolicy.LeaseHeartbeat(
             heartbeat.NodeId,
-            ToLeaseNodeRole(heartbeat.Role),
+            nodeRole.Value,
             heartbeat.HasDemand);
     }
 
-    private static NntpLeaseNodeRole ToLeaseNodeRole(NodeRole role)
+    private static NntpLeaseNodeRole? TryToLeaseNodeRole(NodeRole role)
     {
         return role switch
         {
             NodeRole.Streaming => NntpLeaseNodeRole.Streaming,
             NodeRole.Ingest => NntpLeaseNodeRole.Ingest,
-            _ => throw new InvalidOperationException($"Unsupported NNTP lease node role '{role}'.")
+            _ => null
         };
     }
 

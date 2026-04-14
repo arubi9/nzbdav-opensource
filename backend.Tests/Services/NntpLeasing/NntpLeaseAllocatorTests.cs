@@ -108,6 +108,34 @@ public sealed class NntpLeaseAllocatorTests
     }
 
     [Fact]
+    public async Task AllocateOnce_KeepsEpochMonotonicAcrossActiveDrainAndReactivation()
+    {
+        await using var harness = await SqliteAllocatorHarness.CreateAsync(CreateConfigManager((ProviderType.Pooled, 10)));
+        await harness.SeedHeartbeatAsync("stream-1", providerIndex: 0, NodeRole.Streaming, hasDemand: true, heartbeatAt: harness.Now);
+        var allocator = harness.CreateAllocator(isLeader: true);
+
+        await allocator.AllocateOnce(CancellationToken.None);
+        Assert.Equal(1, Assert.Single(await harness.ReadLeasesAsync()).Epoch);
+
+        harness.Advance(TimeSpan.FromSeconds(5));
+        await harness.SeedHeartbeatAsync(
+            "stream-1",
+            providerIndex: 0,
+            NodeRole.Streaming,
+            hasDemand: true,
+            heartbeatAt: harness.Now.Subtract(harness.HeartbeatTtl).AddSeconds(-1));
+        await allocator.AllocateOnce(CancellationToken.None);
+        Assert.Empty(await harness.ReadLeasesAsync());
+
+        harness.Advance(TimeSpan.FromSeconds(5));
+        await harness.SeedHeartbeatAsync("stream-1", providerIndex: 0, NodeRole.Streaming, hasDemand: true, heartbeatAt: harness.Now);
+        await allocator.AllocateOnce(CancellationToken.None);
+
+        var reactivatedLease = Assert.Single(await harness.ReadLeasesAsync());
+        Assert.Equal(2, reactivatedLease.Epoch);
+    }
+
+    [Fact]
     public async Task AllocateOnce_WritesDeterministicLeasesPerProvider()
     {
         await using var harness = await SqliteAllocatorHarness.CreateAsync(CreateConfigManager(
@@ -133,9 +161,37 @@ public sealed class NntpLeaseAllocatorTests
         Assert.DoesNotContain(leases, x => x.ProviderIndex == 1);
     }
 
+    [Fact]
+    public async Task AllocateOnce_DeletesLeasesForProvidersThatAreNoLongerPooled()
+    {
+        await using var harness = await SqliteAllocatorHarness.CreateAsync(CreateConfigManager(
+            (ProviderType.Pooled, 4),
+            (ProviderType.Pooled, 6)));
+        await harness.SeedHeartbeatAsync("node-a", providerIndex: 0, NodeRole.Streaming, hasDemand: true, heartbeatAt: harness.Now);
+        await harness.SeedHeartbeatAsync("node-b", providerIndex: 1, NodeRole.Streaming, hasDemand: true, heartbeatAt: harness.Now);
+        var allocator = harness.CreateAllocator(isLeader: true);
+
+        await allocator.AllocateOnce(CancellationToken.None);
+        Assert.Equal(2, (await harness.ReadLeasesAsync()).Count);
+
+        harness.UpdateProviders((ProviderType.BackupOnly, 4), (ProviderType.Pooled, 6));
+        await allocator.AllocateOnce(CancellationToken.None);
+
+        var leases = await harness.ReadLeasesAsync();
+        Assert.Single(leases);
+        Assert.Equal(1, leases[0].ProviderIndex);
+        Assert.Equal("node-b", leases[0].NodeId);
+    }
+
     private static ConfigManager CreateConfigManager(params (ProviderType Type, int MaxConnections)[] providers)
     {
         var configManager = new ConfigManager();
+        UpdateProviders(configManager, providers);
+        return configManager;
+    }
+
+    private static void UpdateProviders(ConfigManager configManager, params (ProviderType Type, int MaxConnections)[] providers)
+    {
         var providerConfig = new UsenetProviderConfig
         {
             Providers = providers
@@ -160,8 +216,6 @@ public sealed class NntpLeaseAllocatorTests
                 ConfigValue = JsonSerializer.Serialize(providerConfig)
             }
         ]);
-
-        return configManager;
     }
 
     private sealed class SqliteAllocatorHarness : IAsyncDisposable
@@ -217,6 +271,11 @@ public sealed class NntpLeaseAllocatorTests
         public void Advance(TimeSpan amount)
         {
             _now = _now.Add(amount);
+        }
+
+        public void UpdateProviders(params (ProviderType Type, int MaxConnections)[] providers)
+        {
+            NntpLeaseAllocatorTests.UpdateProviders(ConfigManager, providers);
         }
 
         public async Task SeedHeartbeatAsync(
