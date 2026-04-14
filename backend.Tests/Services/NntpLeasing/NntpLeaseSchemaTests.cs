@@ -56,6 +56,12 @@ public sealed class NntpLeaseSchemaTests : IClassFixture<PostgresHeaderCacheFixt
                 UpdatedAt = updatedAt
             });
 
+            dbContext.Set<NntpLeaseEpoch>().Add(new NntpLeaseEpoch
+            {
+                ProviderIndex = 0,
+                Epoch = 42
+            });
+
             await dbContext.SaveChangesAsync();
         }
 
@@ -63,6 +69,7 @@ public sealed class NntpLeaseSchemaTests : IClassFixture<PostgresHeaderCacheFixt
         {
             var heartbeat = await dbContext.NntpNodeHeartbeats.AsNoTracking().SingleAsync();
             var lease = await dbContext.NntpConnectionLeases.AsNoTracking().SingleAsync();
+            var leaseEpoch = await dbContext.Set<NntpLeaseEpoch>().AsNoTracking().SingleAsync();
 
             Assert.Equal("node-a", heartbeat.NodeId);
             Assert.Equal(0, heartbeat.ProviderIndex);
@@ -83,6 +90,9 @@ public sealed class NntpLeaseSchemaTests : IClassFixture<PostgresHeaderCacheFixt
             Assert.Equal(42, lease.Epoch);
             Assert.Equal(leaseUntil, lease.LeaseUntil, TimeSpan.FromMilliseconds(1));
             Assert.Equal(updatedAt, lease.UpdatedAt, TimeSpan.FromMilliseconds(1));
+
+            Assert.Equal(0, leaseEpoch.ProviderIndex);
+            Assert.Equal(42, leaseEpoch.Epoch);
         }
     }
 }

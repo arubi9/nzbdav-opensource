@@ -156,6 +156,7 @@ public sealed class PostgresHeaderCacheFixture : IAsyncLifetime
             DELETE FROM auth_failures;
             DELETE FROM nntp_node_heartbeats;
             DELETE FROM nntp_connection_leases;
+            DELETE FROM nntp_lease_epochs;
             DELETE FROM connection_pool_claims;
             DELETE FROM yenc_header_cache;");
     }

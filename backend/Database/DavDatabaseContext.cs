@@ -117,6 +117,7 @@ public sealed class DavDatabaseContext() : DbContext(CreateOptions())
     public DbSet<AuthFailureEntry> AuthFailures => Set<AuthFailureEntry>();
     public DbSet<NntpNodeHeartbeat> NntpNodeHeartbeats => Set<NntpNodeHeartbeat>();
     public DbSet<NntpConnectionLease> NntpConnectionLeases => Set<NntpConnectionLease>();
+    public DbSet<NntpLeaseEpoch> NntpLeaseEpochs => Set<NntpLeaseEpoch>();
     public DbSet<ConnectionPoolClaim> ConnectionPoolClaims => Set<ConnectionPoolClaim>();
     public DbSet<BlobCleanupItem> BlobCleanupItems => Set<BlobCleanupItem>();
     public DbSet<MissingSegmentId> MissingSegmentIds => Set<MissingSegmentId>();
@@ -621,6 +622,19 @@ public sealed class DavDatabaseContext() : DbContext(CreateOptions())
                 .HasColumnName("updated_at")
                 .HasDefaultValueSql("CURRENT_TIMESTAMP");
             e.HasIndex(x => x.LeaseUntil).HasDatabaseName("ix_nntp_connection_leases_lease_until");
+        });
+
+        b.Entity<NntpLeaseEpoch>(e =>
+        {
+            e.ToTable("nntp_lease_epochs");
+            e.HasKey(x => x.ProviderIndex);
+            e.Property(x => x.ProviderIndex)
+                .HasColumnName("provider_index")
+                .ValueGeneratedNever()
+                .IsRequired();
+            e.Property(x => x.Epoch)
+                .HasColumnName("epoch")
+                .IsRequired();
         });
 
         b.Entity<ConnectionPoolClaim>(e =>

@@ -116,6 +116,7 @@ public sealed class NntpLeaseAllocatorTests
 
         await allocator.AllocateOnce(CancellationToken.None);
         Assert.Equal(1, Assert.Single(await harness.ReadLeasesAsync()).Epoch);
+        Assert.Equal(1, Assert.Single(await harness.ReadEpochsAsync()).Epoch);
 
         harness.Advance(TimeSpan.FromSeconds(5));
         await harness.SeedHeartbeatAsync(
@@ -130,6 +131,36 @@ public sealed class NntpLeaseAllocatorTests
         harness.Advance(TimeSpan.FromSeconds(5));
         await harness.SeedHeartbeatAsync("stream-1", providerIndex: 0, NodeRole.Streaming, hasDemand: true, heartbeatAt: harness.Now);
         await allocator.AllocateOnce(CancellationToken.None);
+
+        var reactivatedLease = Assert.Single(await harness.ReadLeasesAsync());
+        Assert.Equal(2, reactivatedLease.Epoch);
+        Assert.Equal(2, Assert.Single(await harness.ReadEpochsAsync()).Epoch);
+    }
+
+    [Fact]
+    public async Task AllocateOnce_KeepsEpochMonotonicAcrossAllocatorRestartAfterDrain()
+    {
+        await using var harness = await SqliteAllocatorHarness.CreateAsync(CreateConfigManager((ProviderType.Pooled, 10)));
+        await harness.SeedHeartbeatAsync("stream-1", providerIndex: 0, NodeRole.Streaming, hasDemand: true, heartbeatAt: harness.Now);
+        var firstAllocator = harness.CreateAllocator(isLeader: true);
+
+        await firstAllocator.AllocateOnce(CancellationToken.None);
+        Assert.Equal(1, Assert.Single(await harness.ReadLeasesAsync()).Epoch);
+
+        harness.Advance(TimeSpan.FromSeconds(5));
+        await harness.SeedHeartbeatAsync(
+            "stream-1",
+            providerIndex: 0,
+            NodeRole.Streaming,
+            hasDemand: true,
+            heartbeatAt: harness.Now.Subtract(harness.HeartbeatTtl).AddSeconds(-1));
+        await firstAllocator.AllocateOnce(CancellationToken.None);
+        Assert.Empty(await harness.ReadLeasesAsync());
+
+        var secondAllocator = harness.CreateAllocator(isLeader: true);
+        harness.Advance(TimeSpan.FromSeconds(5));
+        await harness.SeedHeartbeatAsync("stream-1", providerIndex: 0, NodeRole.Streaming, hasDemand: true, heartbeatAt: harness.Now);
+        await secondAllocator.AllocateOnce(CancellationToken.None);
 
         var reactivatedLease = Assert.Single(await harness.ReadLeasesAsync());
         Assert.Equal(2, reactivatedLease.Epoch);
@@ -321,6 +352,15 @@ public sealed class NntpLeaseAllocatorTests
                 .OrderBy(x => x.ProviderIndex)
                 .ThenBy(x => x.NodeId, StringComparer.Ordinal)
                 .ToList();
+        }
+
+        public async Task<List<NntpLeaseEpoch>> ReadEpochsAsync()
+        {
+            await using var dbContext = new DavDatabaseContext();
+            return await dbContext.Set<NntpLeaseEpoch>()
+                .AsNoTracking()
+                .OrderBy(x => x.ProviderIndex)
+                .ToListAsync();
         }
 
         public async ValueTask DisposeAsync()

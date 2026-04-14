@@ -24,6 +24,7 @@ public sealed class DavDatabaseContextMigrationTests
 
             Assert.True(await TableExistsAsync(dbContext, "nntp_node_heartbeats"));
             Assert.True(await TableExistsAsync(dbContext, "nntp_connection_leases"));
+            Assert.True(await TableExistsAsync(dbContext, "nntp_lease_epochs"));
         }
         finally
         {

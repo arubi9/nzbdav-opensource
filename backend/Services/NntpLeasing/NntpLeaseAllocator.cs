@@ -103,7 +103,13 @@ public sealed class NntpLeaseAllocator : BackgroundService
                 .ToListAsync(cancellationToken)
                 .ConfigureAwait(false);
 
-            SeedEpochCache(existingLeases);
+            var existingEpochs = await dbContext.NntpLeaseEpochs
+                .Where(x => providerIndexes.Contains(x.ProviderIndex))
+                .AsTracking()
+                .ToListAsync(cancellationToken)
+                .ConfigureAwait(false);
+
+            SeedEpochCache(existingLeases, existingEpochs);
 
             var staleProviderLeases = existingLeases
                 .Where(x => !providerIndexes.Contains(x.ProviderIndex))
@@ -119,6 +125,7 @@ public sealed class NntpLeaseAllocator : BackgroundService
                     pooledProvider.provider.MaxConnections,
                     activeHeartbeats.Where(x => x.ProviderIndex == pooledProvider.providerIndex).ToList(),
                     existingLeases.Where(x => x.ProviderIndex == pooledProvider.providerIndex).ToList(),
+                    existingEpochs.SingleOrDefault(x => x.ProviderIndex == pooledProvider.providerIndex),
                     now,
                     leaseUntil);
             }
@@ -142,15 +149,18 @@ public sealed class NntpLeaseAllocator : BackgroundService
         int totalSlots,
         List<NntpNodeHeartbeat> activeHeartbeats,
         List<NntpConnectionLease> existingLeases,
+        NntpLeaseEpoch? existingEpoch,
         DateTime now,
         DateTime leaseUntil)
     {
-        var observedEpoch = existingLeases.Count == 0 ? 0 : existingLeases.Max(x => x.Epoch);
+        var observedLeaseEpoch = existingLeases.Count == 0 ? 0 : existingLeases.Max(x => x.Epoch);
+        var observedEpoch = Math.Max(observedLeaseEpoch, existingEpoch?.Epoch ?? 0);
         var nextEpoch = GetNextEpoch(providerIndex, observedEpoch);
 
         if (activeHeartbeats.Count == 0)
         {
             RememberEpoch(providerIndex, observedEpoch);
+            UpsertEpoch(existingEpoch, dbContext, providerIndex, observedEpoch);
             if (existingLeases.Count > 0)
                 dbContext.NntpConnectionLeases.RemoveRange(existingLeases);
             return;
@@ -167,6 +177,7 @@ public sealed class NntpLeaseAllocator : BackgroundService
         if (orderedHeartbeats.Count == 0)
         {
             RememberEpoch(providerIndex, observedEpoch);
+            UpsertEpoch(existingEpoch, dbContext, providerIndex, observedEpoch);
             if (existingLeases.Count > 0)
                 dbContext.NntpConnectionLeases.RemoveRange(existingLeases);
             return;
@@ -205,9 +216,10 @@ public sealed class NntpLeaseAllocator : BackgroundService
         }
 
         RememberEpoch(providerIndex, nextEpoch);
+        UpsertEpoch(existingEpoch, dbContext, providerIndex, nextEpoch);
     }
 
-    private void SeedEpochCache(IEnumerable<NntpConnectionLease> existingLeases)
+    private void SeedEpochCache(IEnumerable<NntpConnectionLease> existingLeases, IEnumerable<NntpLeaseEpoch> existingEpochs)
     {
         foreach (var providerEpoch in existingLeases
                      .GroupBy(x => x.ProviderIndex)
@@ -215,6 +227,9 @@ public sealed class NntpLeaseAllocator : BackgroundService
         {
             RememberEpoch(providerEpoch.ProviderIndex, providerEpoch.Epoch);
         }
+
+        foreach (var providerEpoch in existingEpochs)
+            RememberEpoch(providerEpoch.ProviderIndex, providerEpoch.Epoch);
     }
 
     private long GetNextEpoch(int providerIndex, long observedEpoch)
@@ -229,6 +244,28 @@ public sealed class NntpLeaseAllocator : BackgroundService
             return;
 
         _lastEpochByProvider[providerIndex] = epoch;
+    }
+
+    private static void UpsertEpoch(
+        NntpLeaseEpoch? existingEpoch,
+        DavDatabaseContext dbContext,
+        int providerIndex,
+        long epoch)
+    {
+        if (epoch <= 0)
+            return;
+
+        var epochState = existingEpoch;
+        if (epochState == null)
+        {
+            epochState = new NntpLeaseEpoch
+            {
+                ProviderIndex = providerIndex
+            };
+            dbContext.NntpLeaseEpochs.Add(epochState);
+        }
+
+        epochState.Epoch = Math.Max(epochState.Epoch, epoch);
     }
 
     private static NntpLeasePolicy.LeaseHeartbeat? TryToLeaseHeartbeat(NntpNodeHeartbeat heartbeat)
