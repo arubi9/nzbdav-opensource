@@ -104,6 +104,7 @@ Combined-role multi-node is intentionally still transitional:
 - `NZBDAV_ROLE=combined` in multi-node mode continues to use the legacy connection coordinator path
 - explicit-role `streaming` and `ingest` nodes use the new per-node lease path
 - do not mix Combined-role operational assumptions with explicit-role lease observability
+- do not run Combined-role and explicit-role nodes together against the same shared provider budget; migrate as a cutover, not as a mixed-mode rollout
 
 ### Alternative: Separate provider accounts
 

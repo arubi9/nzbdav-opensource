@@ -60,6 +60,31 @@ public sealed class NzbdavHealthCheckTests
         Assert.Equal(0, staleLease.SecondsUntilExpiry);
     }
 
+    [Fact]
+    public async Task CheckHealthAsync_DegradesStreamingNode_WhenPerNodeLeaseCapacityIsZero()
+    {
+        await using var harness = await SqliteHealthCheckHarness.CreateAsync();
+        await using var cacheScope = new TempCacheScope();
+        using var liveCache = new LiveSegmentCache(cacheScope.Path);
+        using var usenetClient = new UsenetStreamingClient(CreateConfigManager(), new WebsocketManager(), liveCache);
+        var leaseState = new NntpLeaseState();
+
+        var healthCheck = new NzbdavHealthCheck(
+            liveCache,
+            usenetClient,
+            leaseState,
+            new TestApplicationLifetime(),
+            () => harness.Now,
+            NodeRole.Streaming,
+            isMultiNode: true);
+
+        var result = await healthCheck.CheckHealthAsync(new HealthCheckContext());
+
+        Assert.Equal(HealthStatus.Degraded, result.Status);
+        Assert.False(Assert.IsType<bool>(result.Data["nntp_local_lease_ready"]));
+        Assert.Equal(0, Assert.IsType<int>(result.Data["nntp_local_lease_total_granted_slots"]));
+    }
+
     private static ConfigManager CreateConfigManager()
     {
         var configManager = new ConfigManager();

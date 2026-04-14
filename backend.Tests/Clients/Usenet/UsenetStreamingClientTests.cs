@@ -52,6 +52,47 @@ public sealed class UsenetStreamingClientTests
         Assert.Equal(5, client.PoolStats!.MaxPooled);
     }
 
+    [Fact]
+    public void StartsWithZeroPoolAndDownloadLimits_WhenPerNodeLeasingIsEnabled()
+    {
+        using var cacheScope = new TempCacheScope();
+        var configManager = CreateConfigManager(CreateProviderConfig(maxConnections: 3));
+        using var liveCache = new LiveSegmentCache(cacheScope.Path);
+        var websocketManager = new WebsocketManager();
+
+        using var client = new UsenetStreamingClient(configManager, websocketManager, liveCache, usePerNodeLeasing: true);
+
+        Assert.NotNull(client.PoolStats);
+        Assert.Equal(0, client.PoolStats!.MaxPooled);
+        Assert.Equal(0, client.GetProviderPoolMaxConnections(0));
+        Assert.Equal(0, client.GetMaxDownloadConnections());
+    }
+
+    [Fact]
+    public void ProviderConfigRefresh_StaysClampedUntilLeaseReplay_WhenPerNodeLeasingIsEnabled()
+    {
+        using var cacheScope = new TempCacheScope();
+        var configManager = CreateConfigManager(CreateProviderConfig(maxConnections: 2));
+        using var liveCache = new LiveSegmentCache(cacheScope.Path);
+        var websocketManager = new WebsocketManager();
+
+        using var client = new UsenetStreamingClient(configManager, websocketManager, liveCache, usePerNodeLeasing: true);
+
+        configManager.UpdateValues(
+        [
+            new ConfigItem
+            {
+                ConfigName = "usenet.providers",
+                ConfigValue = JsonSerializer.Serialize(CreateProviderConfig(maxConnections: 5))
+            }
+        ]);
+
+        Assert.NotNull(client.PoolStats);
+        Assert.Equal(0, client.PoolStats!.MaxPooled);
+        Assert.Equal(0, client.GetProviderPoolMaxConnections(0));
+        Assert.Equal(0, client.GetMaxDownloadConnections());
+    }
+
     private static ConfigManager CreateConfigManager(UsenetProviderConfig providerConfig)
     {
         var configManager = new ConfigManager();

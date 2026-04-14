@@ -4,7 +4,9 @@ using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
+using NzbWebDAV.Metrics;
 using NzbWebDAV.Models;
+using NzbWebDAV.Queue;
 using NzbWebDAV.Utils;
 using Serilog;
 
@@ -24,13 +26,16 @@ public sealed class NntpLeaseAgent : BackgroundService
     private readonly TimeSpan _tickInterval;
     private readonly NodeRole _nodeRole;
     private readonly string _region;
+    private readonly Func<DavDatabaseContext, CancellationToken, Task<bool>> _hasDemandAsync;
     private readonly Lock _applyLock = new();
     private readonly HashSet<int> _lastAppliedProviderIndexes = [];
 
     public NntpLeaseAgent(
         ConfigManager configManager,
         NntpLeaseState leaseState,
-        UsenetStreamingClient streamingClient)
+        UsenetStreamingClient streamingClient,
+        QueueManager queueManager,
+        ReadAheadWarmingService warmingService)
         : this(
             configManager,
             leaseState,
@@ -43,7 +48,24 @@ public sealed class NntpLeaseAgent : BackgroundService
             NodeRoleConfig.Current,
             EnvironmentUtil.GetEnvironmentVariable("NZBDAV_REGION") ?? "unknown",
             DefaultTickInterval,
-            () => DateTime.UtcNow)
+            () => DateTime.UtcNow,
+            async (dbContext, cancellationToken) =>
+            {
+                var hasActiveNntp = (streamingClient.PoolStats?.TotalActive ?? 0) > 0;
+                return NodeRoleConfig.Current switch
+                {
+                    NodeRole.Streaming => hasActiveNntp
+                        || streamingClient.GetPendingDownloadWaiters() > 0
+                        || warmingService.ActiveSessionCount > 0
+                        || NzbdavMetricsCollector.ActiveStreams > 0,
+                    NodeRole.Ingest => hasActiveNntp
+                        || queueManager.GetInProgressQueueItem().queueItem is not null
+                        || await dbContext.QueueItems
+                            .AnyAsync(x => x.PauseUntil == null || x.PauseUntil <= DateTime.Now, cancellationToken)
+                            .ConfigureAwait(false),
+                    _ => false
+                };
+            })
     {
     }
 
@@ -57,7 +79,8 @@ public sealed class NntpLeaseAgent : BackgroundService
         NodeRole nodeRole,
         string region,
         TimeSpan? tickInterval = null,
-        Func<DateTime>? utcNow = null)
+        Func<DateTime>? utcNow = null,
+        Func<DavDatabaseContext, CancellationToken, Task<bool>>? hasDemandAsync = null)
     {
         if (nodeRole == NodeRole.Combined)
             throw new InvalidOperationException("Per-node NNTP leasing does not support the Combined role.");
@@ -72,6 +95,7 @@ public sealed class NntpLeaseAgent : BackgroundService
         _region = string.IsNullOrWhiteSpace(region) ? "unknown" : region;
         _tickInterval = tickInterval ?? DefaultTickInterval;
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
+        _hasDemandAsync = hasDemandAsync ?? ((_, _) => Task.FromResult(true));
         _configManager.OnConfigChanged += OnConfigChanged;
     }
 
@@ -115,6 +139,8 @@ public sealed class NntpLeaseAgent : BackgroundService
             foreach (var staleHeartbeat in existingHeartbeats.Where(x => !providerIndexes.Contains(x.ProviderIndex)).ToList())
                 dbContext.NntpNodeHeartbeats.Remove(staleHeartbeat);
 
+            var hasDemand = await _hasDemandAsync(dbContext, cancellationToken).ConfigureAwait(false);
+
             foreach (var pooledProvider in pooledProviders)
             {
                 var heartbeat = existingHeartbeats.SingleOrDefault(x => x.ProviderIndex == pooledProvider.providerIndex);
@@ -134,7 +160,7 @@ public sealed class NntpLeaseAgent : BackgroundService
                 heartbeat.DesiredSlots = pooledProvider.provider.MaxConnections;
                 heartbeat.ActiveSlots = 0;
                 heartbeat.LiveSlots = 0;
-                heartbeat.HasDemand = true;
+                heartbeat.HasDemand = hasDemand;
                 heartbeat.HeartbeatAt = now;
             }
 

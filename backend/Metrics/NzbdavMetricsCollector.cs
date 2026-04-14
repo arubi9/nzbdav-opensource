@@ -10,6 +10,7 @@ namespace NzbWebDAV.Metrics;
 
 public sealed class NzbdavMetricsCollector
 {
+    private static int _activeStreams;
     private readonly Func<LiveSegmentCacheStats> _getCacheStats;
     private readonly Func<long> _getMaxCacheBytes;
     private readonly Func<ConnectionPoolStats?> _getPoolStats;
@@ -73,6 +74,8 @@ public sealed class NzbdavMetricsCollector
     {
         ActiveStreamsGauge.Set(0);
     }
+
+    public static int ActiveStreams => Volatile.Read(ref _activeStreams);
 
     public NzbdavMetricsCollector(
         LiveSegmentCache cache,
@@ -343,8 +346,17 @@ public sealed class NzbdavMetricsCollector
         _nntpLeaseExpiresInSeconds.WithLabels(providerIndexLabel).Set(secondsUntilExpiry);
     }
 
-    public static void IncrementActiveStreams() => ActiveStreamsGauge.Inc();
-    public static void DecrementActiveStreams() => ActiveStreamsGauge.Dec();
+    public static void IncrementActiveStreams()
+    {
+        Interlocked.Increment(ref _activeStreams);
+        ActiveStreamsGauge.Inc();
+    }
+
+    public static void DecrementActiveStreams()
+    {
+        Interlocked.Decrement(ref _activeStreams);
+        ActiveStreamsGauge.Dec();
+    }
 
     // No IDisposable — this is a singleton that lives for the app lifetime.
     // The AddBeforeCollectCallback registration is never removed.

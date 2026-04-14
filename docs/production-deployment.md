@@ -47,6 +47,15 @@ Multi-node `NZBDAV_ROLE=combined` is intentionally still on the legacy coordinat
 - `ConnectionPoolCoordinator` and `ConnectionPoolClaimSweeper` remain the active mechanism for Combined-role multi-node nodes.
 - The new explicit-role lease path applies only to `streaming` and `ingest` multi-node nodes.
 - Do not assume a Combined-role node will expose or follow the same lease behavior as an explicit-role node yet.
+- Do not run a mixed cluster of Combined-role and explicit-role nodes against the same provider budget. That rollout mode is unsafe because the legacy and lease-based coordinators do not share the same coordination tables.
+
+## Node Identity
+
+For explicit-role multi-node leasing, `NZBDAV_NODE_ID` should be unique per node and stable across normal restarts.
+
+- Unique prevents two nodes from heartbeating the same identity.
+- Stable identity keeps lease observability and allocator state easier to reason about during rolling restarts.
+- If unset, NZBDAV falls back to hostname or machine name, which is acceptable only if those are already unique and stable in your environment.
 
 ## Related
 

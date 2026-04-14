@@ -42,4 +42,40 @@ public sealed class DownloadingNntpClientTests
         (await defaultWaiter).OnConnectionReadyAgain?.Invoke(ArticleBodyResult.NotRetrieved);
         (await lowWaiter).OnConnectionReadyAgain?.Invoke(ArticleBodyResult.NotRetrieved);
     }
+
+    [Fact]
+    public void StartsClampedToZero_WhenPerNodeLeasingIsEnabled()
+    {
+        var configManager = new ConfigManager();
+        configManager.UpdateValues(
+        [
+            new ConfigItem { ConfigName = "usenet.max-download-connections", ConfigValue = "5" },
+            new ConfigItem { ConfigName = "usenet.streaming-priority", ConfigValue = "100" }
+        ]);
+
+        using var client = new DownloadingNntpClient(new FakeNntpClient(), configManager, usePerNodeLeasing: true);
+
+        Assert.Equal(0, client.MaxDownloadConnections);
+    }
+
+    [Fact]
+    public void IgnoresConfigWidening_WhenPerNodeLeasingIsEnabled()
+    {
+        var configManager = new ConfigManager();
+        configManager.UpdateValues(
+        [
+            new ConfigItem { ConfigName = "usenet.max-download-connections", ConfigValue = "5" },
+            new ConfigItem { ConfigName = "usenet.streaming-priority", ConfigValue = "100" }
+        ]);
+
+        using var client = new DownloadingNntpClient(new FakeNntpClient(), configManager, usePerNodeLeasing: true);
+        client.UpdateMaxDownloadConnections(2);
+
+        configManager.UpdateValues(
+        [
+            new ConfigItem { ConfigName = "usenet.max-download-connections", ConfigValue = "9" }
+        ]);
+
+        Assert.Equal(2, client.MaxDownloadConnections);
+    }
 }

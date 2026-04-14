@@ -16,12 +16,16 @@ public class DownloadingNntpClient : WrappingNntpClient
 {
     private readonly ConfigManager _configManager;
     private readonly PrioritizedSemaphore _semaphore;
+    private readonly bool _usePerNodeLeasing;
     private volatile int _maxDownloadConnections;
     public int MaxDownloadConnections => _maxDownloadConnections;
+    public int PendingDownloadWaiters => _semaphore.PendingCount;
 
-    public DownloadingNntpClient(INntpClient usenetClient, ConfigManager configManager) : base(usenetClient)
+    public DownloadingNntpClient(INntpClient usenetClient, ConfigManager configManager, bool? usePerNodeLeasing = null) : base(usenetClient)
     {
-        var maxDownloadConnections = configManager.GetMaxDownloadConnections();
+        _usePerNodeLeasing = usePerNodeLeasing
+            ?? NzbWebDAV.Services.NntpLeasing.NntpLeaseAgent.ShouldUsePerNodeLeasing(MultiNodeMode.IsEnabled, NodeRoleConfig.Current);
+        var maxDownloadConnections = _usePerNodeLeasing ? 0 : configManager.GetMaxDownloadConnections();
         var streamingPriority = configManager.GetStreamingPriority();
         _configManager = configManager;
         _maxDownloadConnections = maxDownloadConnections;
@@ -31,7 +35,7 @@ public class DownloadingNntpClient : WrappingNntpClient
 
     private void OnConfigChanged(object? sender, ConfigManager.ConfigEventArgs e)
     {
-        if (e.ChangedConfig.ContainsKey("usenet.max-download-connections"))
+        if (!_usePerNodeLeasing && e.ChangedConfig.ContainsKey("usenet.max-download-connections"))
         {
             var maxDownloadConnections = _configManager.GetMaxDownloadConnections();
             UpdateMaxDownloadConnections(maxDownloadConnections);

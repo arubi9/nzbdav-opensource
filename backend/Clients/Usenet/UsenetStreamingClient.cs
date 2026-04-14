@@ -17,6 +17,7 @@ public class UsenetStreamingClient : WrappingNntpClient
     private volatile DownloadingNntpClient? _downloadingClient;
     private volatile MultiProviderNntpClient? _multiProviderClient;
     private volatile IReadOnlyList<MultiConnectionNntpClient> _providerClients = [];
+    private readonly bool _usePerNodeLeasing;
 
     public ConnectionPoolStats? PoolStats => _poolStats;
     public bool HasAvailableProvider => _multiProviderClient?.HasAvailableProvider() ?? false;
@@ -28,12 +29,20 @@ public class UsenetStreamingClient : WrappingNntpClient
     (
         ConfigManager configManager,
         WebsocketManager websocketManager,
-        LiveSegmentCache liveSegmentCache
+        LiveSegmentCache liveSegmentCache,
+        bool? usePerNodeLeasing = null
     ) : this(
-        CreatePipeline(configManager, websocketManager, liveSegmentCache),
+        CreatePipeline(
+            configManager,
+            websocketManager,
+            liveSegmentCache,
+            usePerNodeLeasing
+            ?? NzbWebDAV.Services.NntpLeasing.NntpLeaseAgent.ShouldUsePerNodeLeasing(MultiNodeMode.IsEnabled, NodeRoleConfig.Current)),
         configManager,
         websocketManager,
-        liveSegmentCache
+        liveSegmentCache,
+        usePerNodeLeasing
+        ?? NzbWebDAV.Services.NntpLeasing.NntpLeaseAgent.ShouldUsePerNodeLeasing(MultiNodeMode.IsEnabled, NodeRoleConfig.Current)
     )
     {
     }
@@ -43,19 +52,25 @@ public class UsenetStreamingClient : WrappingNntpClient
         PipelineResult pipeline,
         ConfigManager configManager,
         WebsocketManager websocketManager,
-        LiveSegmentCache liveSegmentCache
+        LiveSegmentCache liveSegmentCache,
+        bool usePerNodeLeasing
     ) : base(pipeline.Client)
     {
         _poolStats = pipeline.Stats;
         _downloadingClient = pipeline.DownloadingClient;
         _multiProviderClient = pipeline.MultiProviderClient;
         _providerClients = pipeline.ProviderClients;
+        _usePerNodeLeasing = usePerNodeLeasing;
 
         configManager.OnConfigChanged += (_, configEventArgs) =>
         {
             if (!configEventArgs.ChangedConfig.ContainsKey("usenet.providers")) return;
 
-            var nextPipeline = CreatePipeline(configManager, websocketManager, liveSegmentCache);
+            var nextPipeline = CreatePipeline(
+                configManager,
+                websocketManager,
+                liveSegmentCache,
+                _usePerNodeLeasing);
             ReplaceUnderlyingClient(nextPipeline.Client);
             _poolStats = nextPipeline.Stats;
             _downloadingClient = nextPipeline.DownloadingClient;
@@ -68,11 +83,12 @@ public class UsenetStreamingClient : WrappingNntpClient
     (
         ConfigManager configManager,
         WebsocketManager websocketManager,
-        LiveSegmentCache liveSegmentCache
+        LiveSegmentCache liveSegmentCache,
+        bool usePerNodeLeasing
     )
     {
-        var multiProviderResult = CreateMultiProviderClient(configManager, websocketManager);
-        var downloadingClient = new DownloadingNntpClient(multiProviderResult.Client, configManager);
+        var multiProviderResult = CreateMultiProviderClient(configManager, websocketManager, usePerNodeLeasing);
+        var downloadingClient = new DownloadingNntpClient(multiProviderResult.Client, configManager, usePerNodeLeasing);
         var cachingClient = new LiveSegmentCachingNntpClient(downloadingClient, liveSegmentCache);
         return new PipelineResult(
             cachingClient,
@@ -85,7 +101,8 @@ public class UsenetStreamingClient : WrappingNntpClient
     private static (MultiProviderNntpClient Client, ConnectionPoolStats Stats, IReadOnlyList<MultiConnectionNntpClient> ProviderClients) CreateMultiProviderClient
     (
         ConfigManager configManager,
-        WebsocketManager websocketManager
+        WebsocketManager websocketManager,
+        bool usePerNodeLeasing
     )
     {
         var providerConfig = configManager.GetUsenetProviderConfig();
@@ -93,6 +110,7 @@ public class UsenetStreamingClient : WrappingNntpClient
         var providerClients = providerConfig.Providers
             .Select((provider, index) => CreateProviderClient(
                 provider,
+                usePerNodeLeasing,
                 connectionPoolStats.GetOnConnectionPoolChanged(index)
             ))
             .ToList();
@@ -102,11 +120,12 @@ public class UsenetStreamingClient : WrappingNntpClient
     private static MultiConnectionNntpClient CreateProviderClient
     (
         UsenetProviderConfig.ConnectionDetails connectionDetails,
+        bool usePerNodeLeasing,
         EventHandler<ConnectionPoolStats.ConnectionPoolChangedEventArgs> onConnectionPoolChanged
     )
     {
         var connectionPool = CreateNewConnectionPool(
-            maxConnections: connectionDetails.MaxConnections,
+            maxConnections: usePerNodeLeasing ? 0 : connectionDetails.MaxConnections,
             connectionFactory: ct => CreateNewConnection(connectionDetails, ct),
             onConnectionPoolChanged
         );
@@ -120,10 +139,13 @@ public class UsenetStreamingClient : WrappingNntpClient
         EventHandler<ConnectionPoolStats.ConnectionPoolChangedEventArgs> onConnectionPoolChanged
     )
     {
-        var connectionPool = new ConnectionPool<INntpClient>(maxConnections, connectionFactory);
+        var initialMaxConnections = Math.Max(1, maxConnections);
+        var connectionPool = new ConnectionPool<INntpClient>(initialMaxConnections, connectionFactory);
         connectionPool.OnConnectionPoolChanged += onConnectionPoolChanged;
-        var args = new ConnectionPoolStats.ConnectionPoolChangedEventArgs(0, 0, maxConnections);
-        onConnectionPoolChanged(connectionPool, args);
+        if (maxConnections != initialMaxConnections)
+            connectionPool.Resize(maxConnections);
+        else
+            onConnectionPoolChanged(connectionPool, new ConnectionPoolStats.ConnectionPoolChangedEventArgs(0, 0, maxConnections));
         return connectionPool;
     }
 
@@ -146,6 +168,11 @@ public class UsenetStreamingClient : WrappingNntpClient
     public int GetMaxDownloadConnections()
     {
         return _downloadingClient?.MaxDownloadConnections ?? 0;
+    }
+
+    public int GetPendingDownloadWaiters()
+    {
+        return _downloadingClient?.PendingDownloadWaiters ?? 0;
     }
 
     public void UpdateMaxDownloadConnections(int maxDownloadConnections)

@@ -69,7 +69,8 @@ public sealed class NntpLeaseAgentTests
             nodeRole: NodeRole.Streaming,
             region: "test-region",
             tickInterval: TimeSpan.FromMinutes(1),
-            utcNow: () => harness.Now);
+            utcNow: () => harness.Now,
+            hasDemandAsync: (_, _) => Task.FromResult(true));
 
         await agent.RunOnce(CancellationToken.None);
 
@@ -145,7 +146,8 @@ public sealed class NntpLeaseAgentTests
             nodeRole: NodeRole.Streaming,
             region: "test-region",
             tickInterval: TimeSpan.FromMinutes(1),
-            utcNow: () => now);
+            utcNow: () => now,
+            hasDemandAsync: (_, _) => Task.FromResult(true));
 
         await agent.RunOnce(CancellationToken.None);
 
@@ -176,7 +178,8 @@ public sealed class NntpLeaseAgentTests
             nodeRole: NodeRole.Streaming,
             region: "test-region",
             tickInterval: TimeSpan.FromMinutes(1),
-            utcNow: () => now);
+            utcNow: () => now,
+            hasDemandAsync: (_, _) => Task.FromResult(true));
 
         await agent.RunOnce(CancellationToken.None);
         Assert.Equal(4, client.GetProviderPoolMaxConnections(0));
@@ -233,7 +236,8 @@ public sealed class NntpLeaseAgentTests
             nodeRole: NodeRole.Streaming,
             region: "test-region",
             tickInterval: TimeSpan.FromMinutes(1),
-            utcNow: () => now);
+            utcNow: () => now,
+            hasDemandAsync: (_, _) => Task.FromResult(true));
 
         await agent.RunOnce(CancellationToken.None);
         Assert.Equal([0, 1], leaseState.GetProviderLeaseObservations(now).Select(x => x.ProviderIndex));
@@ -286,7 +290,8 @@ public sealed class NntpLeaseAgentTests
             nodeRole: NodeRole.Streaming,
             region: "test-region",
             tickInterval: TimeSpan.FromMinutes(1),
-            utcNow: () => harness.Now);
+            utcNow: () => harness.Now,
+            hasDemandAsync: (_, _) => Task.FromResult(true));
 
         await agent.RunOnce(CancellationToken.None);
 
@@ -307,6 +312,30 @@ public sealed class NntpLeaseAgentTests
         bool expected)
     {
         Assert.Equal(expected, NntpLeaseAgent.ShouldUsePerNodeLeasing(isMultiNode, nodeRole));
+    }
+
+    [Fact]
+    public async Task RunOnce_WritesHeartbeatWithoutDemand_WhenDemandProbeReturnsFalse()
+    {
+        await using var harness = await SqliteLeaseAgentHarness.CreateAsync(CreateConfigManager((ProviderType.Pooled, 10)));
+        var leaseState = new NntpLeaseState();
+        var agent = new NntpLeaseAgent(
+            harness.ConfigManager,
+            leaseState,
+            (_, _) => { },
+            _ => { },
+            () => new DavDatabaseContext(),
+            nodeIdFactory: () => "stream-node",
+            nodeRole: NodeRole.Streaming,
+            region: "test-region",
+            tickInterval: TimeSpan.FromMinutes(1),
+            utcNow: () => harness.Now,
+            hasDemandAsync: (_, _) => Task.FromResult(false));
+
+        await agent.RunOnce(CancellationToken.None);
+
+        var heartbeat = Assert.Single(await harness.ReadHeartbeatsAsync());
+        Assert.False(heartbeat.HasDemand);
     }
 
     private static ConfigManager CreateConfigManager(params (ProviderType Type, int MaxConnections)[] providers)
