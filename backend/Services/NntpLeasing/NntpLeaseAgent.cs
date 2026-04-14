@@ -24,6 +24,7 @@ public sealed class NntpLeaseAgent : BackgroundService
     private readonly TimeSpan _tickInterval;
     private readonly NodeRole _nodeRole;
     private readonly string _region;
+    private readonly Lock _applyLock = new();
     private readonly HashSet<int> _lastAppliedProviderIndexes = [];
 
     public NntpLeaseAgent(
@@ -71,6 +72,7 @@ public sealed class NntpLeaseAgent : BackgroundService
         _region = string.IsNullOrWhiteSpace(region) ? "unknown" : region;
         _tickInterval = tickInterval ?? DefaultTickInterval;
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
+        _configManager.OnConfigChanged += OnConfigChanged;
     }
 
     public static bool ShouldUsePerNodeLeasing(bool isMultiNode, NodeRole nodeRole)
@@ -96,11 +98,7 @@ public sealed class NntpLeaseAgent : BackgroundService
 
     public async Task RunOnce(CancellationToken cancellationToken)
     {
-        var providerConfig = _configManager.GetUsenetProviderConfig();
-        var pooledProviders = providerConfig.Providers
-            .Select((provider, providerIndex) => new { provider, providerIndex })
-            .Where(x => x.provider.Type == ProviderType.Pooled)
-            .ToList();
+        var pooledProviders = GetPooledProviders();
         var providerIndexes = pooledProviders.Select(x => x.providerIndex).ToHashSet();
         var now = _utcNow();
         var nodeId = _nodeIdFactory();
@@ -149,7 +147,8 @@ public sealed class NntpLeaseAgent : BackgroundService
                     .ConfigureAwait(false);
 
             await dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            ApplyLeases(providerIndexes, leases, now);
+            RefreshLeaseState(leases);
+            ReapplyCurrentFreshLimits(providerIndexes, now);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -157,38 +156,59 @@ public sealed class NntpLeaseAgent : BackgroundService
         }
         catch (Exception ex)
         {
+            ReapplyCurrentFreshLimits(providerIndexes, now);
             Log.Warning(ex, "NntpLeaseAgent lease pass failed for node {NodeId}", nodeId);
         }
     }
 
-    private void ApplyLeases(IReadOnlyCollection<int> providerIndexes, IReadOnlyCollection<NntpConnectionLease> leases, DateTime now)
+    private void OnConfigChanged(object? sender, ConfigManager.ConfigEventArgs e)
     {
-        var freshLeases = leases
-            .Where(x => x.LeaseUntil > now)
-            .ToDictionary(x => x.ProviderIndex);
+        if (!e.ChangedConfig.ContainsKey("usenet.providers"))
+            return;
 
-        foreach (var staleProviderIndex in _lastAppliedProviderIndexes.Except(providerIndexes).ToList())
+        var providerIndexes = GetPooledProviders().Select(x => x.providerIndex).ToHashSet();
+        ReapplyCurrentFreshLimits(providerIndexes, _utcNow());
+    }
+
+    private List<(UsenetProviderConfig.ConnectionDetails provider, int providerIndex)> GetPooledProviders()
+    {
+        return _configManager.GetUsenetProviderConfig().Providers
+            .Select((provider, providerIndex) => (provider, providerIndex))
+            .Where(x => x.provider.Type == ProviderType.Pooled)
+            .ToList();
+    }
+
+    private void RefreshLeaseState(IEnumerable<NntpConnectionLease> leases)
+    {
+        foreach (var lease in leases)
         {
-            _leaseState.Apply(staleProviderIndex, grantedSlots: 0, epoch: 0, leaseUntil: now);
-            _applyProviderGrant(staleProviderIndex, 0);
+            _leaseState.Apply(lease.ProviderIndex, lease.GrantedSlots, lease.Epoch, lease.LeaseUntil);
         }
+    }
 
-        foreach (var providerIndex in providerIndexes)
+    private void ReapplyCurrentFreshLimits(IReadOnlyCollection<int> providerIndexes, DateTime now)
+    {
+        lock (_applyLock)
         {
-            if (freshLeases.TryGetValue(providerIndex, out var lease))
+            foreach (var staleProviderIndex in _lastAppliedProviderIndexes.Except(providerIndexes).ToList())
             {
-                _leaseState.Apply(providerIndex, lease.GrantedSlots, lease.Epoch, lease.LeaseUntil);
-                _applyProviderGrant(providerIndex, lease.GrantedSlots);
+                _applyProviderGrant(staleProviderIndex, 0);
             }
-            else
-            {
-                _leaseState.Apply(providerIndex, grantedSlots: 0, epoch: 0, leaseUntil: now);
-                _applyProviderGrant(providerIndex, 0);
-            }
-        }
 
-        _lastAppliedProviderIndexes.Clear();
-        _lastAppliedProviderIndexes.UnionWith(providerIndexes);
-        _applyDownloadLimit(_leaseState.GetTotalGrantedSlots());
+            foreach (var providerIndex in providerIndexes)
+            {
+                _applyProviderGrant(providerIndex, _leaseState.GetFreshProviderGrant(providerIndex, now));
+            }
+
+            _lastAppliedProviderIndexes.Clear();
+            _lastAppliedProviderIndexes.UnionWith(providerIndexes);
+            _applyDownloadLimit(_leaseState.GetFreshTotalGrantedSlots(providerIndexes, now));
+        }
+    }
+
+    public override void Dispose()
+    {
+        _configManager.OnConfigChanged -= OnConfigChanged;
+        base.Dispose();
     }
 }

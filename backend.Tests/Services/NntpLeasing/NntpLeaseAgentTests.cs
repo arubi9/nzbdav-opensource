@@ -1,12 +1,14 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Clients.Usenet.Caching;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Models;
 using NzbWebDAV.Services.NntpLeasing;
 using NzbWebDAV.Tests.TestDoubles;
+using NzbWebDAV.Websocket;
 using UsenetSharp.Models;
 
 namespace backend.Tests.Services.NntpLeasing;
@@ -105,6 +107,94 @@ public sealed class NntpLeaseAgentTests
         var acquired = await waiter.WaitAsync(TimeSpan.FromSeconds(2));
         acquired.OnConnectionReadyAgain?.Invoke(ArticleBodyResult.NotRetrieved);
         holder.OnConnectionReadyAgain?.Invoke(ArticleBodyResult.NotRetrieved);
+    }
+
+    [Fact]
+    public async Task RunOnce_WhenLeaseRefreshFails_ClampsToStillFreshSubsetOnly()
+    {
+        var now = new DateTime(2026, 4, 14, 12, 0, 0, DateTimeKind.Utc);
+        var configManager = CreateConfigManager(
+            (ProviderType.Pooled, 10),
+            (ProviderType.Pooled, 8));
+        var leaseState = new NntpLeaseState();
+        leaseState.Apply(providerIndex: 0, grantedSlots: 4, epoch: 9, now.AddSeconds(30));
+        leaseState.Apply(providerIndex: 1, grantedSlots: 2, epoch: 5, now.AddSeconds(-1));
+
+        var appliedProviderLimits = new Dictionary<int, int>();
+        var appliedDownloadLimits = new List<int>();
+        var agent = new NntpLeaseAgent(
+            configManager,
+            leaseState,
+            (providerIndex, grantedSlots) => appliedProviderLimits[providerIndex] = grantedSlots,
+            grantedSlots => appliedDownloadLimits.Add(grantedSlots),
+            () => throw new InvalidOperationException("db down"),
+            nodeIdFactory: () => "stream-node",
+            nodeRole: NodeRole.Streaming,
+            region: "test-region",
+            tickInterval: TimeSpan.FromMinutes(1),
+            utcNow: () => now);
+
+        await agent.RunOnce(CancellationToken.None);
+
+        Assert.Equal(4, appliedProviderLimits[0]);
+        Assert.Equal(0, appliedProviderLimits[1]);
+        Assert.Equal([4], appliedDownloadLimits);
+    }
+
+    [Fact]
+    public async Task ProviderConfigChange_ReappliesCurrentFreshLeaseClampImmediately()
+    {
+        using var cacheScope = new TempCacheScope();
+        var now = new DateTime(2026, 4, 14, 12, 0, 0, DateTimeKind.Utc);
+        var configManager = CreateConfigManager((ProviderType.Pooled, 10));
+        using var liveCache = new LiveSegmentCache(cacheScope.Path);
+        var websocketManager = new WebsocketManager();
+        using var client = new UsenetStreamingClient(configManager, websocketManager, liveCache);
+        var leaseState = new NntpLeaseState();
+        leaseState.Apply(providerIndex: 0, grantedSlots: 4, epoch: 9, now.AddSeconds(30));
+
+        var agent = new NntpLeaseAgent(
+            configManager,
+            leaseState,
+            client.ResizeProviderPool,
+            client.UpdateMaxDownloadConnections,
+            () => throw new InvalidOperationException("db down"),
+            nodeIdFactory: () => "stream-node",
+            nodeRole: NodeRole.Streaming,
+            region: "test-region",
+            tickInterval: TimeSpan.FromMinutes(1),
+            utcNow: () => now);
+
+        await agent.RunOnce(CancellationToken.None);
+        Assert.Equal(4, client.GetProviderPoolMaxConnections(0));
+        Assert.Equal(4, client.GetMaxDownloadConnections());
+
+        configManager.UpdateValues(
+        [
+            new ConfigItem
+            {
+                ConfigName = "usenet.providers",
+                ConfigValue = JsonSerializer.Serialize(new UsenetProviderConfig
+                {
+                    Providers =
+                    [
+                        new UsenetProviderConfig.ConnectionDetails
+                        {
+                            Type = ProviderType.Pooled,
+                            Host = "news-0.example.test",
+                            Port = 563,
+                            UseSsl = true,
+                            User = "user",
+                            Pass = "pass",
+                            MaxConnections = 8
+                        }
+                    ]
+                })
+            }
+        ]);
+
+        Assert.Equal(4, client.GetProviderPoolMaxConnections(0));
+        Assert.Equal(4, client.GetMaxDownloadConnections());
     }
 
     [Theory]
@@ -227,6 +317,32 @@ public sealed class NntpLeaseAgentTests
                 Directory.Delete(_configPath, recursive: true);
 
             await ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class TempCacheScope : IDisposable
+    {
+        public TempCacheScope()
+        {
+            Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path);
+        }
+
+        public string Path { get; }
+
+        public void Dispose()
+        {
+            if (!Directory.Exists(Path))
+                return;
+
+            try
+            {
+                Directory.Delete(Path, recursive: true);
+            }
+            catch
+            {
+                // best-effort temp cleanup
+            }
         }
     }
 }

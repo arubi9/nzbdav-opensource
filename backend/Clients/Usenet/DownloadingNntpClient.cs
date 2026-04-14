@@ -17,6 +17,7 @@ public class DownloadingNntpClient : WrappingNntpClient
     private readonly ConfigManager _configManager;
     private readonly PrioritizedSemaphore _semaphore;
     private volatile int _maxDownloadConnections;
+    public int MaxDownloadConnections => _maxDownloadConnections;
 
     public DownloadingNntpClient(INntpClient usenetClient, ConfigManager configManager) : base(usenetClient)
     {

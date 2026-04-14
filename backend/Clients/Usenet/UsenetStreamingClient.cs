@@ -143,6 +143,11 @@ public class UsenetStreamingClient : WrappingNntpClient
         return _providerClients[providerIndex].MaxConnections;
     }
 
+    public int GetMaxDownloadConnections()
+    {
+        return _downloadingClient?.MaxDownloadConnections ?? 0;
+    }
+
     public void UpdateMaxDownloadConnections(int maxDownloadConnections)
     {
         _downloadingClient?.UpdateMaxDownloadConnections(maxDownloadConnections);

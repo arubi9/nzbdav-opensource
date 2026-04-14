@@ -60,5 +60,26 @@ public sealed class NntpLeaseState
         }
     }
 
+    public int GetFreshProviderGrant(int providerIndex, DateTime utcNow)
+    {
+        lock (_lock)
+        {
+            return _leases.TryGetValue(providerIndex, out var lease) && lease.LeaseUntil > utcNow
+                ? lease.GrantedSlots
+                : 0;
+        }
+    }
+
+    public int GetFreshTotalGrantedSlots(IEnumerable<int> providerIndexes, DateTime utcNow)
+    {
+        lock (_lock)
+        {
+            return providerIndexes.Sum(providerIndex =>
+                _leases.TryGetValue(providerIndex, out var lease) && lease.LeaseUntil > utcNow
+                    ? lease.GrantedSlots
+                    : 0);
+        }
+    }
+
     private readonly record struct ProviderLeaseState(int GrantedSlots, long Epoch, DateTime LeaseUntil);
 }
