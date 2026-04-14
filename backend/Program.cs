@@ -23,6 +23,7 @@ using NzbWebDAV.Utils;
 using NzbWebDAV.WebDav;
 using NzbWebDAV.WebDav.Base;
 using Microsoft.AspNetCore.HttpOverrides;
+using NzbWebDAV.Services.NntpLeasing;
 using NzbWebDAV.Websocket;
 using Prometheus;
 using Serilog;
@@ -98,6 +99,8 @@ public partial class Program
 
         // initialize webapp
         var builder = WebApplication.CreateBuilder(args);
+        var usePerNodeLeasing = NntpLeaseAgent.ShouldUsePerNodeLeasing(MultiNodeMode.IsEnabled, NodeRoleConfig.Current);
+        var useLegacyConnectionCoordinator = MultiNodeMode.IsEnabled && NodeRoleConfig.Current == NodeRole.Combined;
         var maxRequestBodySize = EnvironmentUtil.GetLongVariable("MAX_REQUEST_BODY_SIZE") ?? 100 * 1024 * 1024;
         builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = maxRequestBodySize);
         builder.Services.Configure<HostOptions>(opts => opts.ShutdownTimeout = TimeSpan.FromSeconds(30));
@@ -113,6 +116,7 @@ public partial class Program
             .AddSingleton(encryptionService)
             .AddSingleton(configManager)
             .AddSingleton(websocketManager)
+            .AddSingleton<NntpLeaseState>()
             .AddSingleton(typeof(ObjectStorageSegmentCache), sp =>
             {
                 if (!configManager.IsL2Enabled())
@@ -150,15 +154,26 @@ public partial class Program
         {
             builder.Services
                 .AddSingleton<IAuthFailureTracker, PostgresAuthFailureTracker>()
-                .AddHostedService<ConnectionPoolCoordinator>()
                 .AddHostedService<WebsocketOutboxListener>();
+
+            if (useLegacyConnectionCoordinator)
+                builder.Services.AddHostedService<ConnectionPoolCoordinator>();
+
+            if (usePerNodeLeasing)
+            {
+                builder.Services
+                    .AddHostedService<NntpLeaseAllocator>()
+                    .AddHostedService<NntpLeaseAgent>();
+            }
 
             if (NodeRoleConfig.RunsIngest)
             {
                 builder.Services
                     .AddHostedService<AuthFailuresSweeper>()
-                    .AddHostedService<ConnectionPoolClaimSweeper>()
                     .AddHostedService<WebsocketOutboxSweeper>();
+
+                if (useLegacyConnectionCoordinator)
+                    builder.Services.AddHostedService<ConnectionPoolClaimSweeper>();
             }
         }
         else
@@ -180,6 +195,7 @@ public partial class Program
             sp.GetRequiredService<UsenetStreamingClient>(),
             sp.GetRequiredService<ReadAheadWarmingService>(),
             sp.GetRequiredService<QueueManager>(),
+            sp.GetRequiredService<NntpLeaseState>(),
             sp.GetService<ObjectStorageSegmentCache>(),
             sp.GetService<SharedHeaderCache>()));
 

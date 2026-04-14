@@ -1,6 +1,5 @@
 ﻿using System.Text.RegularExpressions;
 using NzbWebDAV.Clients.Usenet;
-using NzbWebDAV.Config;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Exceptions;
 using NzbWebDAV.Extensions;
@@ -16,7 +15,7 @@ public class SevenZipProcessor : BaseProcessor
 {
     private readonly List<GetFileInfosStep.FileInfo> _fileInfos;
     private readonly INntpClient _usenetClient;
-    private readonly ConfigManager _configManager;
+    private readonly int _missingFileSizeConcurrency;
     private readonly string? _archivePassword;
     private readonly CancellationToken _ct;
 
@@ -24,14 +23,14 @@ public class SevenZipProcessor : BaseProcessor
     (
         List<GetFileInfosStep.FileInfo> fileInfos,
         INntpClient usenetClient,
-        ConfigManager configManager,
+        int missingFileSizeConcurrency,
         string? archivePassword,
         CancellationToken ct
     )
     {
         _fileInfos = fileInfos;
         _usenetClient = usenetClient;
-        _configManager = configManager;
+        _missingFileSizeConcurrency = missingFileSizeConcurrency;
         _archivePassword = archivePassword;
         _ct = ct;
     }
@@ -123,10 +122,16 @@ public class SevenZipProcessor : BaseProcessor
         }
 
         // otherwise, let's populate the missing file sizes.
+        if (_missingFileSizeConcurrency <= 0)
+        {
+            throw new CouldNotConnectToUsenetException(
+                "No fresh NNTP lease capacity is currently available for background ingest work.");
+        }
+
         var progressPercentage = progress.ToPercentage(missingFileSizes.Count);
         var populatedFileSizes = await missingFileSizes
             .Select(PopulateMissingFileSize)
-            .WithConcurrencyAsync(_configManager.GetMaxDownloadConnections())
+            .WithConcurrencyAsync(_missingFileSizeConcurrency)
             .GetAllAsync(_ct, progressPercentage)
             .ConfigureAwait(false);
         progress.Report(100);

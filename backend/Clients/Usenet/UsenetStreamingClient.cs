@@ -9,10 +9,12 @@ public class UsenetStreamingClient : WrappingNntpClient
 {
     private readonly record struct PipelineResult(
         LiveSegmentCachingNntpClient Client,
+        DownloadingNntpClient DownloadingClient,
         MultiProviderNntpClient MultiProviderClient,
         ConnectionPoolStats Stats,
         IReadOnlyList<MultiConnectionNntpClient> ProviderClients);
     private volatile ConnectionPoolStats? _poolStats;
+    private volatile DownloadingNntpClient? _downloadingClient;
     private volatile MultiProviderNntpClient? _multiProviderClient;
     private volatile IReadOnlyList<MultiConnectionNntpClient> _providerClients = [];
 
@@ -45,6 +47,7 @@ public class UsenetStreamingClient : WrappingNntpClient
     ) : base(pipeline.Client)
     {
         _poolStats = pipeline.Stats;
+        _downloadingClient = pipeline.DownloadingClient;
         _multiProviderClient = pipeline.MultiProviderClient;
         _providerClients = pipeline.ProviderClients;
 
@@ -55,6 +58,7 @@ public class UsenetStreamingClient : WrappingNntpClient
             var nextPipeline = CreatePipeline(configManager, websocketManager, liveSegmentCache);
             ReplaceUnderlyingClient(nextPipeline.Client);
             _poolStats = nextPipeline.Stats;
+            _downloadingClient = nextPipeline.DownloadingClient;
             _multiProviderClient = nextPipeline.MultiProviderClient;
             _providerClients = nextPipeline.ProviderClients;
         };
@@ -70,7 +74,12 @@ public class UsenetStreamingClient : WrappingNntpClient
         var multiProviderResult = CreateMultiProviderClient(configManager, websocketManager);
         var downloadingClient = new DownloadingNntpClient(multiProviderResult.Client, configManager);
         var cachingClient = new LiveSegmentCachingNntpClient(downloadingClient, liveSegmentCache);
-        return new PipelineResult(cachingClient, multiProviderResult.Client, multiProviderResult.Stats, multiProviderResult.ProviderClients);
+        return new PipelineResult(
+            cachingClient,
+            downloadingClient,
+            multiProviderResult.Client,
+            multiProviderResult.Stats,
+            multiProviderResult.ProviderClients);
     }
 
     private static (MultiProviderNntpClient Client, ConnectionPoolStats Stats, IReadOnlyList<MultiConnectionNntpClient> ProviderClients) CreateMultiProviderClient
@@ -132,6 +141,16 @@ public class UsenetStreamingClient : WrappingNntpClient
             return 0;
 
         return _providerClients[providerIndex].MaxConnections;
+    }
+
+    public int GetMaxDownloadConnections()
+    {
+        return _downloadingClient?.MaxDownloadConnections ?? 0;
+    }
+
+    public void UpdateMaxDownloadConnections(int maxDownloadConnections)
+    {
+        _downloadingClient?.UpdateMaxDownloadConnections(maxDownloadConnections);
     }
 
     public static async ValueTask<INntpClient> CreateNewConnection

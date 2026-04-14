@@ -115,6 +115,9 @@ public sealed class DavDatabaseContext() : DbContext(CreateOptions())
     public DbSet<ConfigItem> ConfigItems => Set<ConfigItem>();
     public DbSet<WebsocketOutboxEntry> WebsocketOutbox => Set<WebsocketOutboxEntry>();
     public DbSet<AuthFailureEntry> AuthFailures => Set<AuthFailureEntry>();
+    public DbSet<NntpNodeHeartbeat> NntpNodeHeartbeats => Set<NntpNodeHeartbeat>();
+    public DbSet<NntpConnectionLease> NntpConnectionLeases => Set<NntpConnectionLease>();
+    public DbSet<NntpLeaseEpoch> NntpLeaseEpochs => Set<NntpLeaseEpoch>();
     public DbSet<ConnectionPoolClaim> ConnectionPoolClaims => Set<ConnectionPoolClaim>();
     public DbSet<BlobCleanupItem> BlobCleanupItems => Set<BlobCleanupItem>();
     public DbSet<MissingSegmentId> MissingSegmentIds => Set<MissingSegmentId>();
@@ -549,6 +552,89 @@ public sealed class DavDatabaseContext() : DbContext(CreateOptions())
                 .HasColumnName("window_start")
                 .IsRequired();
             e.HasIndex(x => x.WindowStart).HasDatabaseName("ix_auth_failures_window_start");
+        });
+
+        b.Entity<NntpNodeHeartbeat>(e =>
+        {
+            e.ToTable("nntp_node_heartbeats");
+            e.HasKey(x => new { x.NodeId, x.ProviderIndex });
+            e.Property(x => x.NodeId)
+                .HasColumnName("node_id")
+                .IsRequired();
+            e.Property(x => x.ProviderIndex)
+                .HasColumnName("provider_index")
+                .IsRequired();
+            e.Property(x => x.Role)
+                .HasColumnName("role")
+                .HasConversion<int>()
+                .IsRequired();
+            e.Property(x => x.Region)
+                .HasColumnName("region")
+                .IsRequired();
+            e.Property(x => x.DesiredSlots)
+                .HasColumnName("desired_slots")
+                .IsRequired();
+            e.Property(x => x.ActiveSlots)
+                .HasColumnName("active_slots")
+                .IsRequired();
+            e.Property(x => x.LiveSlots)
+                .HasColumnName("live_slots")
+                .IsRequired();
+            e.Property(x => x.HasDemand)
+                .HasColumnName("has_demand")
+                .IsRequired();
+            e.Property(x => x.HeartbeatAt)
+                .HasColumnName("heartbeat_at")
+                .HasDefaultValueSql("CURRENT_TIMESTAMP");
+            e.HasIndex(x => x.HeartbeatAt).HasDatabaseName("ix_nntp_node_heartbeats_heartbeat_at");
+        });
+
+        b.Entity<NntpConnectionLease>(e =>
+        {
+            e.ToTable("nntp_connection_leases");
+            e.HasKey(x => new { x.NodeId, x.ProviderIndex });
+            e.Property(x => x.NodeId)
+                .HasColumnName("node_id")
+                .IsRequired();
+            e.Property(x => x.ProviderIndex)
+                .HasColumnName("provider_index")
+                .IsRequired();
+            e.Property(x => x.Role)
+                .HasColumnName("role")
+                .HasConversion<int>()
+                .IsRequired();
+            e.Property(x => x.ReservedSlots)
+                .HasColumnName("reserved_slots")
+                .IsRequired();
+            e.Property(x => x.BorrowedSlots)
+                .HasColumnName("borrowed_slots")
+                .IsRequired();
+            e.Property(x => x.GrantedSlots)
+                .HasColumnName("granted_slots")
+                .IsRequired();
+            e.Property(x => x.Epoch)
+                .HasColumnName("epoch")
+                .IsRequired();
+            e.Property(x => x.LeaseUntil)
+                .HasColumnName("lease_until")
+                .IsRequired();
+            e.Property(x => x.UpdatedAt)
+                .HasColumnName("updated_at")
+                .HasDefaultValueSql("CURRENT_TIMESTAMP");
+            e.HasIndex(x => x.LeaseUntil).HasDatabaseName("ix_nntp_connection_leases_lease_until");
+        });
+
+        b.Entity<NntpLeaseEpoch>(e =>
+        {
+            e.ToTable("nntp_lease_epochs");
+            e.HasKey(x => x.ProviderIndex);
+            e.Property(x => x.ProviderIndex)
+                .HasColumnName("provider_index")
+                .ValueGeneratedNever()
+                .IsRequired();
+            e.Property(x => x.Epoch)
+                .HasColumnName("epoch")
+                .IsRequired();
         });
 
         b.Entity<ConnectionPoolClaim>(e =>

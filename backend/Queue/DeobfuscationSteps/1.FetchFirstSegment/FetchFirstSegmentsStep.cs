@@ -1,7 +1,6 @@
 // ReSharper disable InconsistentNaming
 
 using NzbWebDAV.Clients.Usenet;
-using NzbWebDAV.Config;
 using NzbWebDAV.Exceptions;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Models.Nzb;
@@ -15,15 +14,21 @@ public static class FetchFirstSegmentsStep
     (
         List<NzbFile> nzbFiles,
         INntpClient usenetClient,
-        ConfigManager configManager,
+        int concurrency,
         CancellationToken cancellationToken,
         IProgress<int>? progress = null
     )
     {
+        if (concurrency <= 0)
+        {
+            throw new CouldNotConnectToUsenetException(
+                "No fresh NNTP lease capacity is currently available for background ingest work.");
+        }
+
         return await nzbFiles
             .Where(x => x.Segments.Count > 0)
             .Select(x => FetchFirstSegment(x, usenetClient, cancellationToken))
-            .WithConcurrencyAsync(configManager.GetMaxDownloadConnections() + 5)
+            .WithConcurrencyAsync(concurrency)
             .GetAllAsync(cancellationToken, progress).ConfigureAwait(false);
     }
 

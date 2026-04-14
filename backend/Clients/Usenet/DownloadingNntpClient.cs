@@ -16,12 +16,15 @@ public class DownloadingNntpClient : WrappingNntpClient
 {
     private readonly ConfigManager _configManager;
     private readonly PrioritizedSemaphore _semaphore;
+    private volatile int _maxDownloadConnections;
+    public int MaxDownloadConnections => _maxDownloadConnections;
 
     public DownloadingNntpClient(INntpClient usenetClient, ConfigManager configManager) : base(usenetClient)
     {
         var maxDownloadConnections = configManager.GetMaxDownloadConnections();
         var streamingPriority = configManager.GetStreamingPriority();
         _configManager = configManager;
+        _maxDownloadConnections = maxDownloadConnections;
         _semaphore = new PrioritizedSemaphore(maxDownloadConnections, maxDownloadConnections, streamingPriority);
         configManager.OnConfigChanged += OnConfigChanged;
     }
@@ -31,7 +34,7 @@ public class DownloadingNntpClient : WrappingNntpClient
         if (e.ChangedConfig.ContainsKey("usenet.max-download-connections"))
         {
             var maxDownloadConnections = _configManager.GetMaxDownloadConnections();
-            _semaphore.UpdateMaxAllowed(maxDownloadConnections);
+            UpdateMaxDownloadConnections(maxDownloadConnections);
         }
 
         if (e.ChangedConfig.ContainsKey("usenet.streaming-priority"))
@@ -96,10 +99,17 @@ public class DownloadingNntpClient : WrappingNntpClient
 
     private Task AcquireExclusiveConnectionAsync(CancellationToken cancellationToken)
     {
-        _semaphore.ThrowIfOverloaded(_configManager.GetMaxDownloadConnections() * 2);
+        _semaphore.ThrowIfOverloaded(_maxDownloadConnections * 2);
         var downloadPriorityContext = cancellationToken.GetContext<DownloadPriorityContext>();
         var semaphorePriority = downloadPriorityContext?.Priority ?? SemaphorePriority.High;
         return _semaphore.WaitAsync(semaphorePriority, cancellationToken);
+    }
+
+    public void UpdateMaxDownloadConnections(int maxDownloadConnections)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(maxDownloadConnections);
+        _maxDownloadConnections = maxDownloadConnections;
+        _semaphore.UpdateMaxAllowed(maxDownloadConnections);
     }
 
     public override async Task<UsenetExclusiveConnection> AcquireExclusiveConnectionAsync

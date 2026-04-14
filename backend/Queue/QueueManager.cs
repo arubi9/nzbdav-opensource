@@ -3,6 +3,7 @@ using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Services;
+using NzbWebDAV.Services.NntpLeasing;
 using NzbWebDAV.Utils;
 using NzbWebDAV.Websocket;
 using Serilog;
@@ -18,6 +19,8 @@ public class QueueManager : IDisposable
     private readonly SemaphoreSlim _semaphore = new(1, 1);
     private readonly ConfigManager _configManager;
     private readonly WebsocketManager _websocketManager;
+    private readonly NntpLeaseState _leaseState;
+    private readonly bool _usePerNodeLeasing;
 
     private CancellationTokenSource _sleepingQueueToken = new();
     private readonly Lock _sleepingQueueLock = new();
@@ -29,12 +32,15 @@ public class QueueManager : IDisposable
     public QueueManager(
         UsenetStreamingClient usenetClient,
         ConfigManager configManager,
-        WebsocketManager websocketManager
+        WebsocketManager websocketManager,
+        NntpLeaseState leaseState
     )
     {
         _usenetClient = usenetClient;
         _configManager = configManager;
         _websocketManager = websocketManager;
+        _leaseState = leaseState;
+        _usePerNodeLeasing = NntpLeaseAgent.ShouldUsePerNodeLeasing(MultiNodeMode.IsEnabled, NodeRoleConfig.Current);
         _cancellationTokenSource = CancellationTokenSource
             .CreateLinkedTokenSource(SigtermUtil.GetCancellationToken());
         if (NodeRoleConfig.RunsIngest)
@@ -169,7 +175,7 @@ public class QueueManager : IDisposable
         var progressHook = new Progress<int>();
         var task = new QueueItemProcessor(
             queueItem, queueNzbStream, dbClient, usenetClient,
-            _configManager, _websocketManager, progressHook, cts.Token
+            _configManager, _websocketManager, _leaseState, _usePerNodeLeasing, progressHook, cts.Token
         ).ProcessAsync();
         var inProgressQueueItem = new InProgressQueueItem()
         {

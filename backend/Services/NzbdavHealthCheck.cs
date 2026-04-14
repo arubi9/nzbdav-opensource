@@ -3,15 +3,13 @@ using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
 using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Clients.Usenet.Caching;
+using NzbWebDAV.Config;
 using NzbWebDAV.Database;
+using NzbWebDAV.Services.NntpLeasing;
 
 namespace NzbWebDAV.Services;
 
-public class NzbdavHealthCheck(
-    LiveSegmentCache liveSegmentCache,
-    UsenetStreamingClient usenetClient,
-    IHostApplicationLifetime lifetime
-) : IHealthCheck
+public class NzbdavHealthCheck : IHealthCheck
 {
     // HYSTERESIS BANDS for saturation detection. Degraded state ENTERS at
     // 90% utilization but only EXITS at 80%. Without this, a cache or
@@ -33,12 +31,47 @@ public class NzbdavHealthCheck(
     private static volatile bool _cacheDegradedLatch;
     private static volatile bool _nntpDegradedLatch;
 
+    private readonly LiveSegmentCache _liveSegmentCache;
+    private readonly UsenetStreamingClient _usenetClient;
+    private readonly NntpLeaseState _leaseState;
+    private readonly IHostApplicationLifetime _lifetime;
+    private readonly Func<DateTime> _utcNow;
+    private readonly NodeRole _nodeRole;
+    private readonly bool _isMultiNode;
+
+    public NzbdavHealthCheck(
+        LiveSegmentCache liveSegmentCache,
+        UsenetStreamingClient usenetClient,
+        NntpLeaseState leaseState,
+        IHostApplicationLifetime lifetime)
+        : this(liveSegmentCache, usenetClient, leaseState, lifetime, () => DateTime.UtcNow, NodeRoleConfig.Current, MultiNodeMode.IsEnabled)
+    {
+    }
+
+    public NzbdavHealthCheck(
+        LiveSegmentCache liveSegmentCache,
+        UsenetStreamingClient usenetClient,
+        NntpLeaseState leaseState,
+        IHostApplicationLifetime lifetime,
+        Func<DateTime> utcNow,
+        NodeRole nodeRole,
+        bool isMultiNode)
+    {
+        _liveSegmentCache = liveSegmentCache;
+        _usenetClient = usenetClient;
+        _leaseState = leaseState;
+        _lifetime = lifetime;
+        _utcNow = utcNow;
+        _nodeRole = nodeRole;
+        _isMultiNode = isMultiNode;
+    }
+
     public async Task<HealthCheckResult> CheckHealthAsync(
         HealthCheckContext context,
         CancellationToken cancellationToken = default)
     {
         // Per failure model section 2: return Unhealthy during shutdown for LB draining
-        if (lifetime.ApplicationStopping.IsCancellationRequested)
+        if (_lifetime.ApplicationStopping.IsCancellationRequested)
             return HealthCheckResult.Unhealthy("Shutting down — draining connections");
 
         var data = new Dictionary<string, object>();
@@ -61,7 +94,7 @@ public class NzbdavHealthCheck(
         // Check 2: Cache directory writable
         try
         {
-            var testFile = Path.Combine(liveSegmentCache.CacheDirectory, ".health-check");
+            var testFile = Path.Combine(_liveSegmentCache.CacheDirectory, ".health-check");
             await File.WriteAllTextAsync(testFile, "ok", cancellationToken).ConfigureAwait(false);
             File.Delete(testFile);
             data["cache_directory"] = "writable";
@@ -73,10 +106,10 @@ public class NzbdavHealthCheck(
         }
 
         // Check 3: Cache utilization — per failure model section 3
-        var cacheStats = liveSegmentCache.GetStats();
+        var cacheStats = _liveSegmentCache.GetStats();
         data["cache_segments"] = cacheStats.CachedSegmentCount;
         data["cache_bytes"] = cacheStats.CachedBytes;
-        var maxBytes = liveSegmentCache.MaxCacheSizeBytes;
+        var maxBytes = _liveSegmentCache.MaxCacheSizeBytes;
         var cacheUtilization = maxBytes > 0 ? (double)cacheStats.CachedBytes / maxBytes : 0;
         data["cache_utilization"] = cacheUtilization;
         data["cache_max_bytes"] = maxBytes;
@@ -97,7 +130,7 @@ public class NzbdavHealthCheck(
             status = status == HealthStatus.Unhealthy ? HealthStatus.Unhealthy : HealthStatus.Degraded;
 
         // Check 4: NNTP pool utilization — per failure model section 1
-        var poolStats = usenetClient.PoolStats;
+        var poolStats = _usenetClient.PoolStats;
         if (poolStats != null)
         {
             var utilization = poolStats.MaxPooled > 0
@@ -125,11 +158,30 @@ public class NzbdavHealthCheck(
             data["nntp_pool"] = "not initialized";
         }
 
-        data["nntp_healthy_providers"] = usenetClient.HealthyProviderCount;
-        data["nntp_total_providers"] = usenetClient.TotalProviderCount;
-        if (usenetClient.TotalProviderCount > 0 && !usenetClient.HasAvailableProvider)
+        data["nntp_healthy_providers"] = _usenetClient.HealthyProviderCount;
+        data["nntp_total_providers"] = _usenetClient.TotalProviderCount;
+        if (_usenetClient.TotalProviderCount > 0 && !_usenetClient.HasAvailableProvider)
             status = HealthStatus.Unhealthy;
 
+        var localLeases = _leaseState.GetProviderLeaseObservations(_utcNow());
+        var freshLocalLeases = localLeases.Where(x => x.IsFresh).ToArray();
+        data["node_role"] = _nodeRole.ToString();
+        data["nntp_leasing_mode"] = GetLeasingMode(_nodeRole, _isMultiNode);
+        data["nntp_local_leases"] = localLeases;
+        data["nntp_local_lease_total_granted_slots"] = freshLocalLeases.Sum(x => x.GrantedSlots);
+        data["nntp_local_lease_total_reserved_slots"] = freshLocalLeases.Sum(x => x.ReservedSlots);
+        data["nntp_local_lease_total_borrowed_slots"] = freshLocalLeases.Sum(x => x.BorrowedSlots);
+
         return new HealthCheckResult(status, "NZBDAV health check", data: data);
+    }
+
+    private static string GetLeasingMode(NodeRole nodeRole, bool isMultiNode)
+    {
+        if (!isMultiNode)
+            return "disabled";
+
+        return nodeRole == NodeRole.Combined
+            ? "legacy_combined"
+            : "per_node";
     }
 }
