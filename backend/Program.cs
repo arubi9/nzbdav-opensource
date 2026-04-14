@@ -195,6 +195,7 @@ public partial class Program
             sp.GetRequiredService<UsenetStreamingClient>(),
             sp.GetRequiredService<ReadAheadWarmingService>(),
             sp.GetRequiredService<QueueManager>(),
+            sp.GetRequiredService<NntpLeaseState>(),
             sp.GetService<ObjectStorageSegmentCache>(),
             sp.GetService<SharedHeaderCache>()));
 

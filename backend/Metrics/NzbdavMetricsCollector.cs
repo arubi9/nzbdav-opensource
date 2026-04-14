@@ -3,6 +3,7 @@ using NzbWebDAV.Clients.Usenet.Caching;
 using NzbWebDAV.Clients.Usenet.Connections;
 using NzbWebDAV.Queue;
 using NzbWebDAV.Services;
+using NzbWebDAV.Services.NntpLeasing;
 using Prometheus;
 
 namespace NzbWebDAV.Metrics;
@@ -15,8 +16,11 @@ public sealed class NzbdavMetricsCollector
     private readonly Func<int> _getHealthyProviders;
     private readonly Func<int> _getWarmingSessions;
     private readonly Func<int> _getQueueProcessing;
+    private readonly Func<IReadOnlyList<NntpLeaseState.ProviderLeaseObservation>> _getLeaseObservations;
     private readonly Func<ObjectStorageSegmentCache?> _getL2Cache;
     private readonly Func<SharedHeaderCache?> _getSharedHeaderCache;
+    private readonly Lock _leaseMetricLock = new();
+    private readonly HashSet<int> _observedLeaseProviders = [];
 
     private readonly Gauge _cachedBytes;
     private readonly Gauge _cacheMaxBytes;
@@ -40,6 +44,11 @@ public sealed class NzbdavMetricsCollector
     private readonly Gauge _nntpActive;
     private readonly Gauge _nntpMax;
     private readonly Gauge _nntpProvidersHealthy;
+    private readonly Gauge _nntpLeaseSlots;
+    private readonly Gauge _nntpLeaseSlotsTotal;
+    private readonly Gauge _nntpLeaseEpoch;
+    private readonly Gauge _nntpLeaseFresh;
+    private readonly Gauge _nntpLeaseExpiresInSeconds;
     private readonly Gauge _warmingSessions;
     private readonly Gauge _queueProcessing;
 
@@ -70,6 +79,7 @@ public sealed class NzbdavMetricsCollector
         UsenetStreamingClient usenetClient,
         ReadAheadWarmingService warming,
         QueueManager queue,
+        NntpLeaseState leaseState,
         ObjectStorageSegmentCache? l2Cache = null,
         SharedHeaderCache? sharedHeaderCache = null
     ) : this(
@@ -79,6 +89,7 @@ public sealed class NzbdavMetricsCollector
         () => usenetClient.HealthyProviderCount,
         () => warming.ActiveSessionCount,
         () => queue.GetInProgressQueueItem().queueItem != null ? 1 : 0,
+        () => leaseState.GetProviderLeaseObservations(DateTime.UtcNow),
         () => l2Cache,
         () => sharedHeaderCache,
         Prometheus.Metrics.DefaultRegistry,
@@ -94,6 +105,7 @@ public sealed class NzbdavMetricsCollector
         Func<int> getHealthyProviders,
         Func<int> getWarmingSessions,
         Func<int> getQueueProcessing,
+        Func<IReadOnlyList<NntpLeaseState.ProviderLeaseObservation>> getLeaseObservations,
         Func<ObjectStorageSegmentCache?> getL2Cache,
         Func<SharedHeaderCache?> getSharedHeaderCache,
         CollectorRegistry registry,
@@ -106,6 +118,7 @@ public sealed class NzbdavMetricsCollector
         _getHealthyProviders = getHealthyProviders;
         _getWarmingSessions = getWarmingSessions;
         _getQueueProcessing = getQueueProcessing;
+        _getLeaseObservations = getLeaseObservations;
         _getL2Cache = getL2Cache;
         _getSharedHeaderCache = getSharedHeaderCache;
 
@@ -177,6 +190,26 @@ public sealed class NzbdavMetricsCollector
         _nntpProvidersHealthy = metricFactory.CreateGauge(
             "nzbdav_nntp_providers_healthy",
             "Number of NNTP providers not in cooldown");
+        _nntpLeaseSlots = metricFactory.CreateGauge(
+            "nzbdav_nntp_lease_slots",
+            "Current local NNTP lease slots by provider and slot kind",
+            ["kind", "provider_index"]);
+        _nntpLeaseSlotsTotal = metricFactory.CreateGauge(
+            "nzbdav_nntp_lease_slots_total",
+            "Current local NNTP lease slots summed across providers by slot kind",
+            ["kind"]);
+        _nntpLeaseEpoch = metricFactory.CreateGauge(
+            "nzbdav_nntp_lease_epoch",
+            "Current local NNTP lease epoch by provider",
+            ["provider_index"]);
+        _nntpLeaseFresh = metricFactory.CreateGauge(
+            "nzbdav_nntp_lease_fresh",
+            "1 if the local provider lease is fresh, 0 otherwise",
+            ["provider_index"]);
+        _nntpLeaseExpiresInSeconds = metricFactory.CreateGauge(
+            "nzbdav_nntp_lease_expires_in_seconds",
+            "Seconds until the local provider lease expires, clamped at 0",
+            ["provider_index"]);
 
         _warmingSessions = metricFactory.CreateGauge(
             "nzbdav_warming_sessions_active",
@@ -236,6 +269,7 @@ public sealed class NzbdavMetricsCollector
             }
 
             _nntpProvidersHealthy.Set(_getHealthyProviders());
+            UpdateLeaseMetrics(_getLeaseObservations());
 
             _warmingSessions.Set(_getWarmingSessions());
             _queueProcessing.Set(_getQueueProcessing());
@@ -252,6 +286,60 @@ public sealed class NzbdavMetricsCollector
         if (delta > 0)
             counter.Inc(delta);
         previousValue = currentValue;
+    }
+
+    private void UpdateLeaseMetrics(IReadOnlyList<NntpLeaseState.ProviderLeaseObservation> observations)
+    {
+        var totalGranted = observations.Sum(x => x.GrantedSlots);
+        var totalReserved = observations.Sum(x => x.ReservedSlots);
+        var totalBorrowed = observations.Sum(x => x.BorrowedSlots);
+
+        _nntpLeaseSlotsTotal.WithLabels("granted").Set(totalGranted);
+        _nntpLeaseSlotsTotal.WithLabels("reserved").Set(totalReserved);
+        _nntpLeaseSlotsTotal.WithLabels("borrowed").Set(totalBorrowed);
+
+        var currentProviderIndexes = observations
+            .Select(x => x.ProviderIndex)
+            .ToHashSet();
+
+        lock (_leaseMetricLock)
+        {
+            foreach (var staleProviderIndex in _observedLeaseProviders.Except(currentProviderIndexes).ToList())
+                SetLeaseMetrics(staleProviderIndex, grantedSlots: 0, reservedSlots: 0, borrowedSlots: 0, epoch: 0, isFresh: false, secondsUntilExpiry: 0);
+
+            foreach (var observation in observations)
+            {
+                SetLeaseMetrics(
+                    observation.ProviderIndex,
+                    observation.GrantedSlots,
+                    observation.ReservedSlots,
+                    observation.BorrowedSlots,
+                    observation.Epoch,
+                    observation.IsFresh,
+                    observation.SecondsUntilExpiry);
+            }
+
+            _observedLeaseProviders.Clear();
+            _observedLeaseProviders.UnionWith(currentProviderIndexes);
+        }
+    }
+
+    private void SetLeaseMetrics(
+        int providerIndex,
+        int grantedSlots,
+        int reservedSlots,
+        int borrowedSlots,
+        long epoch,
+        bool isFresh,
+        int secondsUntilExpiry)
+    {
+        var providerIndexLabel = providerIndex.ToString();
+        _nntpLeaseSlots.WithLabels("granted", providerIndexLabel).Set(grantedSlots);
+        _nntpLeaseSlots.WithLabels("reserved", providerIndexLabel).Set(reservedSlots);
+        _nntpLeaseSlots.WithLabels("borrowed", providerIndexLabel).Set(borrowedSlots);
+        _nntpLeaseEpoch.WithLabels(providerIndexLabel).Set(epoch);
+        _nntpLeaseFresh.WithLabels(providerIndexLabel).Set(isFresh ? 1 : 0);
+        _nntpLeaseExpiresInSeconds.WithLabels(providerIndexLabel).Set(secondsUntilExpiry);
     }
 
     public static void IncrementActiveStreams() => ActiveStreamsGauge.Inc();

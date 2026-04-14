@@ -189,7 +189,13 @@ public sealed class NntpLeaseAgent : BackgroundService
         {
             if (leaseByProviderIndex.TryGetValue(providerIndex, out var lease))
             {
-                _leaseState.Apply(lease.ProviderIndex, lease.GrantedSlots, lease.Epoch, lease.LeaseUntil);
+                _leaseState.Apply(
+                    lease.ProviderIndex,
+                    lease.GrantedSlots,
+                    lease.Epoch,
+                    lease.LeaseUntil,
+                    lease.ReservedSlots,
+                    lease.BorrowedSlots);
                 continue;
             }
 

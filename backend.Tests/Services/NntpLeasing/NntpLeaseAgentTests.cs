@@ -20,9 +20,10 @@ public sealed class NntpLeaseAgentTests
     public void Apply_TracksProviderGrantEpochFreshnessAndTotal()
     {
         var leaseState = new NntpLeaseState();
-        var leaseUntil = new DateTime(2026, 4, 14, 12, 0, 30, DateTimeKind.Utc);
+        var now = new DateTime(2026, 4, 14, 12, 0, 0, DateTimeKind.Utc);
+        var leaseUntil = now.AddSeconds(30);
 
-        leaseState.Apply(providerIndex: 0, grantedSlots: 4, epoch: 7, leaseUntil);
+        leaseState.Apply(providerIndex: 0, grantedSlots: 4, epoch: 7, leaseUntil, reservedSlots: 3, borrowedSlots: 1);
         leaseState.Apply(providerIndex: 1, grantedSlots: 2, epoch: 3, leaseUntil.AddSeconds(10));
 
         Assert.Equal(4, leaseState.GetProviderGrant(0));
@@ -37,6 +38,13 @@ public sealed class NntpLeaseAgentTests
         Assert.Equal(3, leaseState.GetTotalGrantedSlots());
         Assert.Equal(8, leaseState.GetProviderEpoch(0));
         Assert.False(leaseState.IsLeaseFresh(1, leaseUntil.AddSeconds(11)));
+
+        var observations = leaseState.GetProviderLeaseObservations(now);
+        Assert.Equal(2, observations.Length);
+        Assert.Equal(1, observations[0].ReservedSlots);
+        Assert.Equal(0, observations[0].BorrowedSlots);
+        Assert.True(observations[0].IsFresh);
+        Assert.Equal(50, observations[0].SecondsUntilExpiry);
     }
 
     [Fact]
@@ -45,8 +53,8 @@ public sealed class NntpLeaseAgentTests
         await using var harness = await SqliteLeaseAgentHarness.CreateAsync(CreateConfigManager(
             (ProviderType.Pooled, 10),
             (ProviderType.Pooled, 8)));
-        await harness.SeedLeaseAsync("stream-node", providerIndex: 0, NodeRole.Streaming, grantedSlots: 4, epoch: 9);
-        await harness.SeedLeaseAsync("stream-node", providerIndex: 1, NodeRole.Streaming, grantedSlots: 2, epoch: 5);
+        await harness.SeedLeaseAsync("stream-node", providerIndex: 0, NodeRole.Streaming, grantedSlots: 4, epoch: 9, reservedSlots: 3, borrowedSlots: 1);
+        await harness.SeedLeaseAsync("stream-node", providerIndex: 1, NodeRole.Streaming, grantedSlots: 2, epoch: 5, reservedSlots: 2, borrowedSlots: 0);
 
         var leaseState = new NntpLeaseState();
         var appliedProviderLimits = new Dictionary<int, int>();
@@ -81,6 +89,11 @@ public sealed class NntpLeaseAgentTests
         Assert.Equal(6, leaseState.GetTotalGrantedSlots());
         Assert.Equal(9, leaseState.GetProviderEpoch(0));
         Assert.Equal(5, leaseState.GetProviderEpoch(1));
+        var observations = leaseState.GetProviderLeaseObservations(harness.Now);
+        Assert.Equal(3, observations[0].ReservedSlots);
+        Assert.Equal(1, observations[0].BorrowedSlots);
+        Assert.Equal(2, observations[1].ReservedSlots);
+        Assert.Equal(0, observations[1].BorrowedSlots);
         Assert.Equal(4, appliedProviderLimits[0]);
         Assert.Equal(2, appliedProviderLimits[1]);
         Assert.Equal([6], appliedDownloadLimits);
@@ -299,7 +312,14 @@ public sealed class NntpLeaseAgentTests
             return new SqliteLeaseAgentHarness(configPath, environment, configManager);
         }
 
-        public async Task SeedLeaseAsync(string nodeId, int providerIndex, NodeRole role, int grantedSlots, long epoch)
+        public async Task SeedLeaseAsync(
+            string nodeId,
+            int providerIndex,
+            NodeRole role,
+            int grantedSlots,
+            long epoch,
+            int? reservedSlots = null,
+            int borrowedSlots = 0)
         {
             await using var dbContext = new DavDatabaseContext();
             dbContext.NntpConnectionLeases.Add(new NntpConnectionLease
@@ -307,8 +327,8 @@ public sealed class NntpLeaseAgentTests
                 NodeId = nodeId,
                 ProviderIndex = providerIndex,
                 Role = role,
-                ReservedSlots = grantedSlots,
-                BorrowedSlots = 0,
+                ReservedSlots = reservedSlots ?? grantedSlots,
+                BorrowedSlots = borrowedSlots,
                 GrantedSlots = grantedSlots,
                 Epoch = epoch,
                 LeaseUntil = Now.AddSeconds(30),

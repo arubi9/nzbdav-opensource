@@ -10,6 +10,7 @@ using NzbWebDAV.Database.Models;
 using NzbWebDAV.Metrics;
 using NzbWebDAV.Models;
 using NzbWebDAV.Services;
+using NzbWebDAV.Services.NntpLeasing;
 using NzbWebDAV.Websocket;
 using Prometheus;
 
@@ -23,6 +24,10 @@ public sealed class NzbdavMetricsCollectorTests
         var registry = Prometheus.Metrics.NewCustomRegistry();
         var factory = Prometheus.Metrics.WithCustomRegistry(registry);
         var poolStats = CreatePoolStats(maxConnections: 5, live: 4, idle: 1);
+        var now = new DateTime(2026, 4, 14, 12, 0, 0, DateTimeKind.Utc);
+        var leaseState = new NntpLeaseState();
+        leaseState.Apply(providerIndex: 0, grantedSlots: 4, epoch: 9, leaseUntil: now.AddSeconds(30), reservedSlots: 3, borrowedSlots: 1);
+        leaseState.Apply(providerIndex: 1, grantedSlots: 2, epoch: 5, leaseUntil: now.AddSeconds(-5), reservedSlots: 2, borrowedSlots: 0);
 
         var collector = new NzbdavMetricsCollector(
             () => new LiveSegmentCacheStats(
@@ -40,6 +45,7 @@ public sealed class NzbdavMetricsCollectorTests
             () => 1,
             () => 7,
             () => 1,
+            () => leaseState.GetProviderLeaseObservations(now),
             () => null,
             () => null,
             registry,
@@ -64,6 +70,17 @@ public sealed class NzbdavMetricsCollectorTests
         Assert.Contains("nzbdav_nntp_connections_active 3", metricsText);
         Assert.Contains("nzbdav_nntp_connections_max 5", metricsText);
         Assert.Contains("nzbdav_nntp_providers_healthy 1", metricsText);
+        Assert.Contains("nzbdav_nntp_lease_slots{kind=\"granted\",provider_index=\"0\"} 4", metricsText);
+        Assert.Contains("nzbdav_nntp_lease_slots{kind=\"reserved\",provider_index=\"0\"} 3", metricsText);
+        Assert.Contains("nzbdav_nntp_lease_slots{kind=\"borrowed\",provider_index=\"0\"} 1", metricsText);
+        Assert.Contains("nzbdav_nntp_lease_epoch{provider_index=\"0\"} 9", metricsText);
+        Assert.Contains("nzbdav_nntp_lease_fresh{provider_index=\"0\"} 1", metricsText);
+        Assert.Contains("nzbdav_nntp_lease_expires_in_seconds{provider_index=\"0\"} 30", metricsText);
+        Assert.Contains("nzbdav_nntp_lease_fresh{provider_index=\"1\"} 0", metricsText);
+        Assert.Contains("nzbdav_nntp_lease_expires_in_seconds{provider_index=\"1\"} 0", metricsText);
+        Assert.Contains("nzbdav_nntp_lease_slots_total{kind=\"granted\"} 6", metricsText);
+        Assert.Contains("nzbdav_nntp_lease_slots_total{kind=\"reserved\"} 5", metricsText);
+        Assert.Contains("nzbdav_nntp_lease_slots_total{kind=\"borrowed\"} 1", metricsText);
         Assert.Contains("nzbdav_warming_sessions_active 7", metricsText);
         Assert.Contains("nzbdav_queue_processing 1", metricsText);
         Assert.Contains("nzbdav_l2_cache_enabled 0", metricsText);
@@ -101,6 +118,7 @@ public sealed class NzbdavMetricsCollectorTests
             () => 0,
             () => 0,
             () => 0,
+            () => [],
             () => l2,
             () => null,
             registry,
@@ -134,6 +152,7 @@ public sealed class NzbdavMetricsCollectorTests
             () => 1,
             () => 0,
             () => 0,
+            () => [],
             () => null,
             () => sharedHeaderCache,
             registry,
