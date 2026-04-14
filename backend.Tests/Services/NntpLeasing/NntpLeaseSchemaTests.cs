@@ -24,6 +24,10 @@ public sealed class NntpLeaseSchemaTests : IClassFixture<PostgresHeaderCacheFixt
         await _fixture.ResetAsync();
         using var environment = new backend.Tests.Config.TemporaryEnvironment(("DATABASE_URL", _fixture.ConnectionString));
 
+        var heartbeatAt = DateTime.UtcNow;
+        var leaseUntil = heartbeatAt.AddMinutes(5);
+        var updatedAt = heartbeatAt.AddSeconds(1);
+
         await using (var dbContext = new DavDatabaseContext())
         {
             dbContext.NntpNodeHeartbeats.Add(new NntpNodeHeartbeat
@@ -36,7 +40,7 @@ public sealed class NntpLeaseSchemaTests : IClassFixture<PostgresHeaderCacheFixt
                 ActiveSlots = 1,
                 LiveSlots = 1,
                 HasDemand = true,
-                HeartbeatAt = DateTime.UtcNow
+                HeartbeatAt = heartbeatAt
             });
 
             dbContext.NntpConnectionLeases.Add(new NntpConnectionLease
@@ -48,8 +52,8 @@ public sealed class NntpLeaseSchemaTests : IClassFixture<PostgresHeaderCacheFixt
                 BorrowedSlots = 1,
                 GrantedSlots = 3,
                 Epoch = 42,
-                LeaseUntil = DateTime.UtcNow.AddMinutes(5),
-                UpdatedAt = DateTime.UtcNow
+                LeaseUntil = leaseUntil,
+                UpdatedAt = updatedAt
             });
 
             await dbContext.SaveChangesAsync();
@@ -57,8 +61,28 @@ public sealed class NntpLeaseSchemaTests : IClassFixture<PostgresHeaderCacheFixt
 
         await using (var dbContext = new DavDatabaseContext())
         {
-            Assert.Equal(1, await dbContext.NntpNodeHeartbeats.CountAsync());
-            Assert.Equal(1, await dbContext.NntpConnectionLeases.CountAsync());
+            var heartbeat = await dbContext.NntpNodeHeartbeats.AsNoTracking().SingleAsync();
+            var lease = await dbContext.NntpConnectionLeases.AsNoTracking().SingleAsync();
+
+            Assert.Equal("node-a", heartbeat.NodeId);
+            Assert.Equal(0, heartbeat.ProviderIndex);
+            Assert.Equal(NodeRole.Streaming, heartbeat.Role);
+            Assert.Equal("us-east-1", heartbeat.Region);
+            Assert.Equal(2, heartbeat.DesiredSlots);
+            Assert.Equal(1, heartbeat.ActiveSlots);
+            Assert.Equal(1, heartbeat.LiveSlots);
+            Assert.True(heartbeat.HasDemand);
+            Assert.Equal(heartbeatAt, heartbeat.HeartbeatAt, TimeSpan.FromMilliseconds(1));
+
+            Assert.Equal("node-a", lease.NodeId);
+            Assert.Equal(0, lease.ProviderIndex);
+            Assert.Equal(NodeRole.Streaming, lease.Role);
+            Assert.Equal(2, lease.ReservedSlots);
+            Assert.Equal(1, lease.BorrowedSlots);
+            Assert.Equal(3, lease.GrantedSlots);
+            Assert.Equal(42, lease.Epoch);
+            Assert.Equal(leaseUntil, lease.LeaseUntil, TimeSpan.FromMilliseconds(1));
+            Assert.Equal(updatedAt, lease.UpdatedAt, TimeSpan.FromMilliseconds(1));
         }
     }
 }
