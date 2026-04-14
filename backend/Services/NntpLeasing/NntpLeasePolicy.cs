@@ -38,8 +38,8 @@ public static class NntpLeasePolicy
 
         if (streamingHeartbeats.Count > 0 && ingestHeartbeats.Count > 0)
         {
-            var streamingBudget = totalSlots * StreamingReservePercent / 100;
             var ingestBudget = totalSlots * IngestReservePercent / 100;
+            var streamingBudget = totalSlots - ingestBudget;
 
             AllocateRoleBudget(grants, streamingHeartbeats, streamingBudget, currentEpoch);
             AllocateRoleBudget(grants, ingestHeartbeats, ingestBudget, currentEpoch);

@@ -70,7 +70,7 @@ public sealed class NntpLeasePolicyTests
     }
 
     [Fact]
-    public void Compute_NeverGrantsMoreThanTotalSlots()
+    public void Compute_WhenBothRolesHaveDemand_AllocatesAllSlotsWithStreamingRemainder()
     {
         var grants = NntpLeasePolicy.Compute(
             17,
@@ -83,10 +83,26 @@ public sealed class NntpLeasePolicyTests
             currentEpoch: 42);
 
         Assert.Equal(6, grants.Single(x => x.NodeId == "stream-a").GrantedSlots);
-        Assert.Equal(5, grants.Single(x => x.NodeId == "stream-b").GrantedSlots);
+        Assert.Equal(6, grants.Single(x => x.NodeId == "stream-b").GrantedSlots);
         Assert.Equal(3, grants.Single(x => x.NodeId == "ingest-a").GrantedSlots);
         Assert.Equal(2, grants.Single(x => x.NodeId == "ingest-b").GrantedSlots);
-        Assert.Equal(16, grants.Sum(x => x.GrantedSlots));
+        Assert.Equal(17, grants.Sum(x => x.GrantedSlots));
         Assert.True(grants.Sum(x => x.GrantedSlots) <= 17);
+    }
+
+    [Fact]
+    public void Compute_WhenBothRolesHaveDemand_PreservesStreamingFloorForSingleSlot()
+    {
+        var grants = NntpLeasePolicy.Compute(
+            1,
+            [
+                new NntpLeasePolicy.LeaseHeartbeat("stream-1", NntpLeaseNodeRole.Streaming, true),
+                new NntpLeasePolicy.LeaseHeartbeat("ingest-1", NntpLeaseNodeRole.Ingest, true)
+            ],
+            currentEpoch: 42);
+
+        Assert.Equal(1, grants.Single(x => x.NodeId == "stream-1").GrantedSlots);
+        Assert.Equal(0, grants.Single(x => x.NodeId == "ingest-1").GrantedSlots);
+        Assert.Equal(1, grants.Sum(x => x.GrantedSlots));
     }
 }
