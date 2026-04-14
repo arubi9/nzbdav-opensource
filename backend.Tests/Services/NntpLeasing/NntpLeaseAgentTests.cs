@@ -197,6 +197,35 @@ public sealed class NntpLeaseAgentTests
         Assert.Equal(4, client.GetMaxDownloadConnections());
     }
 
+    [Fact]
+    public async Task RunOnce_WhenSuccessfulRefreshReturnsNoLeaseForProvider_ClampsGrantToZeroImmediately()
+    {
+        await using var harness = await SqliteLeaseAgentHarness.CreateAsync(CreateConfigManager((ProviderType.Pooled, 10)));
+        var leaseState = new NntpLeaseState();
+        leaseState.Apply(providerIndex: 0, grantedSlots: 4, epoch: 9, harness.Now.AddSeconds(30));
+
+        var appliedProviderLimits = new Dictionary<int, int>();
+        var appliedDownloadLimits = new List<int>();
+        var agent = new NntpLeaseAgent(
+            harness.ConfigManager,
+            leaseState,
+            (providerIndex, grantedSlots) => appliedProviderLimits[providerIndex] = grantedSlots,
+            grantedSlots => appliedDownloadLimits.Add(grantedSlots),
+            () => new DavDatabaseContext(),
+            nodeIdFactory: () => "stream-node",
+            nodeRole: NodeRole.Streaming,
+            region: "test-region",
+            tickInterval: TimeSpan.FromMinutes(1),
+            utcNow: () => harness.Now);
+
+        await agent.RunOnce(CancellationToken.None);
+
+        Assert.Equal(0, leaseState.GetProviderGrant(0));
+        Assert.Equal(0, leaseState.GetTotalGrantedSlots());
+        Assert.Equal(0, appliedProviderLimits[0]);
+        Assert.Equal([0], appliedDownloadLimits);
+    }
+
     [Theory]
     [InlineData(false, NodeRole.Streaming, false)]
     [InlineData(true, NodeRole.Combined, false)]

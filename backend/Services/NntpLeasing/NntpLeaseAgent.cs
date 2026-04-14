@@ -147,7 +147,7 @@ public sealed class NntpLeaseAgent : BackgroundService
                     .ConfigureAwait(false);
 
             await dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            RefreshLeaseState(leases);
+            RefreshLeaseState(providerIndexes, leases, now);
             ReapplyCurrentFreshLimits(providerIndexes, now);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -178,11 +178,22 @@ public sealed class NntpLeaseAgent : BackgroundService
             .ToList();
     }
 
-    private void RefreshLeaseState(IEnumerable<NntpConnectionLease> leases)
+    private void RefreshLeaseState(
+        IReadOnlyCollection<int> providerIndexes,
+        IEnumerable<NntpConnectionLease> leases,
+        DateTime now)
     {
-        foreach (var lease in leases)
+        var leaseByProviderIndex = leases.ToDictionary(x => x.ProviderIndex);
+
+        foreach (var providerIndex in providerIndexes)
         {
-            _leaseState.Apply(lease.ProviderIndex, lease.GrantedSlots, lease.Epoch, lease.LeaseUntil);
+            if (leaseByProviderIndex.TryGetValue(providerIndex, out var lease))
+            {
+                _leaseState.Apply(lease.ProviderIndex, lease.GrantedSlots, lease.Epoch, lease.LeaseUntil);
+                continue;
+            }
+
+            _leaseState.Apply(providerIndex, grantedSlots: 0, epoch: 0, leaseUntil: now);
         }
     }
 
