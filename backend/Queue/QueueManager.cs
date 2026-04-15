@@ -88,6 +88,19 @@ public class QueueManager : IDisposable
 
     private async Task ProcessQueueAsync(CancellationToken ct)
     {
+        // When per-node leasing is active the NNTP pool starts at zero
+        // connections.  The lease agent needs one or two ticks (~10-20s)
+        // to write a heartbeat and receive a grant.  If the queue manager
+        // tries to process items before that grant arrives, every attempt
+        // fails, the provider circuit breaker trips, and the cascading
+        // cooldown prevents downloads even after the grant lands.
+        // Wait for the first non-zero grant before entering the loop.
+        if (_usePerNodeLeasing)
+        {
+            while (!ct.IsCancellationRequested && _leaseState.GetTotalGrantedSlots() <= 0)
+                await Task.Delay(TimeSpan.FromSeconds(2), ct).ConfigureAwait(false);
+        }
+
         while (!ct.IsCancellationRequested)
         {
             try

@@ -156,8 +156,16 @@ public class MultiProviderNntpClient(List<MultiConnectionNntpClient> providers) 
                 provider.Health.RegisterSuccess(provider.Client.ProviderType);
                 return result;
             }
+            catch (UsenetArticleNotFoundException)
+            {
+                // Missing articles are content errors, not provider failures.
+                // Do not trip the circuit breaker for DMCA'd or expired articles.
+                provider.Health.RegisterSuccess(provider.Client.ProviderType);
+                throw;
+            }
             catch (Exception e) when (!e.IsCancellationException())
             {
+                Log.Warning(e, "NNTP provider {Type} operation failed", provider.Client.ProviderType);
                 provider.Health.RegisterFailure(provider.Client.ProviderType);
                 lastException = ExceptionDispatchInfo.Capture(e);
             }
