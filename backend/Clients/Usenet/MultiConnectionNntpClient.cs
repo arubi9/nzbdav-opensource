@@ -35,6 +35,9 @@ public class MultiConnectionNntpClient(ConnectionPool<INntpClient> connectionPoo
         connectionPool.Resize(newMaxConnections);
     }
 
+    public Task WarmUpAsync(CancellationToken ct = default)
+        => connectionPool.WarmUpAsync(ct);
+
     public override Task ConnectAsync(string host, int port, bool useSsl, CancellationToken cancellationToken)
     {
         throw new NotSupportedException("Please connect within the connectionFactory");

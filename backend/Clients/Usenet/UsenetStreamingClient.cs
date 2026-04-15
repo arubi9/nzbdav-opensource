@@ -141,6 +141,9 @@ public class UsenetStreamingClient : WrappingNntpClient
     {
         var initialMaxConnections = Math.Max(1, maxConnections);
         var connectionPool = new ConnectionPool<INntpClient>(initialMaxConnections, connectionFactory);
+        // Keep warm connections ready for instant playback start.
+        // 10 idle connections avoid cold-start latency when a user hits play.
+        connectionPool.MinIdleConnections = 10;
         connectionPool.OnConnectionPoolChanged += onConnectionPoolChanged;
         if (maxConnections != initialMaxConnections)
             connectionPool.Resize(maxConnections);
@@ -154,7 +157,13 @@ public class UsenetStreamingClient : WrappingNntpClient
         if (providerIndex < 0 || providerIndex >= _providerClients.Count)
             return;
 
+        var prev = _providerClients[providerIndex].MaxConnections;
         _providerClients[providerIndex].Resize(maxConnections);
+
+        // When the pool grows (e.g. first lease grant), pre-create warm connections
+        // so the first stream request doesn't wait for NNTP handshakes.
+        if (maxConnections > prev)
+            _ = _providerClients[providerIndex].WarmUpAsync();
     }
 
     public int GetProviderPoolMaxConnections(int providerIndex)

@@ -28,6 +28,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
     public int IdleConnections => _idleConnections.Count;
     public int ActiveConnections => _live - _idleConnections.Count;
     public int AvailableConnections => Math.Max(0, MaxConnections - ActiveConnections);
+    public int MinIdleConnections { get; set; }
 
     public event EventHandler<ConnectionPoolStats.ConnectionPoolChangedEventArgs>? OnConnectionPoolChanged;
 
@@ -186,6 +187,34 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         TriggerConnectionPoolChangedEvent();
     }
 
+    /// <summary>
+    /// Pre-create connections up to <see cref="MinIdleConnections"/> so they
+    /// are ready for the first request without cold-start latency.
+    /// </summary>
+    public async Task WarmUpAsync(CancellationToken ct = default)
+    {
+        var target = Math.Min(MinIdleConnections, MaxConnections);
+        var tasks = new List<Task>();
+        for (var i = _live; i < target; i++)
+        {
+            tasks.Add(Task.Run(async () =>
+            {
+                try
+                {
+                    var conn = await _factory(ct).ConfigureAwait(false);
+                    Interlocked.Increment(ref _live);
+                    _idleConnections.Push(new Pooled(conn, Environment.TickCount64));
+                    TriggerConnectionPoolChangedEvent();
+                }
+                catch
+                {
+                    // Connection failed — don't crash warm-up, just fewer warm connections.
+                }
+            }, ct));
+        }
+        await Task.WhenAll(tasks).ConfigureAwait(false);
+    }
+
     /* =================== idle sweeper (background) ================================= */
 
     private async Task SweepLoop()
@@ -206,27 +235,37 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
     {
         var now = Environment.TickCount64;
         var survivors = new List<Pooled>();
-        var isAnyConnectionFreed = false;
+        var expired = new List<Pooled>();
 
         while (_idleConnections.TryPop(out var item))
         {
             if (item.IsExpired(IdleTimeout, now))
-            {
-                DisposeConnection(item.Connection);
-                Interlocked.Decrement(ref _live);
-                isAnyConnectionFreed = true;
-            }
+                expired.Add(item);
             else
-            {
                 survivors.Add(item);
-            }
+        }
+
+        // Keep at least MinIdleConnections alive — rescue the newest expired
+        // connections (lowest index = most recently expired) to meet the floor.
+        var minIdle = MinIdleConnections;
+        while (survivors.Count < minIdle && expired.Count > 0)
+        {
+            var rescued = expired[^1];
+            expired.RemoveAt(expired.Count - 1);
+            survivors.Add(new Pooled(rescued.Connection, Environment.TickCount64));
+        }
+
+        foreach (var item in expired)
+        {
+            DisposeConnection(item.Connection);
+            Interlocked.Decrement(ref _live);
         }
 
         // Preserve original LIFO order.
         for (var i = survivors.Count - 1; i >= 0; i--)
             _idleConnections.Push(survivors[i]);
 
-        if (isAnyConnectionFreed)
+        if (expired.Count > 0)
             TriggerConnectionPoolChangedEvent();
     }
 
