@@ -59,10 +59,14 @@ public sealed class NntpLeaseAgent : BackgroundService
                     // zero connections, reports no demand, and the allocator never
                     // grants slots (demand deadlock).
                     NodeRole.Streaming => true,
+                    // Ingest nodes have demand whenever queue items exist,
+                    // regardless of pause state.  Without this, temporarily
+                    // paused items cause has_demand=false → allocator grants
+                    // zero slots → items can never resume (demand deadlock).
                     NodeRole.Ingest => hasActiveNntp
                         || queueManager.GetInProgressQueueItem().queueItem is not null
                         || await dbContext.QueueItems
-                            .AnyAsync(x => x.PauseUntil == null || x.PauseUntil <= DateTime.UtcNow, cancellationToken)
+                            .AnyAsync(cancellationToken)
                             .ConfigureAwait(false),
                     _ => false
                 };
