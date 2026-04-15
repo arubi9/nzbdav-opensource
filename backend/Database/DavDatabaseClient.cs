@@ -88,7 +88,7 @@ public sealed class DavDatabaseClient(DavDatabaseContext ctx)
     )
     {
         // read queue item from database
-        var nowTime = DateTime.Now;
+        var nowTime = DateTime.UtcNow;
         var queueItem = await Ctx.QueueItems
             .OrderByDescending(q => q.Priority)
             .ThenBy(q => q.CreatedAt)

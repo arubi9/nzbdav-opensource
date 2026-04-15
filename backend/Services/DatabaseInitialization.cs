@@ -1,8 +1,11 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Storage;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Utils;
+using Serilog;
 
 namespace NzbWebDAV.Services;
 
@@ -13,22 +16,92 @@ public static class DatabaseInitialization
         CancellationToken cancellationToken,
         string? targetMigration = null)
     {
-        if (string.IsNullOrEmpty(EnvironmentUtil.GetDatabaseUrl()))
-        {
-            await databaseContext.Database
-                .MigrateAsync(targetMigration, cancellationToken)
-                .ConfigureAwait(false);
-            return;
-        }
+        var isPostgres = !string.IsNullOrEmpty(EnvironmentUtil.GetDatabaseUrl());
 
-        if (!string.IsNullOrEmpty(targetMigration))
-            throw new InvalidOperationException("Targeted migrations are not supported for PostgreSQL bootstrap mode.");
+        if (isPostgres)
+            await BootstrapMigrationHistoryIfNeededAsync(databaseContext, cancellationToken).ConfigureAwait(false);
 
         await databaseContext.Database
-            .EnsureCreatedAsync(cancellationToken)
+            .MigrateAsync(targetMigration, cancellationToken)
             .ConfigureAwait(false);
 
-        await SeedPostgresBootstrapDataAsync(databaseContext, cancellationToken).ConfigureAwait(false);
+        if (isPostgres)
+            await SeedPostgresBootstrapDataAsync(databaseContext, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Legacy Postgres databases were created with EnsureCreatedAsync which does
+    /// not create __EFMigrationsHistory.  Without the history table MigrateAsync
+    /// tries to re-apply every migration and fails on the first CREATE TABLE.
+    /// This method detects that case and seeds the history so that MigrateAsync
+    /// only applies genuinely new migrations.
+    /// </summary>
+    private static async Task BootstrapMigrationHistoryIfNeededAsync(
+        DavDatabaseContext databaseContext,
+        CancellationToken cancellationToken)
+    {
+        var conn = databaseContext.Database.GetDbConnection();
+        if (conn.State != System.Data.ConnectionState.Open)
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+        await using var cmd = conn.CreateCommand();
+
+        // Check if migration history table already exists with entries
+        cmd.CommandText = """
+            SELECT EXISTS(
+                SELECT 1 FROM information_schema.tables
+                WHERE table_name = '__EFMigrationsHistory'
+            )
+            """;
+        var historyTableExists = (bool)(await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
+
+        if (historyTableExists)
+        {
+            cmd.CommandText = """SELECT COUNT(*) FROM "__EFMigrationsHistory" """;
+            var count = (long)(await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
+            if (count > 0)
+                return; // Already bootstrapped — MigrateAsync will handle pending migrations
+        }
+
+        // Check if this is an existing DB (has application tables from EnsureCreated)
+        cmd.CommandText = """
+            SELECT EXISTS(
+                SELECT 1 FROM information_schema.tables
+                WHERE table_name = 'items'
+            )
+            """;
+        var hasExistingTables = (bool)(await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
+
+        if (!hasExistingTables)
+            return; // Fresh DB — MigrateAsync will create everything from scratch
+
+        // Legacy DB: create migration history and mark all known migrations as applied
+        Log.Information("Bootstrapping __EFMigrationsHistory for legacy Postgres database");
+
+        if (!historyTableExists)
+        {
+            cmd.CommandText = """
+                CREATE TABLE "__EFMigrationsHistory" (
+                    "MigrationId" VARCHAR(150) NOT NULL,
+                    "ProductVersion" VARCHAR(32) NOT NULL,
+                    CONSTRAINT "PK___EFMigrationsHistory" PRIMARY KEY ("MigrationId")
+                )
+                """;
+            await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        var allMigrations = databaseContext.Database.GetMigrations().ToList();
+        foreach (var migrationId in allMigrations)
+        {
+            cmd.CommandText = $"""
+                INSERT INTO "__EFMigrationsHistory" ("MigrationId", "ProductVersion")
+                VALUES ('{migrationId}', '8.0.0')
+                ON CONFLICT DO NOTHING
+                """;
+            await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        Log.Information("Bootstrapped {Count} migration entries into __EFMigrationsHistory", allMigrations.Count);
     }
 
     private static async Task SeedPostgresBootstrapDataAsync(

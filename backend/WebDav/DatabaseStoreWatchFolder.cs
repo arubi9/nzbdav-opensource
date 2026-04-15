@@ -65,7 +65,7 @@ public class DatabaseStoreWatchFolder(
             Category = configManager.GetManualUploadCategory(),
             Priority = QueueItem.PriorityOption.Normal,
             PostProcessing = QueueItem.PostProcessingOption.RepairUnpackDelete,
-            PauseUntil = DateTime.Now.AddSeconds(3),
+            PauseUntil = DateTime.UtcNow.AddSeconds(3),
             NzbFileStream = request.Stream,
             CancellationToken = request.CancellationToken
         };

@@ -54,14 +54,15 @@ public sealed class NntpLeaseAgent : BackgroundService
                 var hasActiveNntp = (streamingClient.PoolStats?.TotalActive ?? 0) > 0;
                 return NodeRoleConfig.Current switch
                 {
-                    NodeRole.Streaming => hasActiveNntp
-                        || streamingClient.GetPendingDownloadWaiters() > 0
-                        || warmingService.ActiveSessionCount > 0
-                        || NzbdavMetricsCollector.ActiveStreams > 0,
+                    // Streaming nodes always have demand — they must stay ready to
+                    // serve on-demand streams.  Without this the node starts with
+                    // zero connections, reports no demand, and the allocator never
+                    // grants slots (demand deadlock).
+                    NodeRole.Streaming => true,
                     NodeRole.Ingest => hasActiveNntp
                         || queueManager.GetInProgressQueueItem().queueItem is not null
                         || await dbContext.QueueItems
-                            .AnyAsync(x => x.PauseUntil == null || x.PauseUntil <= DateTime.Now, cancellationToken)
+                            .AnyAsync(x => x.PauseUntil == null || x.PauseUntil <= DateTime.UtcNow, cancellationToken)
                             .ConfigureAwait(false),
                     _ => false
                 };

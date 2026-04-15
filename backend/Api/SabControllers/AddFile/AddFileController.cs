@@ -46,7 +46,7 @@ public class AddFileController(
             queueItem = new QueueItem
             {
                 Id = id,
-                CreatedAt = DateTime.Now,
+                CreatedAt = DateTime.UtcNow,
                 FileName = request.FileName,
                 JobName = FilenameUtil.GetJobName(request.FileName),
                 NzbFileSize = nzbFileStream.Length,

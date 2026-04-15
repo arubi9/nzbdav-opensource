@@ -42,7 +42,7 @@ public class QueueItemProcessor(
     public async Task<bool> ProcessAsync()
     {
         // initialize
-        var startTime = DateTime.Now;
+        var startTime = DateTime.UtcNow;
         _ = websocketManager.SendMessage(WebsocketTopic.QueueItemStatus, $"{queueItem.Id}|Downloading");
 
         // process the job
@@ -70,7 +70,7 @@ public class QueueItemProcessor(
             {
                 Log.Error($"Failed to process job, `{queueItem.JobName}` -- {e.Message}");
                 dbClient.Ctx.ChangeTracker.Clear();
-                queueItem.PauseUntil = DateTime.Now.AddMinutes(1);
+                queueItem.PauseUntil = DateTime.UtcNow.AddMinutes(1);
                 dbClient.Ctx.QueueItems.Attach(queueItem);
                 dbClient.Ctx.Entry(queueItem).Property(x => x.PauseUntil).IsModified = true;
                 await dbClient.Ctx.SaveChangesAsync().ConfigureAwait(false);
@@ -348,7 +348,7 @@ public class QueueItemProcessor(
         return new HistoryItem()
         {
             Id = queueItem.Id,
-            CreatedAt = DateTime.Now,
+            CreatedAt = DateTime.UtcNow,
             FileName = queueItem.FileName,
             JobName = queueItem.JobName,
             Category = queueItem.Category,
@@ -356,7 +356,7 @@ public class QueueItemProcessor(
                 ? HistoryItem.DownloadStatusOption.Completed
                 : HistoryItem.DownloadStatusOption.Failed,
             TotalSegmentBytes = queueItem.TotalSegmentBytes,
-            DownloadTimeSeconds = (int)(DateTime.Now - jobStartTime).TotalSeconds,
+            DownloadTimeSeconds = (int)(DateTime.UtcNow - jobStartTime).TotalSeconds,
             FailMessage = errorMessage,
             DownloadDirId = mountFolder?.Id,
         };
