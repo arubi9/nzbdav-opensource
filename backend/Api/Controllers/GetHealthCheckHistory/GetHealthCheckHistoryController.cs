@@ -13,16 +13,19 @@ public class GetHealthCheckHistoryController(DavDatabaseClient dbClient) : BaseA
         var now = DateTime.UtcNow;
         var tomorrow = now.AddDays(1);
         var thirtyDaysAgo = now.AddDays(-30);
-        var statsPromise = dbClient.GetHealthCheckStatsAsync(thirtyDaysAgo, tomorrow);
-        var itemsPromise = dbClient.Ctx.HealthCheckResults
+        // DbContext is not concurrency-safe. Execute these queries serially.
+        var stats = await dbClient.GetHealthCheckStatsAsync(thirtyDaysAgo, tomorrow)
+            .ConfigureAwait(false);
+        var items = await dbClient.Ctx.HealthCheckResults
             .OrderByDescending(x => x.CreatedAt)
             .Take(request.PageSize)
-            .ToListAsync();
+            .ToListAsync()
+            .ConfigureAwait(false);
 
         return new GetHealthCheckHistoryResponse()
         {
-            Stats = await statsPromise.ConfigureAwait(false),
-            Items = await itemsPromise.ConfigureAwait(false)
+            Stats = stats,
+            Items = items
         };
     }
 
