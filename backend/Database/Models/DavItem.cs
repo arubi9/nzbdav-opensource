@@ -34,7 +34,7 @@ public class DavItem
         {
             Id = id,
             IdPrefix = id.GetFiveLengthPrefix(),
-            CreatedAt = DateTime.Now,
+            CreatedAt = DateTime.UtcNow,
             ParentId = parent.Id,
             Name = name,
             FileSize = fileSize,

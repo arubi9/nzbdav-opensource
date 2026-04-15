@@ -53,7 +53,7 @@ public class RemoveUnlinkedFilesTask(
         // determine paths to delete
         // only delete paths that have existed longer than a day
         var minExistance = TimeSpan.FromDays(1);
-        var dateThreshold = DateTime.Now.Subtract(minExistance);
+        var dateThreshold = DateTime.UtcNow.Subtract(minExistance);
         var allEmptyDirectories = allDavItems
             .Where(x => x.Type == DavItem.ItemType.Directory)
             .Where(x => x.CreatedAt < dateThreshold)
