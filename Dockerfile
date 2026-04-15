@@ -29,7 +29,7 @@ WORKDIR /app
 
 # Prepare environment
 RUN mkdir /config \
-    && apk add --no-cache nodejs npm libc6-compat shadow su-exec bash curl
+    && apk add --no-cache nodejs npm libc6-compat shadow su-exec bash curl krb5-libs
 
 # Copy frontend
 COPY --from=frontend-build /frontend/node_modules ./frontend/node_modules
