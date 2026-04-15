@@ -335,7 +335,14 @@ public class ConfigManager
     }
 
     public int GetCacheMaxSizeGb()
-        => int.Parse(StringUtil.EmptyToNull(GetConfigValue("cache.max-size-gb")) ?? "10");
+    {
+        // NZBDAV_CACHE_MAX_SIZE_GB overrides the shared DB config so each node
+        // can cap its local cache independently (e.g. ingest nodes with smaller disks).
+        var envOverride = EnvironmentUtil.GetEnvironmentVariable("NZBDAV_CACHE_MAX_SIZE_GB");
+        if (!string.IsNullOrEmpty(envOverride) && int.TryParse(envOverride, out var envGb))
+            return envGb;
+        return int.Parse(StringUtil.EmptyToNull(GetConfigValue("cache.max-size-gb")) ?? "10");
+    }
 
     public int GetCacheMaxAgeHours()
         => int.Parse(StringUtil.EmptyToNull(GetConfigValue("cache.max-age-hours")) ?? "6");
