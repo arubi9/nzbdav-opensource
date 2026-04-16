@@ -122,6 +122,7 @@ public sealed class LiveSegmentCache : IDisposable
     private readonly SharedHeaderCache? _sharedHeaderCache;
     private readonly CancellationTokenSource _pruneCts = new();
     private readonly Task _pruneLoopTask;
+    private readonly TimeSpan _pruneInterval;
     private long _maxCacheSizeBytes;
     private TimeSpan _maxAge;
     private bool _disposed;
@@ -135,7 +136,8 @@ public sealed class LiveSegmentCache : IDisposable
     public LiveSegmentCache(
         ConfigManager configManager,
         ObjectStorageSegmentCache? l2Cache = null,
-        SharedHeaderCache? sharedHeaderCache = null)
+        SharedHeaderCache? sharedHeaderCache = null,
+        TimeSpan? pruneInterval = null)
     {
         _l2Cache = l2Cache;
         _sharedHeaderCache = sharedHeaderCache;
@@ -143,6 +145,7 @@ public sealed class LiveSegmentCache : IDisposable
         CacheDirectory = configuredDir ?? Path.Join(DavDatabaseContext.ConfigPath, "stream-cache");
         _maxCacheSizeBytes = (long)configManager.GetCacheMaxSizeGb() * 1024 * 1024 * 1024;
         _maxAge = TimeSpan.FromHours(configManager.GetCacheMaxAgeHours());
+        _pruneInterval = pruneInterval ?? TimeSpan.FromSeconds(30);
         _headerCache = new MemoryCache(new MemoryCacheOptions { SizeLimit = 20_000 });
 
         configManager.OnConfigChanged += (_, args) =>
@@ -171,7 +174,8 @@ public sealed class LiveSegmentCache : IDisposable
         long maxCacheSizeBytes = 10L * 1024 * 1024 * 1024,
         TimeSpan? maxAge = null,
         ObjectStorageSegmentCache? l2Cache = null,
-        SharedHeaderCache? sharedHeaderCache = null
+        SharedHeaderCache? sharedHeaderCache = null,
+        TimeSpan? pruneInterval = null
     )
     {
         _l2Cache = l2Cache;
@@ -179,6 +183,7 @@ public sealed class LiveSegmentCache : IDisposable
         CacheDirectory = cacheDirectory;
         _maxCacheSizeBytes = maxCacheSizeBytes;
         _maxAge = maxAge ?? TimeSpan.FromHours(6);
+        _pruneInterval = pruneInterval ?? TimeSpan.FromSeconds(30);
         _headerCache = new MemoryCache(new MemoryCacheOptions { SizeLimit = 20_000 });
         InitializeAndRehydrate();
         _pruneLoopTask = Task.Run(PruneLoopAsync);
@@ -417,7 +422,7 @@ public sealed class LiveSegmentCache : IDisposable
     {
         try
         {
-            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
+            using var timer = new PeriodicTimer(_pruneInterval);
             while (await timer.WaitForNextTickAsync(_pruneCts.Token).ConfigureAwait(false))
             {
                 try

@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -183,6 +185,87 @@ public sealed class LiveSegmentCacheBehaviorTests
     public void SegmentCategoryClassifier_MapsExpectedExtensions(string fileName, SegmentCategory expectedCategory)
     {
         Assert.Equal(expectedCategory, SegmentCategoryClassifier.Classify(fileName));
+    }
+
+    [Fact]
+    public async Task GetOrAddBodyAsync_DoesNotBlockOnPruneLock()
+    {
+        await using var cacheScope = new TempCacheScope();
+        var fakeNntpClient = new FakeNntpClient()
+            .AddSegment("segment-a", Encoding.ASCII.GetBytes("AAAA"), partOffset: 0);
+
+        using var liveCache = new LiveSegmentCache(cacheScope.Path);
+
+        // Externally hold _pruneLock to simulate a concurrent prune being in flight.
+        var pruneLockField = typeof(LiveSegmentCache).GetField(
+            "_pruneLock",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(pruneLockField);
+        var pruneLock = (SemaphoreSlim)pruneLockField!.GetValue(liveCache)!;
+
+        await pruneLock.WaitAsync();
+        try
+        {
+            var stopwatch = Stopwatch.StartNew();
+            var fetchResult = await liveCache.GetOrAddBodyAsync(
+                "segment-a",
+                async ct =>
+                {
+                    var response = await fakeNntpClient.DecodedBodyAsync("segment-a", ct);
+                    var header = await response.Stream.GetYencHeadersAsync(ct);
+                    return new LiveSegmentCache.BodyFetchSource(response.Stream, header!, null);
+                },
+                CancellationToken.None);
+            stopwatch.Stop();
+
+            await fetchResult.Response.Stream.DisposeAsync();
+
+            // With the hot-path await PruneAsync removed, the call should return quickly even while
+            // _pruneLock is held. Before the fix this would have blocked until the lock released.
+            Assert.True(
+                stopwatch.ElapsedMilliseconds < 500,
+                $"GetOrAddBodyAsync blocked for {stopwatch.ElapsedMilliseconds}ms while _pruneLock was held");
+        }
+        finally
+        {
+            pruneLock.Release();
+        }
+    }
+
+    [Fact]
+    public async Task PruneLoop_RemovesExpiredEntries_WithoutExplicitCall()
+    {
+        await using var cacheScope = new TempCacheScope();
+        var fakeNntpClient = new FakeNntpClient()
+            .AddSegment("expiring", Encoding.ASCII.GetBytes("1111"), partOffset: 0);
+
+        // Short max-age so entries expire almost immediately, and short prune interval so the
+        // background loop ticks well within the test's polling window.
+        using var liveCache = new LiveSegmentCache(
+            cacheScope.Path,
+            maxCacheSizeBytes: 10L * 1024 * 1024 * 1024,
+            maxAge: TimeSpan.FromMilliseconds(100),
+            pruneInterval: TimeSpan.FromMilliseconds(200));
+        using var client = new LiveSegmentCachingNntpClient(fakeNntpClient, liveCache);
+
+        await CacheSegmentAsync(client, "expiring", SegmentCategory.Unknown, Guid.NewGuid());
+        Assert.True(liveCache.HasBody("expiring"));
+        var baselineEvictions = liveCache.GetStats().Evictions;
+
+        // Poll with short delays; once the prune loop ticks (every ~200ms) we should see the eviction.
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (liveCache.GetStats().Evictions > baselineEvictions)
+                break;
+            await Task.Delay(100);
+        }
+
+        var stats = liveCache.GetStats();
+        Assert.True(
+            stats.Evictions > baselineEvictions,
+            $"Expected background prune loop to evict expired entry within 5s; Evictions={stats.Evictions}, baseline={baselineEvictions}");
+        Assert.False(liveCache.HasBody("expiring"));
     }
 
     private static async Task CacheSegmentAsync(
