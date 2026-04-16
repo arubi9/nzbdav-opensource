@@ -94,9 +94,10 @@ fi
 cd /app/backend
 echo "Running database maintenance."
 su-exec "$USER_NAME" ./NzbWebDAV --db-migration
-if [ $? -ne 0 ]; then
-    echo "Database migration failed. Exiting with error code $?."
-    exit $?
+MIGRATION_EXIT_CODE=$?
+if [ "$MIGRATION_EXIT_CODE" -ne 0 ]; then
+    echo "Database migration failed. Exiting with error code $MIGRATION_EXIT_CODE."
+    exit $MIGRATION_EXIT_CODE
 fi
 echo "Done with database maintenance."
 

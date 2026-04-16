@@ -65,6 +65,30 @@ public sealed class HealthCheckServiceLeaseTests
         Assert.Equal(12, usenetClient.LastConcurrency);
     }
 
+    [Fact]
+    public async Task ConfigChange_UsenetProviders_ClearsMissingSegmentIds()
+    {
+        await using var harness = await SqliteHealthCheckHarness.CreateAsync();
+        await harness.SeedMissingSegmentIdAsync("segment-a@example.test");
+
+        var configManager = CreateRepairEnabledConfig(totalPooledConnections: 12, maxDownloadConnections: 2);
+        await using var cacheScope = new TempCacheScope();
+        using var liveCache = new LiveSegmentCache(cacheScope.Path);
+        using var usenetClient = new RecordingUsenetStreamingClient(configManager, new WebsocketManager(), liveCache);
+        _ = new HealthCheckService(configManager, usenetClient, new WebsocketManager(), new NntpLeaseState());
+
+        configManager.UpdateValues(
+        [
+            new ConfigItem
+            {
+                ConfigName = "usenet.providers",
+                ConfigValue = JsonSerializer.Serialize(new UsenetProviderConfig())
+            }
+        ]);
+
+        await harness.AssertMissingSegmentIdsClearedAsync();
+    }
+
     private static void SetPrivateField(object target, string fieldName, object value)
     {
         var field = target.GetType().BaseType?.GetField(
@@ -231,6 +255,34 @@ public sealed class HealthCheckServiceLeaseTests
                 SegmentIds = [segmentId]
             });
             await dbContext.SaveChangesAsync();
+        }
+
+        public async Task SeedMissingSegmentIdAsync(string segmentId)
+        {
+            await using var dbContext = new DavDatabaseContext();
+            dbContext.MissingSegmentIds.Add(new MissingSegmentId
+            {
+                SegmentId = segmentId,
+                DetectedAt = DateTimeOffset.UtcNow
+            });
+            await dbContext.SaveChangesAsync();
+        }
+
+        public async Task AssertMissingSegmentIdsClearedAsync()
+        {
+            var timeoutAt = DateTime.UtcNow.AddSeconds(2);
+            while (DateTime.UtcNow < timeoutAt)
+            {
+                await using var dbContext = new DavDatabaseContext();
+                var count = await dbContext.MissingSegmentIds.CountAsync();
+                if (count == 0)
+                    return;
+
+                await Task.Delay(50);
+            }
+
+            await using var verifyContext = new DavDatabaseContext();
+            Assert.Equal(0, await verifyContext.MissingSegmentIds.CountAsync());
         }
 
         public ValueTask DisposeAsync()

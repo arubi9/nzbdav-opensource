@@ -5,14 +5,18 @@ namespace NzbWebDAV.Middlewares;
 public class RequestTimeoutMiddleware(RequestDelegate next)
 {
     private static readonly TimeSpan MetadataTimeout = TimeSpan.FromSeconds(30);
-    private static readonly TimeSpan StreamTimeout = TimeSpan.FromMinutes(5);
 
     public async Task InvokeAsync(HttpContext context)
     {
-        var timeout = IsStreamingRequest(context) ? StreamTimeout : MetadataTimeout;
+        if (IsStreamingRequest(context))
+        {
+            await next(context).ConfigureAwait(false);
+            return;
+        }
+
         var originalAbortToken = context.RequestAborted;
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(originalAbortToken);
-        cts.CancelAfter(timeout);
+        cts.CancelAfter(MetadataTimeout);
         context.RequestAborted = cts.Token;
 
         try

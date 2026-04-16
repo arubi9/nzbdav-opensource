@@ -43,7 +43,7 @@ public class HealthCheckService : BackgroundService
 
         _configManager.OnConfigChanged += (_, configEventArgs) =>
         {
-            if (!configEventArgs.ChangedConfig.ContainsKey("usenet.host")) return;
+            if (!configEventArgs.ChangedConfig.ContainsKey("usenet.providers")) return;
             _ = Task.Run(async () =>
             {
                 try
