@@ -88,7 +88,7 @@ public class NzbdavLibrarySyncTask : IScheduledTask
         }
 
         var allItems = manifest.Items.ToDictionary(i => i.Id);
-        var expectedRelativePaths = BuildExpectedStrmRelativePaths(manifest.Items);
+        var expectedRelativePaths = BuildExpectedStrmRelativePaths(manifest.Items, allItems);
         var runId = CreateRunId();
 
         // Find all video files
@@ -173,39 +173,60 @@ public class NzbdavLibrarySyncTask : IScheduledTask
             .Select(NormalizeRelativePath)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var quarantineRoot = Path.Combine(libraryRoot, ".quarantine", runId);
+        EnsureQuarantineRoot(libraryRoot);
+        var quarantinedCount = 0;
 
         foreach (var strmPath in Directory.EnumerateFiles(libraryRoot, "*.strm", SearchOption.AllDirectories))
         {
-            var relativePath = Path.GetRelativePath(libraryRoot, strmPath);
-            if (IsUnderQuarantine(relativePath))
-                continue;
-
-            var strmContent = File.ReadAllText(strmPath);
-            if (!IsNzbdavManagedStrmContent(strmContent, config.NzbdavBaseUrl))
-                continue;
-
-            var normalizedRelativePath = NormalizeRelativePath(relativePath);
-            if (expected.Contains(normalizedRelativePath))
-                continue;
-
-            var quarantineRelativePath = GetQuarantineRelativePath(relativePath, runId);
-            var quarantineStrmPath = Path.Combine(libraryRoot, quarantineRelativePath);
-            MoveFilePreservingStructure(strmPath, quarantineStrmPath);
-
-            var probePath = Path.ChangeExtension(strmPath, ".mediainfo.json");
-            if (File.Exists(probePath))
+            try
             {
-                var quarantineProbePath = Path.ChangeExtension(quarantineStrmPath, ".mediainfo.json");
-                MoveFilePreservingStructure(probePath, quarantineProbePath);
-            }
+                var relativePath = Path.GetRelativePath(libraryRoot, strmPath);
+                if (IsUnderQuarantine(relativePath))
+                    continue;
 
-            _logger.LogInformation("Quarantined stale NZBDAV mirror file: {Path}", normalizedRelativePath);
+                var strmContent = File.ReadLines(strmPath).FirstOrDefault();
+                if (!IsNzbdavManagedStrmContent(strmContent ?? string.Empty, config.NzbdavBaseUrl))
+                    continue;
+
+                var normalizedRelativePath = NormalizeRelativePath(relativePath);
+                if (expected.Contains(normalizedRelativePath))
+                    continue;
+
+                var quarantineRelativePath = GetQuarantineRelativePath(relativePath, runId);
+                var quarantineStrmPath = Path.Combine(libraryRoot, quarantineRelativePath);
+                MoveFilePreservingStructure(strmPath, quarantineStrmPath);
+
+                var probePath = Path.ChangeExtension(strmPath, ".mediainfo.json");
+                if (File.Exists(probePath))
+                {
+                    var quarantineProbePath = Path.Combine(
+                        libraryRoot,
+                        GetQuarantineRelativePath(Path.ChangeExtension(relativePath, ".mediainfo.json"), runId));
+                    MoveFilePreservingStructure(probePath, quarantineProbePath);
+                }
+
+                quarantinedCount++;
+                _logger.LogInformation("Quarantined stale NZBDAV mirror file: {Path}", normalizedRelativePath);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to quarantine stale NZBDAV mirror file: {Path}", strmPath);
+            }
+        }
+
+        if (quarantinedCount > 0)
+        {
+            _logger.LogInformation(
+                "Quarantined {Count} stale NZBDAV mirror file(s) into {QuarantineRoot}. Retention is manual.",
+                quarantinedCount,
+                quarantineRoot);
         }
     }
 
-    private static string[] BuildExpectedStrmRelativePaths(ManifestItem[] items)
+    private static string[] BuildExpectedStrmRelativePaths(
+        ManifestItem[] items,
+        IReadOnlyDictionary<Guid, ManifestItem> allItems)
     {
-        var allItems = items.ToDictionary(i => i.Id);
         return items
             .Where(i => i.Type is "nzb_file" or "rar_file" or "multipart_file")
             .Where(i => IsVideoFile(i.Name))
@@ -234,7 +255,7 @@ public class NzbdavLibrarySyncTask : IScheduledTask
 
     private static string GetQuarantineRelativePath(string relativePath, string runId)
     {
-        return Path.Combine(".quarantine", runId, relativePath);
+        return Path.Combine(".quarantine", runId, relativePath + ".quarantined");
     }
 
     private static bool IsUnderQuarantine(string relativePath)
@@ -259,9 +280,20 @@ public class NzbdavLibrarySyncTask : IScheduledTask
         File.Move(sourcePath, destinationPath);
     }
 
+    private static void EnsureQuarantineRoot(string libraryRoot)
+    {
+        var quarantineRoot = Path.Combine(libraryRoot, ".quarantine");
+        Directory.CreateDirectory(quarantineRoot);
+        var noMediaPath = Path.Combine(quarantineRoot, ".nomedia");
+        if (!File.Exists(noMediaPath))
+            File.WriteAllText(noMediaPath, "NZBDAV quarantine - do not scan");
+    }
+
     private static string CreateRunId()
     {
-        return DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
+        return DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmssfff'Z'", CultureInfo.InvariantCulture)
+               + "-"
+               + Guid.NewGuid().ToString("N")[..8];
     }
 
     private static bool IsVideoFile(string filename)
