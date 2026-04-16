@@ -5,9 +5,12 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Hosting;
 using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Clients.Usenet.Caching;
+using NzbWebDAV.Clients.Usenet.Concurrency;
+using NzbWebDAV.Clients.Usenet.Contexts;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
+using NzbWebDAV.Extensions;
 using NzbWebDAV.Queue;
 using NzbWebDAV.Utils;
 using Serilog;
@@ -109,30 +112,50 @@ public class MediaProbeService : BackgroundService
 
             Log.Information("ProbeDataGenerator backfill: {Missing}/{Total} items need probe data", missing.Count, videoItems.Count);
 
-            var generated = 0;
-            foreach (var item in missing)
-            {
-                ct.ThrowIfCancellationRequested();
-                try
-                {
-                    await ProbeAndCacheFile(new DavDatabaseContext(), item, ct).ConfigureAwait(false);
-                    generated++;
-                    if (generated % 20 == 0)
-                        Log.Information("ProbeDataGenerator backfill progress: {Done}/{Total}", generated, missing.Count);
-                }
-                catch (Exception e)
-                {
-                    Log.Debug("Backfill probe failed for {Name}: {Error}", item.Name, e.Message);
-                }
-            }
-
-            Log.Information("ProbeDataGenerator backfill complete: {Generated}/{Missing} probes created", generated, missing.Count);
+            await ProcessBackfillBatchAsync(
+                missing,
+                (item, innerCt) => ProbeAndCacheFile(new DavDatabaseContext(), item, innerCt),
+                ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
         catch (Exception e)
         {
             Log.Warning(e, "ProbeDataGenerator backfill failed");
         }
+    }
+
+    /// <summary>
+    /// Iterates the backfill batch under a Low-priority download scope so that
+    /// NNTP connections acquired by the processor (e.g. first/last-segment
+    /// prefetch) yield to live streams. The 80/20 priority-odds guard in
+    /// <c>PrioritizedSemaphore</c> still prevents starvation of the backfill.
+    /// </summary>
+    internal static async Task ProcessBackfillBatchAsync(
+        IReadOnlyList<DavItem> items,
+        Func<DavItem, CancellationToken, Task> processItem,
+        CancellationToken ct)
+    {
+        using var priorityScope = ct.SetContext(
+            new DownloadPriorityContext { Priority = SemaphorePriority.Low });
+
+        var generated = 0;
+        foreach (var item in items)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                await processItem(item, ct).ConfigureAwait(false);
+                generated++;
+                if (generated % 20 == 0)
+                    Log.Information("ProbeDataGenerator backfill progress: {Done}/{Total}", generated, items.Count);
+            }
+            catch (Exception e)
+            {
+                Log.Debug("Backfill probe failed for {Name}: {Error}", item.Name, e.Message);
+            }
+        }
+
+        Log.Information("ProbeDataGenerator backfill complete: {Generated}/{Missing} probes created", generated, items.Count);
     }
 
     private async Task ProbeFilesForJob(QueueManager.NzbProcessedEventArgs args, CancellationToken ct)

@@ -29,4 +29,8 @@
       <EmbeddedResource Include="WebDav\StaticFiles\root\README.md" />
     </ItemGroup>
 
+    <ItemGroup>
+      <InternalsVisibleTo Include="backend.Tests" />
+    </ItemGroup>
+
 </Project>
