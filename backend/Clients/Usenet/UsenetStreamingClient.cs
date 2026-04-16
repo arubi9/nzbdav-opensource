@@ -142,8 +142,9 @@ public class UsenetStreamingClient : WrappingNntpClient
         var initialMaxConnections = Math.Max(1, maxConnections);
         var connectionPool = new ConnectionPool<INntpClient>(initialMaxConnections, connectionFactory);
         // Keep warm connections ready for instant playback start.
-        // 10 idle connections avoid cold-start latency when a user hits play.
-        connectionPool.MinIdleConnections = 10;
+        // 30 idle connections ensure parallel segment fetches fire instantly
+        // for multiple concurrent streaming users.
+        connectionPool.MinIdleConnections = 30;
         connectionPool.OnConnectionPoolChanged += onConnectionPoolChanged;
         if (maxConnections != initialMaxConnections)
             connectionPool.Resize(maxConnections);
