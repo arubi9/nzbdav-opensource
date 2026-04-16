@@ -222,6 +222,12 @@ public partial class Program
         if (WebApplicationAuthExtensions.IsWebdavAuthDisabled())
             builder.Services.AddHostedService<InsecureAuthWarningService>();
 
+        // MediaProbeService runs on streaming nodes too — the backfill generates
+        // probe-{id}.json files so the manifest reports HasProbeData=true and
+        // the Jellyfin plugin writes .mediainfo.json sidecars (no remote ffprobe).
+        if (NodeRoleConfig.RunsStreaming && !NodeRoleConfig.RunsIngest)
+            builder.Services.AddHostedService<MediaProbeService>();
+
         if (NodeRoleConfig.RunsStreaming)
         {
             builder.Services.AddNWebDav(opts =>

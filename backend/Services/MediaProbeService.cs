@@ -57,6 +57,9 @@ public class MediaProbeService : BackgroundService
 
         Log.Information("FFmpeg pre-probing enabled via {Path}", _ffprobePath);
 
+        // Backfill probe data for items processed before ffprobe was available
+        _ = Task.Run(() => BackfillMissingProbes(stoppingToken), stoppingToken);
+
         _queueManager.OnNzbProcessed += (_, args) => _channel.Writer.TryWrite(args);
 
         await foreach (var args in _channel.Reader.ReadAllAsync(stoppingToken).ConfigureAwait(false))
@@ -73,6 +76,62 @@ public class MediaProbeService : BackgroundService
             {
                 Log.Debug("Media probe error for job {JobName}: {Error}", args.JobName, e.Message);
             }
+        }
+    }
+
+    private async Task BackfillMissingProbes(CancellationToken ct)
+    {
+        try
+        {
+            // Wait for services to stabilize
+            await Task.Delay(TimeSpan.FromSeconds(60), ct).ConfigureAwait(false);
+
+            await using var dbContext = new DavDatabaseContext();
+            var videoItems = await dbContext.Items
+                .AsNoTracking()
+                .Where(x => x.Path.StartsWith("/content/") &&
+                            x.Type != DavItem.ItemType.Directory &&
+                            x.FileSize != null && x.FileSize > 0)
+                .ToListAsync(ct)
+                .ConfigureAwait(false);
+
+            var cacheDir = _liveSegmentCache.CacheDirectory;
+            var missing = videoItems
+                .Where(x => FilenameUtil.IsVideoFile(x.Name))
+                .Where(x => !File.Exists(Path.Combine(cacheDir, $"probe-{x.Id:N}.json")))
+                .ToList();
+
+            if (missing.Count == 0)
+            {
+                Log.Information("ProbeDataGenerator backfill: all {Total} items already have probe data", videoItems.Count);
+                return;
+            }
+
+            Log.Information("ProbeDataGenerator backfill: {Missing}/{Total} items need probe data", missing.Count, videoItems.Count);
+
+            var generated = 0;
+            foreach (var item in missing)
+            {
+                ct.ThrowIfCancellationRequested();
+                try
+                {
+                    await ProbeAndCacheFile(new DavDatabaseContext(), item, ct).ConfigureAwait(false);
+                    generated++;
+                    if (generated % 20 == 0)
+                        Log.Information("ProbeDataGenerator backfill progress: {Done}/{Total}", generated, missing.Count);
+                }
+                catch (Exception e)
+                {
+                    Log.Debug("Backfill probe failed for {Name}: {Error}", item.Name, e.Message);
+                }
+            }
+
+            Log.Information("ProbeDataGenerator backfill complete: {Generated}/{Missing} probes created", generated, missing.Count);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (Exception e)
+        {
+            Log.Warning(e, "ProbeDataGenerator backfill failed");
         }
     }
 
