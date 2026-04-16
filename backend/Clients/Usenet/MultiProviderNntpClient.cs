@@ -163,6 +163,15 @@ public class MultiProviderNntpClient(List<MultiConnectionNntpClient> providers) 
                 provider.Health.RegisterSuccess(provider.Client.ProviderType);
                 throw;
             }
+            catch (Exception e) when (IsStaleConnectionError(e))
+            {
+                // Stale/corrupt NNTP connections (e.g. "Invalid NNTP Response")
+                // are transient — the connection was idle too long and the server
+                // dropped it.  Don't trip the circuit breaker; the retry in
+                // RunWithConnection already replaced the bad connection.
+                Log.Debug(e, "NNTP stale connection error (not a provider failure)");
+                lastException = ExceptionDispatchInfo.Capture(e);
+            }
             catch (Exception e) when (!e.IsCancellationException())
             {
                 Log.Warning(e, "NNTP provider {Type} operation failed", provider.Client.ProviderType);
@@ -173,6 +182,25 @@ public class MultiProviderNntpClient(List<MultiConnectionNntpClient> providers) 
 
         lastException?.Throw();
         throw new Exception("There are no usenet providers configured.");
+    }
+
+    private static bool IsStaleConnectionError(Exception e)
+    {
+        // Walk the exception chain looking for UsenetProtocolException or
+        // common stale-connection indicators (reset, broken pipe, EOF).
+        for (var ex = e; ex != null; ex = ex.InnerException)
+        {
+            var typeName = ex.GetType().Name;
+            if (typeName.Contains("UsenetProtocol", StringComparison.OrdinalIgnoreCase))
+                return true;
+            var msg = ex.Message;
+            if (msg.Contains("Invalid NNTP Response", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("connection was reset", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("broken pipe", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("end of stream", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
     }
 
     private List<ProviderEntry> GetOrderedProviders()
