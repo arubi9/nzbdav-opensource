@@ -10,6 +10,15 @@ public sealed class NzbdavLibrarySyncTaskTests
     private static readonly MethodInfo BuildRelativePathMethod = typeof(NzbdavLibrarySyncTask)
         .GetMethod("BuildStrmRelativePath", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Could not find BuildStrmRelativePath.");
+    private static readonly MethodInfo IsNzbdavManagedStrmContentMethod = typeof(NzbdavLibrarySyncTask)
+        .GetMethod("IsNzbdavManagedStrmContent", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Could not find IsNzbdavManagedStrmContent.");
+    private static readonly MethodInfo GetQuarantineRelativePathMethod = typeof(NzbdavLibrarySyncTask)
+        .GetMethod("GetQuarantineRelativePath", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Could not find GetQuarantineRelativePath.");
+    private static readonly MethodInfo BuildExpectedStrmRelativePathsMethod = typeof(NzbdavLibrarySyncTask)
+        .GetMethod("BuildExpectedStrmRelativePaths", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Could not find BuildExpectedStrmRelativePaths.");
 
     [Fact]
     public void BuildStrmRelativePath_UsesParentDirectoryName_ForObfuscatedVideoFile()
@@ -90,11 +99,93 @@ public sealed class NzbdavLibrarySyncTaskTests
         Assert.Equal(Normalize(Path.Combine("movies", parent.Name, video.Name)), Normalize(result));
     }
 
+    [Fact]
+    public void IsNzbdavManagedStrmContent_ReturnsTrue_ForMatchingBaseUrlAndApiStream()
+    {
+        var result = InvokeIsNzbdavManagedStrmContent(
+            "https://nzbdav.example/api/stream/abc?apikey=secret",
+            "https://nzbdav.example");
+
+        Assert.True(result);
+    }
+
+    [Fact]
+    public void IsNzbdavManagedStrmContent_ReturnsFalse_ForForeignUrl()
+    {
+        var result = InvokeIsNzbdavManagedStrmContent(
+            "https://other.example/video.strm",
+            "https://nzbdav.example");
+
+        Assert.False(result);
+    }
+
+    [Fact]
+    public void GetQuarantineRelativePath_PreservesRelativeStructureUnderQuarantineRoot()
+    {
+        var result = InvokeGetQuarantineRelativePath(
+            Path.Combine("shows", "Series", "Episode.strm"),
+            "20260416-120000");
+
+        Assert.Equal(
+            Normalize(Path.Combine(".quarantine", "20260416-120000", "shows", "Series", "Episode.strm")),
+            Normalize(result));
+    }
+
+    [Fact]
+    public void BuildExpectedStrmRelativePaths_ReturnsOnlyVideoItems()
+    {
+        var parentId = Guid.NewGuid();
+        var parent = new ManifestItem
+        {
+            Id = parentId,
+            Name = "Movie",
+            Path = "/content/movies/Movie",
+            Type = "directory"
+        };
+        var video = new ManifestItem
+        {
+            Id = Guid.NewGuid(),
+            ParentId = parentId,
+            Name = "Movie.mkv",
+            Path = "/content/movies/Movie/Movie.mkv",
+            Type = "nzb_file"
+        };
+        var directory = new ManifestItem
+        {
+            Id = Guid.NewGuid(),
+            ParentId = parentId,
+            Name = "extras",
+            Path = "/content/movies/Movie/extras",
+            Type = "directory"
+        };
+
+        var result = InvokeBuildExpectedStrmRelativePaths([parent, video, directory]);
+
+        Assert.Equal(
+            [Normalize(Path.Combine("movies", "Movie", "Movie.strm"))],
+            result.Select(Normalize).ToArray());
+    }
+
     private static string InvokeBuildStrmRelativePath(
         ManifestItem video,
         IReadOnlyDictionary<Guid, ManifestItem> allItems)
     {
         return (string)BuildRelativePathMethod.Invoke(null, [video, allItems])!;
+    }
+
+    private static bool InvokeIsNzbdavManagedStrmContent(string content, string baseUrl)
+    {
+        return (bool)IsNzbdavManagedStrmContentMethod.Invoke(null, [content, baseUrl])!;
+    }
+
+    private static string InvokeGetQuarantineRelativePath(string relativePath, string runId)
+    {
+        return (string)GetQuarantineRelativePathMethod.Invoke(null, [relativePath, runId])!;
+    }
+
+    private static string[] InvokeBuildExpectedStrmRelativePaths(ManifestItem[] items)
+    {
+        return (string[])BuildExpectedStrmRelativePathsMethod.Invoke(null, [items])!;
     }
 
     private static string Normalize(string path) => path.Replace('\\', '/');

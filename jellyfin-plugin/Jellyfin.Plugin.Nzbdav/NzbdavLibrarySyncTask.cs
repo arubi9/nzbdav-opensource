@@ -1,6 +1,7 @@
 using Jellyfin.Plugin.Nzbdav.Api;
 using MediaBrowser.Model.Tasks;
 using Microsoft.Extensions.Logging;
+using System.Globalization;
 
 namespace Jellyfin.Plugin.Nzbdav;
 
@@ -81,17 +82,14 @@ public class NzbdavLibrarySyncTask : IScheduledTask
 
         if (manifest.Items.Length == 0)
         {
+            ReconcileStaleFiles(config, expectedRelativePaths: [], runId: CreateRunId());
             progress.Report(100);
             return;
         }
 
-        // Build tree from flat list: group items by parent
-        var itemsByParent = manifest.Items
-            .Where(i => i.ParentId.HasValue)
-            .GroupBy(i => i.ParentId!.Value)
-            .ToDictionary(g => g.Key, g => g.ToArray());
-
         var allItems = manifest.Items.ToDictionary(i => i.Id);
+        var expectedRelativePaths = BuildExpectedStrmRelativePaths(manifest.Items);
+        var runId = CreateRunId();
 
         // Find all video files
         var videoFiles = manifest.Items
@@ -117,6 +115,7 @@ public class NzbdavLibrarySyncTask : IScheduledTask
             progress.Report((double)processed / videoFiles.Length * 100);
         }
 
+        ReconcileStaleFiles(config, expectedRelativePaths, runId);
         _logger.LogInformation("NZBDAV sync complete: {Count} video files processed from manifest", processed);
         progress.Report(100);
     }
@@ -139,18 +138,6 @@ public class NzbdavLibrarySyncTask : IScheduledTask
         var strmDir = Path.GetDirectoryName(strmPath);
         if (strmDir != null) Directory.CreateDirectory(strmDir);
 
-        // Check if existing .strm has a fresh token
-        if (File.Exists(strmPath))
-        {
-            var existingUrl = File.ReadAllText(strmPath);
-            var existingToken = ExtractToken(existingUrl);
-            if (existingToken != null && !IsTokenStale(existingToken))
-                return; // Token is fresh, skip
-        }
-
-        // Write .strm with API key (tokens are generated server-side via /api/meta
-        // but we avoid the per-file HTTP call by using the API key directly here.
-        // The AuthFailureTracker only counts failed attempts, so this is safe.)
         var streamUrl = $"{config.NzbdavBaseUrl.TrimEnd('/')}/api/stream/{videoFile.Id}?apikey={config.ApiKey}";
         File.WriteAllText(strmPath, streamUrl);
 
@@ -173,18 +160,108 @@ public class NzbdavLibrarySyncTask : IScheduledTask
         _logger.LogDebug("Created/refreshed .strm: {Path}", strmPath);
     }
 
-    private static string? ExtractToken(string strmContent)
+    private void ReconcileStaleFiles(
+        Configuration.PluginConfiguration config,
+        IReadOnlyCollection<string> expectedRelativePaths,
+        string runId)
     {
-        var idx = strmContent.IndexOf("token=", StringComparison.Ordinal);
-        return idx >= 0 ? strmContent[(idx + 6)..].Trim() : null;
+        var libraryRoot = config.LibraryPath;
+        if (!Directory.Exists(libraryRoot))
+            return;
+
+        var expected = expectedRelativePaths
+            .Select(NormalizeRelativePath)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var quarantineRoot = Path.Combine(libraryRoot, ".quarantine", runId);
+
+        foreach (var strmPath in Directory.EnumerateFiles(libraryRoot, "*.strm", SearchOption.AllDirectories))
+        {
+            var relativePath = Path.GetRelativePath(libraryRoot, strmPath);
+            if (IsUnderQuarantine(relativePath))
+                continue;
+
+            var strmContent = File.ReadAllText(strmPath);
+            if (!IsNzbdavManagedStrmContent(strmContent, config.NzbdavBaseUrl))
+                continue;
+
+            var normalizedRelativePath = NormalizeRelativePath(relativePath);
+            if (expected.Contains(normalizedRelativePath))
+                continue;
+
+            var quarantineRelativePath = GetQuarantineRelativePath(relativePath, runId);
+            var quarantineStrmPath = Path.Combine(libraryRoot, quarantineRelativePath);
+            MoveFilePreservingStructure(strmPath, quarantineStrmPath);
+
+            var probePath = Path.ChangeExtension(strmPath, ".mediainfo.json");
+            if (File.Exists(probePath))
+            {
+                var quarantineProbePath = Path.ChangeExtension(quarantineStrmPath, ".mediainfo.json");
+                MoveFilePreservingStructure(probePath, quarantineProbePath);
+            }
+
+            _logger.LogInformation("Quarantined stale NZBDAV mirror file: {Path}", normalizedRelativePath);
+        }
     }
 
-    private static bool IsTokenStale(string token)
+    private static string[] BuildExpectedStrmRelativePaths(ManifestItem[] items)
     {
-        var parts = token.Split('.', 2);
-        if (parts.Length != 2 || !long.TryParse(parts[0], out var expiry)) return true;
-        var refreshThreshold = DateTimeOffset.UtcNow.AddDays(4).ToUnixTimeSeconds();
-        return expiry < refreshThreshold;
+        var allItems = items.ToDictionary(i => i.Id);
+        return items
+            .Where(i => i.Type is "nzb_file" or "rar_file" or "multipart_file")
+            .Where(i => IsVideoFile(i.Name))
+            .Select(i => Path.ChangeExtension(BuildStrmRelativePath(i, allItems), ".strm"))
+            .Select(NormalizeRelativePath)
+            .ToArray();
+    }
+
+    private static bool IsNzbdavManagedStrmContent(string content, string baseUrl)
+    {
+        if (string.IsNullOrWhiteSpace(content) || string.IsNullOrWhiteSpace(baseUrl))
+            return false;
+
+        if (!Uri.TryCreate(content.Trim(), UriKind.Absolute, out var contentUri))
+            return false;
+
+        var trimmedBaseUrl = baseUrl.TrimEnd('/');
+        if (!Uri.TryCreate(trimmedBaseUrl, UriKind.Absolute, out var baseUri))
+            return false;
+
+        return string.Equals(contentUri.Scheme, baseUri.Scheme, StringComparison.OrdinalIgnoreCase)
+               && string.Equals(contentUri.Host, baseUri.Host, StringComparison.OrdinalIgnoreCase)
+               && contentUri.Port == baseUri.Port
+               && contentUri.AbsolutePath.StartsWith("/api/stream/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string GetQuarantineRelativePath(string relativePath, string runId)
+    {
+        return Path.Combine(".quarantine", runId, relativePath);
+    }
+
+    private static bool IsUnderQuarantine(string relativePath)
+    {
+        return NormalizeRelativePath(relativePath).StartsWith(".quarantine/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizeRelativePath(string path)
+    {
+        return path.Replace('\\', '/');
+    }
+
+    private static void MoveFilePreservingStructure(string sourcePath, string destinationPath)
+    {
+        var destinationDir = Path.GetDirectoryName(destinationPath);
+        if (!string.IsNullOrEmpty(destinationDir))
+            Directory.CreateDirectory(destinationDir);
+
+        if (File.Exists(destinationPath))
+            File.Delete(destinationPath);
+
+        File.Move(sourcePath, destinationPath);
+    }
+
+    private static string CreateRunId()
+    {
+        return DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
     }
 
     private static bool IsVideoFile(string filename)
