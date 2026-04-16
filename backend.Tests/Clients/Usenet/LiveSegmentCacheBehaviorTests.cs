@@ -124,6 +124,10 @@ public sealed class LiveSegmentCacheBehaviorTests
         await CacheSegmentAsync(client, "video", SegmentCategory.VideoSegment, Guid.NewGuid());
         await CacheSegmentAsync(client, "unknown");
 
+        // Prune is now driven by a background 30s loop rather than the hot path.
+        // Trigger an explicit prune so this test deterministically exercises the four-pass eviction.
+        await liveCache.PruneAsync();
+
         Assert.True(liveCache.HasBody("small"));
         Assert.False(liveCache.HasBody("video"));
         Assert.True(liveCache.HasBody("unknown"));

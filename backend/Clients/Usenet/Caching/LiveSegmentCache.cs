@@ -120,6 +120,8 @@ public sealed class LiveSegmentCache : IDisposable
     private readonly object _headerCacheLock = new();
     private readonly ObjectStorageSegmentCache? _l2Cache;
     private readonly SharedHeaderCache? _sharedHeaderCache;
+    private readonly CancellationTokenSource _pruneCts = new();
+    private readonly Task _pruneLoopTask;
     private long _maxCacheSizeBytes;
     private TimeSpan _maxAge;
     private bool _disposed;
@@ -160,6 +162,7 @@ public sealed class LiveSegmentCache : IDisposable
         };
 
         InitializeAndRehydrate();
+        _pruneLoopTask = Task.Run(PruneLoopAsync);
     }
 
     // Test-friendly constructor
@@ -178,6 +181,7 @@ public sealed class LiveSegmentCache : IDisposable
         _maxAge = maxAge ?? TimeSpan.FromHours(6);
         _headerCache = new MemoryCache(new MemoryCacheOptions { SizeLimit = 20_000 });
         InitializeAndRehydrate();
+        _pruneLoopTask = Task.Run(PruneLoopAsync);
     }
 
     public string CacheDirectory { get; }
@@ -282,7 +286,6 @@ public sealed class LiveSegmentCache : IDisposable
 
         var outcome = await activeLazy.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
         var response = OpenBodyResponse(segmentId, outcome.Entry);
-        await PruneAsync(cancellationToken).ConfigureAwait(false);
         return new BodyFetchResult(response, usedExistingFetch, outcome.Origin);
     }
 
@@ -402,9 +405,36 @@ public sealed class LiveSegmentCache : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        try { _pruneCts.Cancel(); } catch { /* best-effort on shutdown */ }
+        try { _pruneLoopTask?.Wait(TimeSpan.FromSeconds(2)); } catch { /* best-effort on shutdown */ }
+        _pruneCts.Dispose();
         _headerCache.Dispose();
         _pruneLock.Dispose();
         GC.SuppressFinalize(this);
+    }
+
+    private async Task PruneLoopAsync()
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
+            while (await timer.WaitForNextTickAsync(_pruneCts.Token).ConfigureAwait(false))
+            {
+                try
+                {
+                    await PruneAsync(_pruneCts.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (_pruneCts.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception e)
+                {
+                    Log.Warning(e, "LiveSegmentCache prune loop iteration failed");
+                }
+            }
+        }
+        catch (OperationCanceledException) { }
     }
 
     private async Task<UsenetYencHeader> FetchHeaderAsync(
