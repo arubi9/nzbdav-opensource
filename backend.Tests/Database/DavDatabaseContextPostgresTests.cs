@@ -47,7 +47,7 @@ public sealed class DavDatabaseContextPostgresTests : IClassFixture<PostgresHead
     }
 
     [SkippableFact]
-    public async Task LatestMigration_CreatesCoordinationTables()
+    public async Task DatabaseInitialization_FreshPostgres_CreatesCurrentSchemaAndBootstrapRows()
     {
         Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
 
@@ -57,6 +57,8 @@ public sealed class DavDatabaseContextPostgresTests : IClassFixture<PostgresHead
         Assert.True(await TableExistsAsync(dbContext, "websocket_outbox"));
         Assert.True(await TableExistsAsync(dbContext, "auth_failures"));
         Assert.True(await TableExistsAsync(dbContext, "connection_pool_claims"));
+        Assert.True(await dbContext.ConfigItems.AnyAsync(x => x.ConfigName == "api.key"));
+        Assert.True(await dbContext.ConfigItems.AnyAsync(x => x.ConfigName == "api.strm-key"));
     }
 
     private static async Task<bool> TableExistsAsync(DavDatabaseContext dbContext, string tableName)

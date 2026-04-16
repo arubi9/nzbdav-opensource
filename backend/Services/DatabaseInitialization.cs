@@ -17,16 +17,49 @@ public static class DatabaseInitialization
         string? targetMigration = null)
     {
         var isPostgres = !string.IsNullOrEmpty(EnvironmentUtil.GetDatabaseUrl());
+        if (!isPostgres)
+        {
+            await databaseContext.Database
+                .MigrateAsync(targetMigration, cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
 
-        if (isPostgres)
+        // Keep explicit target-migration behavior unchanged. The fresh-Postgres
+        // bootstrap below is for the normal startup path that targets the latest
+        // schema state.
+        if (!string.IsNullOrEmpty(targetMigration))
+        {
             await BootstrapMigrationHistoryIfNeededAsync(databaseContext, cancellationToken).ConfigureAwait(false);
+            await databaseContext.Database
+                .MigrateAsync(targetMigration, cancellationToken)
+                .ConfigureAwait(false);
+            await SeedPostgresBootstrapDataAsync(databaseContext, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var state = await InspectPostgresStateAsync(databaseContext, cancellationToken).ConfigureAwait(false);
+        if (state.IsFreshDatabase)
+        {
+            Log.Information("Bootstrapping fresh PostgreSQL database from current EF model");
+            var databaseCreator = databaseContext.Database.GetService<IRelationalDatabaseCreator>();
+            await databaseCreator.CreateTablesAsync().ConfigureAwait(false);
+            await StampMigrationHistoryAsync(databaseContext, cancellationToken).ConfigureAwait(false);
+            await SeedPostgresBootstrapDataAsync(databaseContext, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (state.HasApplicationTables && !state.HasMigrationHistoryEntries)
+        {
+            await StampMigrationHistoryAsync(databaseContext, cancellationToken).ConfigureAwait(false);
+            await SeedPostgresBootstrapDataAsync(databaseContext, cancellationToken).ConfigureAwait(false);
+            return;
+        }
 
         await databaseContext.Database
-            .MigrateAsync(targetMigration, cancellationToken)
+            .MigrateAsync(cancellationToken: cancellationToken)
             .ConfigureAwait(false);
-
-        if (isPostgres)
-            await SeedPostgresBootstrapDataAsync(databaseContext, cancellationToken).ConfigureAwait(false);
+        await SeedPostgresBootstrapDataAsync(databaseContext, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -40,62 +73,82 @@ public static class DatabaseInitialization
         DavDatabaseContext databaseContext,
         CancellationToken cancellationToken)
     {
+        var state = await InspectPostgresStateAsync(databaseContext, cancellationToken).ConfigureAwait(false);
+        if (!state.HasApplicationTables || state.HasMigrationHistoryEntries)
+            return;
+
+        Log.Information("Bootstrapping __EFMigrationsHistory for legacy Postgres database");
+        await StampMigrationHistoryAsync(databaseContext, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<PostgresDatabaseState> InspectPostgresStateAsync(
+        DavDatabaseContext databaseContext,
+        CancellationToken cancellationToken)
+    {
         var conn = databaseContext.Database.GetDbConnection();
         if (conn.State != System.Data.ConnectionState.Open)
             await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
 
         await using var cmd = conn.CreateCommand();
 
-        // Check if migration history table already exists with entries
         cmd.CommandText = """
             SELECT EXISTS(
-                SELECT 1 FROM information_schema.tables
-                WHERE table_name = '__EFMigrationsHistory'
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_name = '__EFMigrationsHistory'
             )
             """;
         var historyTableExists = (bool)(await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
 
+        var hasMigrationHistoryEntries = false;
         if (historyTableExists)
         {
             cmd.CommandText = """SELECT COUNT(*) FROM "__EFMigrationsHistory" """;
-            var count = (long)(await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
-            if (count > 0)
-                return; // Already bootstrapped — MigrateAsync will handle pending migrations
+            hasMigrationHistoryEntries = (long)(await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))! > 0;
         }
 
-        // Check if this is an existing DB (has application tables from EnsureCreated)
         cmd.CommandText = """
             SELECT EXISTS(
-                SELECT 1 FROM information_schema.tables
-                WHERE table_name = 'items'
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_name IN ('DavItems', 'ConfigItems')
             )
             """;
-        var hasExistingTables = (bool)(await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
+        var hasApplicationTables = (bool)(await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
 
-        if (!hasExistingTables)
-            return; // Fresh DB — MigrateAsync will create everything from scratch
+        return new PostgresDatabaseState(
+            historyTableExists,
+            hasMigrationHistoryEntries,
+            hasApplicationTables);
+    }
 
-        // Legacy DB: create migration history and mark all known migrations as applied
-        Log.Information("Bootstrapping __EFMigrationsHistory for legacy Postgres database");
+    private static async Task StampMigrationHistoryAsync(
+        DavDatabaseContext databaseContext,
+        CancellationToken cancellationToken)
+    {
+        var conn = databaseContext.Database.GetDbConnection();
+        if (conn.State != System.Data.ConnectionState.Open)
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
 
-        if (!historyTableExists)
-        {
-            cmd.CommandText = """
-                CREATE TABLE "__EFMigrationsHistory" (
-                    "MigrationId" VARCHAR(150) NOT NULL,
-                    "ProductVersion" VARCHAR(32) NOT NULL,
-                    CONSTRAINT "PK___EFMigrationsHistory" PRIMARY KEY ("MigrationId")
-                )
-                """;
-            await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            CREATE TABLE IF NOT EXISTS "__EFMigrationsHistory" (
+                "MigrationId" VARCHAR(150) NOT NULL,
+                "ProductVersion" VARCHAR(32) NOT NULL,
+                CONSTRAINT "PK___EFMigrationsHistory" PRIMARY KEY ("MigrationId")
+            )
+            """;
+        await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 
         var allMigrations = databaseContext.Database.GetMigrations().ToList();
+        var productVersion = databaseContext.Model.FindAnnotation("ProductVersion")?.Value?.ToString() ?? "10.0.4";
         foreach (var migrationId in allMigrations)
         {
             cmd.CommandText = $"""
                 INSERT INTO "__EFMigrationsHistory" ("MigrationId", "ProductVersion")
-                VALUES ('{migrationId}', '8.0.0')
+                VALUES ('{migrationId}', '{productVersion}')
                 ON CONFLICT DO NOTHING
                 """;
             await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
@@ -191,5 +244,13 @@ public static class DatabaseInitialization
             Type = type,
             Path = path
         };
+    }
+
+    private readonly record struct PostgresDatabaseState(
+        bool HistoryTableExists,
+        bool HasMigrationHistoryEntries,
+        bool HasApplicationTables)
+    {
+        public bool IsFreshDatabase => !HasApplicationTables && !HasMigrationHistoryEntries;
     }
 }
