@@ -136,28 +136,30 @@ entering the foreach, using the same `SetContext`/scope pattern as
 **Change in `MediaProbeService.BackfillMissingProbes`**, at the top of the
 try block after acquiring `missing`:
 ```csharp
-var priorityContext = new DownloadPriorityContext { Priority = SemaphorePriority.Low };
-using var priorityScope = ct.SetContext(priorityContext);
-var priorityCt = priorityScope.Token;
+using var priorityScope = ct.SetContext(
+    new DownloadPriorityContext { Priority = SemaphorePriority.Low });
 
 foreach (var item in missing)
 {
-    priorityCt.ThrowIfCancellationRequested();
+    ct.ThrowIfCancellationRequested();
     try
     {
-        await ProbeAndCacheFile(new DavDatabaseContext(), item, priorityCt).ConfigureAwait(false);
+        await ProbeAndCacheFile(new DavDatabaseContext(), item, ct).ConfigureAwait(false);
         // ...
     }
     // ...
 }
 ```
 
-(Exact API name — `SetContext` vs `CancellationTokenContext.SetContext` — to be
-confirmed during implementation by reading `BaseStoreStreamFile.cs`.)
+API: `CancellationTokenContext.SetContext<T>(ct, value)` (invoked via the
+`SetContext` extension used in `BaseStoreStreamFile.cs:15`) keys the context
+dictionary by `(CancellationToken, Type)`. The same `ct` is therefore tagged
+in place; no new token is produced. The returned `CancellationTokenContext`
+is disposable and must be disposed to remove the entry.
 
-Context flows via `AsyncLocal` through
+Context is read back by
 `DownloadingNntpClient.AcquireExclusiveConnectionAsync`
-(`backend/Clients/Usenet/DownloadingNntpClient.cs:107-108`), which reads
+(`backend/Clients/Usenet/DownloadingNntpClient.cs:107-108`):
 `cancellationToken.GetContext<DownloadPriorityContext>()`.
 
 Known limitation (accepted): the ffprobe subprocess inside `ProbeAndCacheFile`
