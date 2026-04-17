@@ -139,7 +139,18 @@ public class NzbdavLibrarySyncTask : IScheduledTask
         if (strmDir != null) Directory.CreateDirectory(strmDir);
 
         var streamUrl = $"{config.NzbdavBaseUrl.TrimEnd('/')}/api/stream/{videoFile.Id}?apikey={config.ApiKey}";
-        File.WriteAllText(strmPath, streamUrl);
+        // Only rewrite when the URL actually changes. Unconditional writes bump
+        // the file's mtime, which Jellyfin interprets as a content change and
+        // queues a metadata refresh (FFProbeVideoInfo, a 200M/1G ffprobe
+        // against the remote stream). That wastes minutes of NNTP reads every
+        // sync cycle for files whose stream URL hasn't changed.
+        if (!File.Exists(strmPath) || !string.Equals(
+                File.ReadAllText(strmPath).TrimEnd('\r', '\n'),
+                streamUrl,
+                StringComparison.Ordinal))
+        {
+            File.WriteAllText(strmPath, streamUrl);
+        }
 
         // If probe data is available, write it alongside the .strm so Jellyfin
         // can read media info without probing the stream via NNTP.
