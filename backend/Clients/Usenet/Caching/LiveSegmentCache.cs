@@ -280,6 +280,45 @@ public sealed class LiveSegmentCache : IDisposable
         }
     }
 
+    /// <summary>
+    /// Light-touch prewarmer for the L2 object-storage cache.  Used to plant
+    /// the very first segment of each video in L2 so the first Range request
+    /// of a cold playback hits S3 (~50 ms) instead of NNTP (~500-1000 ms),
+    /// without spending any L1 budget.
+    ///
+    /// Behavior:
+    /// <list type="bullet">
+    ///   <item>Skip if L2 already has the segment.</item>
+    ///   <item>Skip if L2 is not configured (nothing to do).</item>
+    ///   <item>On miss, invoke <paramref name="fetchBodyAsync"/> for a single
+    ///         NNTP body fetch, enqueue a write to L2, and drop the body on
+    ///         the floor. L1 (<c>_cachedSegments</c> and <c>.meta</c>
+    ///         sidecars) is untouched so active-stream working set is
+    ///         unaffected.</item>
+    /// </list>
+    /// </summary>
+    public async Task SeedL2Async(
+        string segmentId,
+        Func<CancellationToken, Task<BodyFetchSource>> fetchBodyAsync,
+        CancellationToken cancellationToken,
+        SegmentCategory category = SegmentCategory.SmallFile,
+        Guid? ownerNzbId = null)
+    {
+        if (_l2Cache is null) return;
+
+        var existing = await _l2Cache.TryReadWithMetadataAsync(segmentId, cancellationToken).ConfigureAwait(false);
+        if (existing is not null) return;
+
+        var fetch = await fetchBodyAsync(cancellationToken).ConfigureAwait(false);
+        await using var body = fetch.Stream;
+
+        using var buffer = new MemoryStream();
+        await body.CopyToAsync(buffer, cancellationToken).ConfigureAwait(false);
+        var bytes = buffer.ToArray();
+
+        _l2Cache.EnqueueWrite(segmentId, bytes, category, ownerNzbId, fetch.YencHeaders);
+    }
+
     public async Task<BodyFetchResult> GetOrAddBodyAsync(
         string segmentId,
         Func<CancellationToken, Task<BodyFetchSource>> fetchBodyAsync,

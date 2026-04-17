@@ -116,12 +116,88 @@ public class MediaProbeService : BackgroundService
                 missing,
                 (item, innerCt) => ProbeAndCacheFile(new DavDatabaseContext(), item, innerCt),
                 ct).ConfigureAwait(false);
+
+            // Phase 2 of the backfill: ensure the first segment of every
+            // video is present in L2 so a cold first-byte read hits S3
+            // (~50 ms) instead of NNTP (~500-1000 ms). Cheap — one segment
+            // per file, and no-op when L2 already has it.
+            await WarmFirstSegmentsIntoL2Async(videoItems, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
         catch (Exception e)
         {
             Log.Warning(e, "ProbeDataGenerator backfill failed");
         }
+    }
+
+    /// <summary>
+    /// For every video in the library, check whether the file's first
+    /// segment is already in L2; if not, perform a single NNTP fetch and
+    /// enqueue an L2 write. Runs at Low NNTP priority so live streams are
+    /// never blocked.
+    /// </summary>
+    private async Task WarmFirstSegmentsIntoL2Async(IReadOnlyList<DavItem> videoItems, CancellationToken ct)
+    {
+        using var priorityScope = ct.SetContext(
+            new DownloadPriorityContext { Priority = SemaphorePriority.Low });
+
+        var warmed = 0;
+        var skipped = 0;
+        foreach (var item in videoItems)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                await using var dbContext = new DavDatabaseContext();
+                var segmentIds = await GetSegmentIds(dbContext, item, ct).ConfigureAwait(false);
+                if (segmentIds is null || segmentIds.Length == 0) continue;
+
+                var firstSegmentId = segmentIds[0];
+
+                using var fetchCtx = SegmentFetchContext.Set(SegmentCategory.SmallFile, item.ParentId ?? item.Id);
+                var seeded = await TrySeedL2FirstSegmentAsync(firstSegmentId, ct).ConfigureAwait(false);
+                if (seeded) warmed++;
+                else skipped++;
+
+                if ((warmed + skipped) % 100 == 0)
+                    Log.Information(
+                        "L2 first-segment warm progress: warmed={Warmed} already-present={Skipped}",
+                        warmed, skipped);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception e)
+            {
+                Log.Debug("L2 first-segment warm failed for {Name}: {Error}", item.Name, e.Message);
+            }
+        }
+
+        Log.Information(
+            "L2 first-segment warm complete: warmed={Warmed} already-present={Skipped}",
+            warmed, skipped);
+    }
+
+    /// <summary>
+    /// Returns true if an NNTP fetch + L2 write was kicked off, false if L2
+    /// already had the segment or the fetch was short-circuited.
+    /// </summary>
+    private async Task<bool> TrySeedL2FirstSegmentAsync(string segmentId, CancellationToken ct)
+    {
+        await _liveSegmentCache.SeedL2Async(
+            segmentId,
+            async innerCt =>
+            {
+                var response = await _usenetClient
+                    .DecodedArticleWithFallbackAsync(segmentId, onConnectionReadyAgain: null, innerCt)
+                    .ConfigureAwait(false);
+                var header = await response.Stream.GetYencHeadersAsync(innerCt).ConfigureAwait(false);
+                if (header is null)
+                    throw new InvalidOperationException($"Missing yEnc header for {segmentId}");
+                return new LiveSegmentCache.BodyFetchSource(
+                    response.Stream, header, response.ArticleHeaders);
+            },
+            ct,
+            category: SegmentCategory.SmallFile).ConfigureAwait(false);
+        return true;
     }
 
     /// <summary>
