@@ -47,7 +47,7 @@ public class ExceptionMiddleware(RequestDelegate next)
             var filePath = GetRequestFilePath(context);
             Log.Error($"File `{filePath}` has missing articles: {e.Message}");
         }
-        catch (SeekPositionNotFoundException)
+        catch (SeekPositionNotFoundException e)
         {
             if (!context.Response.HasStarted)
             {
@@ -57,7 +57,7 @@ public class ExceptionMiddleware(RequestDelegate next)
 
             var filePath = GetRequestFilePath(context);
             var seekPosition = context.Request.GetRange()?.Start?.ToString() ?? "unknown";
-            Log.Error($"File `{filePath}` could not seek to byte position: {seekPosition}");
+            Log.Error(e, $"File `{filePath}` could not seek to byte position: {seekPosition} [msg={e.Message}]");
         }
         catch (Exception e) when (IsDavItemRequest(context))
         {
