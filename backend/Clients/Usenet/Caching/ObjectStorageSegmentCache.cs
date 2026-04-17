@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -22,6 +23,8 @@ public sealed class ObjectStorageSegmentCache : IDisposable
     private sealed record ConfigBinding(
         string BucketName,
         int QueueCapacity,
+        TimeSpan ReadTimeout,
+        TimeSpan WriteTimeout,
         Func<CancellationToken, Task> EnsureBucketExistsAsync,
         Func<string, CancellationToken, Task<ReadResult?>> TryReadAsync,
         Func<WriteRequest, CancellationToken, Task> WriteAsync,
@@ -36,6 +39,8 @@ public sealed class ObjectStorageSegmentCache : IDisposable
     private readonly SemaphoreSlim _queueSignal = new(0);
     private readonly ConcurrentQueue<WriteRequest> _writeQueue = new();
     private readonly int _queueCapacity;
+    private readonly TimeSpan _readTimeout;
+    private readonly TimeSpan _writeTimeout;
     private readonly Task _writerTask;
     private volatile int _queueCount;
     private volatile bool _shutdownRequested;
@@ -46,12 +51,17 @@ public sealed class ObjectStorageSegmentCache : IDisposable
     private long _l2Writes;
     private long _l2WriteFailures;
     private long _l2WritesDropped;
+    private long _l2ReadTimeouts;
+    private long _lastWriteUnixtime;
 
     public long L2Hits => Interlocked.Read(ref _l2Hits);
     public long L2Misses => Interlocked.Read(ref _l2Misses);
     public long L2Writes => Interlocked.Read(ref _l2Writes);
     public long L2WriteFailures => Interlocked.Read(ref _l2WriteFailures);
     public long L2WritesDropped => Interlocked.Read(ref _l2WritesDropped);
+    public long L2ReadTimeouts => Interlocked.Read(ref _l2ReadTimeouts);
+    public long LastWriteUnixtime => Interlocked.Read(ref _lastWriteUnixtime);
+    public int QueueDepth => _queueCount;
     public string BucketName { get; }
 
     public ObjectStorageSegmentCache(ConfigManager configManager)
@@ -67,7 +77,9 @@ public sealed class ObjectStorageSegmentCache : IDisposable
             binding.TryReadAsync,
             binding.WriteAsync,
             binding.DeleteByOwnerAsync,
-            binding.StartWriter)
+            binding.StartWriter,
+            binding.ReadTimeout,
+            binding.WriteTimeout)
     {
     }
 
@@ -78,16 +90,24 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         Func<string, CancellationToken, Task<ReadResult?>> tryReadAsync,
         Func<WriteRequest, CancellationToken, Task> writeAsync,
         Func<Guid, CancellationToken, Task>? deleteByOwnerAsync = null,
-        bool startWriter = true)
+        bool startWriter = true,
+        TimeSpan? readTimeout = null,
+        TimeSpan? writeTimeout = null)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(queueCapacity);
 
         BucketName = bucketName;
         _queueCapacity = queueCapacity;
+        _readTimeout = readTimeout ?? TimeSpan.FromSeconds(30);
+        _writeTimeout = writeTimeout ?? TimeSpan.FromSeconds(60);
         _ensureBucketExistsAsync = ensureBucketExistsAsync;
         _tryReadAsync = tryReadAsync;
         _writeAsync = writeAsync;
         _deleteByOwnerAsync = deleteByOwnerAsync;
+        // Seed so the `time() - last_write_unixtime` alert predicate does
+        // not fire spuriously during the window between boot and the first
+        // real write.
+        _lastWriteUnixtime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         _writerTask = startWriter ? Task.Run(WriterLoopAsync) : Task.CompletedTask;
     }
 
@@ -118,9 +138,23 @@ public sealed class ObjectStorageSegmentCache : IDisposable
             return null;
 
         ReadResult? result;
+        using var timeoutCts = new CancellationTokenSource(_readTimeout);
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
         try
         {
-            result = await _tryReadAsync(segmentId, ct).ConfigureAwait(false);
+            result = await _tryReadAsync(segmentId, linkedCts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+            when (timeoutCts.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            Interlocked.Increment(ref _l2ReadTimeouts);
+            Log.Warning("L2 read timed out after {Timeout:c} for segment {SegmentId}", _readTimeout, segmentId);
+            result = null;
+        }
+        catch (OperationCanceledException)
+        {
+            // Caller-initiated cancellation — let it propagate.
+            throw;
         }
         catch (Exception ex)
         {
@@ -215,13 +249,39 @@ public sealed class ObjectStorageSegmentCache : IDisposable
             {
                 Interlocked.Decrement(ref _queueCount);
 
+                // Bound every PUT with _writeTimeout. Without this the
+                // single-threaded writer parks forever on a half-open TCP
+                // socket and stops draining the queue — observed in prod
+                // as writes_total frozen at 12 with 0 failures + 0 drops.
+                using var timeoutCts = new CancellationTokenSource(_writeTimeout);
+                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+                    _shutdownCts.Token, timeoutCts.Token);
+
+                var sw = Stopwatch.StartNew();
                 try
                 {
-                    await _writeAsync(request, _shutdownCts.Token).ConfigureAwait(false);
+                    await _writeAsync(request, linkedCts.Token).ConfigureAwait(false);
+                    sw.Stop();
                     Interlocked.Increment(ref _l2Writes);
+                    Interlocked.Exchange(ref _lastWriteUnixtime, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+                    if (sw.Elapsed > _writeTimeout / 2)
+                    {
+                        Log.Warning(
+                            "Slow L2 write for segment {SegmentId} took {Elapsed:c} (threshold {Threshold:c})",
+                            request.SegmentId, sw.Elapsed, _writeTimeout / 2);
+                    }
                 }
-                catch (OperationCanceledException) when (_shutdownCts.IsCancellationRequested)
+                catch (OperationCanceledException)
+                    when (timeoutCts.IsCancellationRequested && !_shutdownCts.IsCancellationRequested)
                 {
+                    Interlocked.Increment(ref _l2WriteFailures);
+                    Log.Warning(
+                        "L2 write timed out after {Timeout:c} for segment {SegmentId}",
+                        _writeTimeout, request.SegmentId);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Shutdown in progress (possibly coincident with a timeout).
                     return;
                 }
                 catch (Exception ex)
@@ -251,6 +311,8 @@ public sealed class ObjectStorageSegmentCache : IDisposable
             return new ConfigBinding(
                 bucketName,
                 configManager.GetL2WriteQueueCapacity(),
+                configManager.GetL2ReadTimeout(),
+                configManager.GetL2WriteTimeout(),
                 _ => Task.CompletedTask,
                 (_, _) => Task.FromResult<ReadResult?>(null),
                 (_, _) => Task.CompletedTask,
@@ -262,6 +324,8 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         return new ConfigBinding(
             bucketName,
             configManager.GetL2WriteQueueCapacity(),
+            configManager.GetL2ReadTimeout(),
+            configManager.GetL2WriteTimeout(),
             CreateEnsureBucketDelegate(client, bucketName),
             CreateReadDelegate(client, bucketName),
             CreateWriteDelegate(client, bucketName),
@@ -298,6 +362,11 @@ public sealed class ObjectStorageSegmentCache : IDisposable
                     .WithCallbackStream(stream => stream.CopyTo(memory));
                 var stat = await client.GetObjectAsync(args, ct).ConfigureAwait(false);
                 return new ReadResult(memory.ToArray(), NormalizeMetadata(stat.MetaData));
+            }
+            catch (OperationCanceledException)
+            {
+                // Let the caller distinguish timeout vs caller-cancel.
+                throw;
             }
             catch (Exception ex)
             {

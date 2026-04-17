@@ -412,6 +412,14 @@ public class ConfigManager
     public int GetL2WriteQueueCapacity()
         => int.Parse(StringUtil.EmptyToNull(GetConfigValue("cache.l2.write-queue-capacity")) ?? "2048");
 
+    public TimeSpan GetL2ReadTimeout()
+        => TimeSpan.FromSeconds(
+            int.Parse(StringUtil.EmptyToNull(GetConfigValue("cache.l2.read-timeout-seconds")) ?? "30"));
+
+    public TimeSpan GetL2WriteTimeout()
+        => TimeSpan.FromSeconds(
+            int.Parse(StringUtil.EmptyToNull(GetConfigValue("cache.l2.write-timeout-seconds")) ?? "60"));
+
     public class ConfigEventArgs : EventArgs
     {
         public required Dictionary<string, string> ChangedConfig { get; init; }

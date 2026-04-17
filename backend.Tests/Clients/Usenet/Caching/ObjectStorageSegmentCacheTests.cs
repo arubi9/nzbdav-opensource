@@ -202,6 +202,103 @@ public sealed class ObjectStorageSegmentCacheTests
         Assert.Equal(0, cache.L2Hits);
     }
 
+    [Fact]
+    public async Task WriterLoop_TimesOutStalledWrite()
+    {
+        var stall = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        using var cache = new ObjectStorageSegmentCache(
+            bucketName: "bucket",
+            queueCapacity: 4,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
+            tryReadAsync: (_, _) => Task.FromResult<ObjectStorageSegmentCache.ReadResult?>(null),
+            writeAsync: async (_, ct) =>
+            {
+                await stall.Task.WaitAsync(ct).ConfigureAwait(false);
+            },
+            writeTimeout: TimeSpan.FromMilliseconds(150));
+
+        cache.EnqueueWrite("segment-a", [1], SegmentCategory.SmallFile, null, CreateHeader("a.bin"));
+
+        // Writer should trip the timeout and increment failures without
+        // blocking subsequent writes. Poll briefly.
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(3);
+        while (cache.L2WriteFailures == 0 && DateTime.UtcNow < deadline)
+            await Task.Delay(25);
+
+        Assert.Equal(1, cache.L2WriteFailures);
+        Assert.Equal(0, cache.L2Writes);
+        stall.TrySetResult();
+    }
+
+    [Fact]
+    public async Task WriterLoop_RecoversAfterTimeout()
+    {
+        var calls = 0;
+
+        using var cache = new ObjectStorageSegmentCache(
+            bucketName: "bucket",
+            queueCapacity: 4,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
+            tryReadAsync: (_, _) => Task.FromResult<ObjectStorageSegmentCache.ReadResult?>(null),
+            writeAsync: async (_, ct) =>
+            {
+                var n = Interlocked.Increment(ref calls);
+                if (n == 1)
+                    await Task.Delay(TimeSpan.FromSeconds(5), ct).ConfigureAwait(false);
+            },
+            writeTimeout: TimeSpan.FromMilliseconds(100));
+
+        cache.EnqueueWrite("segment-stalled", [1], SegmentCategory.SmallFile, null, CreateHeader("a.bin"));
+        cache.EnqueueWrite("segment-ok", [2], SegmentCategory.SmallFile, null, CreateHeader("b.bin"));
+
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(3);
+        while (cache.L2Writes == 0 && DateTime.UtcNow < deadline)
+            await Task.Delay(25);
+
+        Assert.Equal(1, cache.L2Writes);
+        Assert.Equal(1, cache.L2WriteFailures);
+    }
+
+    [Fact]
+    public async Task TryReadAsync_TimesOutAndCountsAsMiss()
+    {
+        using var cache = new ObjectStorageSegmentCache(
+            bucketName: "bucket",
+            queueCapacity: 4,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
+            tryReadAsync: async (_, ct) =>
+            {
+                await Task.Delay(TimeSpan.FromSeconds(5), ct).ConfigureAwait(false);
+                return null;
+            },
+            writeAsync: (_, _) => Task.CompletedTask,
+            readTimeout: TimeSpan.FromMilliseconds(100));
+
+        var stream = await cache.TryReadAsync("segment-a", CancellationToken.None);
+
+        Assert.Null(stream);
+        Assert.Equal(1, cache.L2ReadTimeouts);
+        Assert.Equal(1, cache.L2Misses);
+    }
+
+    [Fact]
+    public void QueueDepth_ReflectsPendingWrites()
+    {
+        using var cache = new ObjectStorageSegmentCache(
+            bucketName: "bucket",
+            queueCapacity: 8,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
+            tryReadAsync: (_, _) => Task.FromResult<ObjectStorageSegmentCache.ReadResult?>(null),
+            writeAsync: (_, _) => Task.CompletedTask,
+            startWriter: false);
+
+        Assert.Equal(0, cache.QueueDepth);
+        cache.EnqueueWrite("a", [1], SegmentCategory.SmallFile, null, CreateHeader("a.bin"));
+        cache.EnqueueWrite("b", [2], SegmentCategory.SmallFile, null, CreateHeader("b.bin"));
+        Assert.Equal(2, cache.QueueDepth);
+    }
+
     private static UsenetYencHeader CreateHeader(string fileName)
     {
         return new UsenetYencHeader

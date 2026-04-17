@@ -36,6 +36,9 @@ public sealed class NzbdavMetricsCollector
     private readonly Counter _l2Writes;
     private readonly Counter _l2WriteFailures;
     private readonly Counter _l2WritesDropped;
+    private readonly Counter _l2ReadTimeouts;
+    private readonly Gauge _l2QueueDepth;
+    private readonly Gauge _l2LastWriteUnixtime;
     private readonly Gauge _l2Enabled;
     private readonly Counter _sharedHeaderHits;
     private readonly Counter _sharedHeaderMisses;
@@ -62,6 +65,7 @@ public sealed class NzbdavMetricsCollector
     private long _previousL2Writes;
     private long _previousL2WriteFailures;
     private long _previousL2WritesDropped;
+    private long _previousL2ReadTimeouts;
     private long _previousSharedHeaderHits;
     private long _previousSharedHeaderMisses;
     private long _previousSharedHeaderWriteFailures;
@@ -165,6 +169,15 @@ public sealed class NzbdavMetricsCollector
         _l2WritesDropped = metricFactory.CreateCounter(
             "nzbdav_l2_cache_writes_dropped_total",
             "L2 object-storage writes dropped due to full queue");
+        _l2ReadTimeouts = metricFactory.CreateCounter(
+            "nzbdav_l2_cache_read_timeouts_total",
+            "L2 object-storage reads that tripped the per-request timeout");
+        _l2QueueDepth = metricFactory.CreateGauge(
+            "nzbdav_l2_cache_queue_depth",
+            "L2 writer queue depth (pending writes)");
+        _l2LastWriteUnixtime = metricFactory.CreateGauge(
+            "nzbdav_l2_cache_last_write_unixtime",
+            "Unix timestamp of the most recent successful L2 write (0 = never)");
         _l2Enabled = metricFactory.CreateGauge(
             "nzbdav_l2_cache_enabled",
             "1 if L2 cache is enabled, 0 otherwise");
@@ -252,6 +265,9 @@ public sealed class NzbdavMetricsCollector
                 IncrementCounter(_l2Writes, l2.L2Writes, ref _previousL2Writes);
                 IncrementCounter(_l2WriteFailures, l2.L2WriteFailures, ref _previousL2WriteFailures);
                 IncrementCounter(_l2WritesDropped, l2.L2WritesDropped, ref _previousL2WritesDropped);
+                IncrementCounter(_l2ReadTimeouts, l2.L2ReadTimeouts, ref _previousL2ReadTimeouts);
+                _l2QueueDepth.Set(l2.QueueDepth);
+                _l2LastWriteUnixtime.Set(l2.LastWriteUnixtime);
             }
 
             var sharedHeaderCache = _getSharedHeaderCache();
