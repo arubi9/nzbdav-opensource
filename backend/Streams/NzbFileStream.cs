@@ -170,10 +170,6 @@ public class NzbFileStream(
     private async ValueTask<LongRange> FetchSegmentRangeAsync(int index, CancellationToken ct)
     {
         var header = await usenetClient.GetYencHeadersAsync(fileSegmentIds[index], ct).ConfigureAwait(false);
-        Serilog.Log.Warning(
-            "FetchSegmentRange: idx={Idx} segId={SegId} PartOffset={Off} PartSize={Size} FileSize={FS} PartNumber={PN}/{TP} FileName={FN}",
-            index, fileSegmentIds[index], header.PartOffset, header.PartSize, header.FileSize,
-            header.PartNumber, header.TotalParts, header.FileName);
         var range = LongRange.FromStartAndSize(header.PartOffset, header.PartSize);
         _segmentRanges[index] = range;
         return range;

@@ -148,7 +148,7 @@ public class LiveSegmentCachingNntpClientTests
                     Encoding.ASCII.GetBytes("segment-a"),
                     new Dictionary<string, string>
                     {
-                        ["x-amz-meta-yenc-header"] = System.Text.Json.JsonSerializer.Serialize(CreateHeader("segment.bin"))
+                        ["x-amz-meta-yenc-header"] = System.Text.Json.JsonSerializer.Serialize(CreateHeader("segment.bin"), new System.Text.Json.JsonSerializerOptions { IncludeFields = true })
                     })),
             writeAsync: (_, _) => Task.CompletedTask);
 
@@ -180,7 +180,7 @@ public class LiveSegmentCachingNntpClientTests
                     Encoding.ASCII.GetBytes("segment-a"),
                     new Dictionary<string, string>
                     {
-                        ["X-Amz-Meta-Yenc-Header"] = System.Text.Json.JsonSerializer.Serialize(CreateHeader("segment.bin")),
+                        ["X-Amz-Meta-Yenc-Header"] = System.Text.Json.JsonSerializer.Serialize(CreateHeader("segment.bin"), new System.Text.Json.JsonSerializerOptions { IncludeFields = true }),
                         ["X-Amz-Meta-Category"] = "smallfile"
                     })),
             writeAsync: (_, _) => Task.CompletedTask);
@@ -271,7 +271,7 @@ public class LiveSegmentCachingNntpClientTests
                     Encoding.ASCII.GetBytes("segment-a"),
                     new Dictionary<string, string>
                     {
-                        ["x-amz-meta-yenc-header"] = System.Text.Json.JsonSerializer.Serialize(CreateHeader("segment.bin")),
+                        ["x-amz-meta-yenc-header"] = System.Text.Json.JsonSerializer.Serialize(CreateHeader("segment.bin"), new System.Text.Json.JsonSerializerOptions { IncludeFields = true }),
                         ["x-amz-meta-category"] = "small_file",
                         ["x-amz-meta-owner-nzb-id"] = ownerId.ToString()
                     })),

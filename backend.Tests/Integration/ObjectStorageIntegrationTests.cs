@@ -265,7 +265,12 @@ public sealed class MinioFixture : IAsyncDisposable
         {
             ["x-amz-meta-segment-id"] = segmentId,
             ["x-amz-meta-yenc-filename"] = header.FileName,
-            ["x-amz-meta-yenc-header"] = System.Text.Json.JsonSerializer.Serialize(header),
+            // UsenetYencHeader stores its values in public fields; match the
+            // production writer's IncludeFields=true so the round-trip carries
+            // PartSize/FileName/etc. rather than only IsFilePart.
+            ["x-amz-meta-yenc-header"] = System.Text.Json.JsonSerializer.Serialize(
+                header,
+                new System.Text.Json.JsonSerializerOptions { IncludeFields = true }),
             ["x-amz-meta-category"] = category == SegmentCategory.SmallFile
                 ? "small_file"
                 : category == SegmentCategory.VideoSegment

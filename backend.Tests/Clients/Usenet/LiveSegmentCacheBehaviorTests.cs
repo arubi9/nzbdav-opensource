@@ -111,6 +111,86 @@ public sealed class LiveSegmentCacheBehaviorTests
     }
 
     [Fact]
+    public async Task RehydrateFromDisk_RemovesMetadataWithZeroYencHeader()
+    {
+        // Production corruption pattern: .meta sidecar deserializes fine but
+        // all yEnc fields are zero/null. Reloading such entries would poison
+        // GetOrAddHeaderAsync and cause SeekPositionNotFoundException on any
+        // non-zero Range request. Rehydrate must drop these outright.
+        await using var cacheScope = new TempCacheScope();
+        var bodyPath = GetCachePath(cacheScope.Path, "zero-yenc");
+
+        await File.WriteAllBytesAsync(bodyPath, "BODY"u8.ToArray());
+        // Match the exact on-disk production corruption: YencFileName is null,
+        // every Yenc integer field is 0. SizeBytes stays correct.
+        var corruptMetaJson = """
+        {"SegmentId":"zero-yenc","SizeBytes":4,"LastAccessUtcTicks":0,"YencFileName":null,"YencFileSize":0,"YencLineLength":0,"YencPartNumber":0,"YencTotalParts":0,"YencPartSize":0,"YencPartOffset":0,"Category":0,"OwnerNzbId":null}
+        """;
+        await File.WriteAllTextAsync(bodyPath + ".meta", corruptMetaJson);
+
+        using var liveCache = new LiveSegmentCache(cacheScope.Path);
+
+        Assert.False(File.Exists(bodyPath));
+        Assert.False(File.Exists(bodyPath + ".meta"));
+        Assert.False(liveCache.HasBody("zero-yenc"));
+        Assert.Equal(0, liveCache.GetStats().CachedSegmentCount);
+    }
+
+    [Fact]
+    public async Task HasBody_EvictsEntryWithCorruptYencHeader()
+    {
+        // Read-time guard: even if a corrupt entry slips into _cachedSegments
+        // at runtime (e.g. from a racy write path), the next read through
+        // TryGetFreshEntry must evict it so GetOrAddHeaderAsync falls through
+        // to SharedHeaderCache / NNTP for correct values.
+        await using var cacheScope = new TempCacheScope();
+        using var liveCache = new LiveSegmentCache(cacheScope.Path);
+
+        var bodyPath = GetCachePath(cacheScope.Path, "runtime-corrupt");
+        await File.WriteAllBytesAsync(bodyPath, "BODY"u8.ToArray());
+
+        InjectCorruptCacheEntry(liveCache, segmentId: "runtime-corrupt", bodyPath, sizeBytes: 4);
+
+        var evictionsBefore = liveCache.GetStats().Evictions;
+        Assert.False(liveCache.HasBody("runtime-corrupt"));
+        Assert.True(liveCache.GetStats().Evictions > evictionsBefore);
+        Assert.False(File.Exists(bodyPath));
+    }
+
+    private static void InjectCorruptCacheEntry(LiveSegmentCache cache, string segmentId, string bodyPath, long sizeBytes)
+    {
+        var cacheType = typeof(LiveSegmentCache);
+        var cacheEntryType = cacheType.GetNestedType("CacheEntry", BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("CacheEntry nested type not found");
+
+        var ctor = cacheEntryType.GetConstructors(BindingFlags.Public | BindingFlags.Instance).Single();
+        var header = new UsenetSharp.Models.UsenetYencHeader
+        {
+            FileName = null!,
+            FileSize = 0,
+            LineLength = 0,
+            PartNumber = 0,
+            TotalParts = 0,
+            PartSize = 0,
+            PartOffset = 0
+        };
+        var entry = ctor.Invoke(new object?[]
+        {
+            segmentId, bodyPath, header, sizeBytes, null,
+            SegmentCategory.Unknown, (Guid?)null
+        });
+
+        var cachedSegmentsField = cacheType.GetField("_cachedSegments", BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new InvalidOperationException("_cachedSegments field not found");
+        var dict = cachedSegmentsField.GetValue(cache);
+        var tryAdd = dict!.GetType().GetMethod("TryAdd", BindingFlags.Public | BindingFlags.Instance)!;
+        tryAdd.Invoke(dict, new object?[] { segmentId, entry });
+
+        var cachedBytesField = cacheType.GetField("_cachedBytes", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        cachedBytesField.SetValue(cache, (long)cachedBytesField.GetValue(cache)! + sizeBytes);
+    }
+
+    [Fact]
     public async Task PruneAsync_EvictsVideoSegmentsBeforeUnknownAndSmallFiles()
     {
         await using var cacheScope = new TempCacheScope();

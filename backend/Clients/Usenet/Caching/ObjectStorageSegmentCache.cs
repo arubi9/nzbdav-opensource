@@ -12,6 +12,12 @@ namespace NzbWebDAV.Clients.Usenet.Caching;
 
 public sealed class ObjectStorageSegmentCache : IDisposable
 {
+    // See LiveSegmentCache.YencHeaderJsonOptions for the why — kept in sync.
+    private static readonly JsonSerializerOptions YencHeaderJsonOptions = new()
+    {
+        IncludeFields = true
+    };
+
     public sealed record ReadResult(byte[] Body, IReadOnlyDictionary<string, string> Metadata);
     private sealed record ConfigBinding(
         string BucketName,
@@ -310,7 +316,14 @@ public sealed class ObjectStorageSegmentCache : IDisposable
             {
                 ["x-amz-meta-segment-id"] = request.SegmentId,
                 ["x-amz-meta-yenc-filename"] = request.YencHeaders.FileName,
-                ["x-amz-meta-yenc-header"] = JsonSerializer.Serialize(request.YencHeaders),
+                // UsenetYencHeader exposes its data via public fields; default
+                // JsonSerializer options skip fields and would store only the
+                // IsFilePart property, round-tripping every other value to
+                // zero and poisoning L2 promotions. See IsCorruptYencHeader /
+                // YencHeaderJsonOptions in LiveSegmentCache for the symptom.
+                ["x-amz-meta-yenc-header"] = JsonSerializer.Serialize(
+                    request.YencHeaders,
+                    YencHeaderJsonOptions),
                 ["x-amz-meta-category"] = request.Category switch
                 {
                     SegmentCategory.SmallFile => "small_file",

@@ -37,14 +37,7 @@ public static class InterpolationSearch
 
             // make sure our search is even possible.
             if (!byteRangeToSearch.Contains(searchByte) || indexRangeToSearch.Count <= 0)
-            {
-                Serilog.Log.Warning(
-                    "InterpolationSearch precheck fail: searchByte={SB} byteRange=[{BStart},{BEnd}) indexRange=[{IStart},{IEnd}) containsSB={Contains} indexCount={IC}",
-                    searchByte, byteRangeToSearch.StartInclusive, byteRangeToSearch.EndExclusive,
-                    indexRangeToSearch.StartInclusive, indexRangeToSearch.EndExclusive,
-                    byteRangeToSearch.Contains(searchByte), indexRangeToSearch.Count);
                 throw new SeekPositionNotFoundException($"Corrupt file. Cannot find byte position {searchByte}.");
-            }
 
             // make a guess
             var searchByteFromStart = searchByte - byteRangeToSearch.StartInclusive;
@@ -52,11 +45,6 @@ public static class InterpolationSearch
             var guessFromStart = (long)Math.Floor(searchByteFromStart / bytesPerIndex);
             var guessedIndex = (int)(indexRangeToSearch.StartInclusive + guessFromStart);
             var byteRangeOfGuessedIndex = await getByteRangeOfGuessedIndex(guessedIndex).ConfigureAwait(false);
-            Serilog.Log.Warning(
-                "InterpolationSearch guess: searchByte={SB} idxRange=[{IStart},{IEnd}) byteRange=[{BStart},{BEnd}) guessedIdx={Idx} guessRange=[{GStart},{GEnd})",
-                searchByte, indexRangeToSearch.StartInclusive, indexRangeToSearch.EndExclusive,
-                byteRangeToSearch.StartInclusive, byteRangeToSearch.EndExclusive,
-                guessedIndex, byteRangeOfGuessedIndex.StartInclusive, byteRangeOfGuessedIndex.EndExclusive);
 
             // make sure the result is within the range of our search space
             if (!byteRangeOfGuessedIndex.IsContainedWithin(byteRangeToSearch))

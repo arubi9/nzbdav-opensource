@@ -132,6 +132,30 @@ public sealed class LiveSegmentCache : IDisposable
     private long _misses;
     private long _dedupes;
     private long _evictions;
+    private long _corruptHeadersEvicted;
+    private long _corruptHeadersRejected;
+
+    // A yEnc header is considered corrupt if key descriptive fields are
+    // default/empty — PartSize=0 and FileName=null/empty. This happens when a
+    // .meta sidecar was written before the yEnc header was fully populated
+    // (observed on ~3% of entries in production). Consumers of such headers
+    // (notably InterpolationSearch via NzbFileStream.FetchSegmentRangeAsync)
+    // treat the resulting zero-length segment range as "segment doesn't
+    // exist," collapse their search space, and throw SeekPositionNotFound —
+    // surfacing as a 404 on every Range request past byte 0.
+    private static bool IsCorruptYencHeader(UsenetSharp.Models.UsenetYencHeader header)
+        => header.PartSize <= 0 || string.IsNullOrEmpty(header.FileName);
+
+    // UsenetYencHeader exposes its data via public fields, not properties.
+    // System.Text.Json skips fields unless IncludeFields is true, so without
+    // this option Serialize only writes the synthetic IsFilePart property and
+    // Deserialize round-trips every other value to its type default. Both
+    // the L2 object-storage metadata and any other caller that serializes a
+    // yEnc header must use these options.
+    private static readonly JsonSerializerOptions YencHeaderJsonOptions = new()
+    {
+        IncludeFields = true
+    };
 
     public LiveSegmentCache(
         ConfigManager configManager,
@@ -529,6 +553,21 @@ public sealed class LiveSegmentCache : IDisposable
         Guid? ownerNzbId,
         bool enqueueL2Write)
     {
+        if (IsCorruptYencHeader(bodyFetch.YencHeaders))
+        {
+            // Observability only: the read-time guard in TryGetFreshEntry
+            // evicts corrupt entries on next access, so a poisoned cache
+            // recovers via SharedHeaderCache / fresh NNTP fetch. Capturing
+            // the source here lets us trace where zero-yEnc writes originate
+            // (NNTP parser path vs. L2 promotion path) without breaking the
+            // stream.
+            Interlocked.Increment(ref _corruptHeadersRejected);
+            Log.Warning(
+                "Storing segment {SegmentId} despite corrupt yEnc header (PartSize={PartSize} FileName={FileName} Source={Source}); will be evicted on next read",
+                segmentId, bodyFetch.YencHeaders.PartSize, bodyFetch.YencHeaders.FileName ?? "(null)",
+                enqueueL2Write ? "NNTP" : "L2-promotion");
+        }
+
         await using var bodyStream = bodyFetch.Stream;
 
         var tempPath = Path.Join(CacheDirectory, $"{Guid.NewGuid():N}.tmp");
@@ -608,10 +647,23 @@ public sealed class LiveSegmentCache : IDisposable
             return null;
         }
 
-        var yencHeader = JsonSerializer.Deserialize<UsenetYencHeader>(headerJson);
+        // UsenetYencHeader exposes data via public fields (not properties), so
+        // JsonSerializer must be told to include fields or it only writes/reads
+        // the single IsFilePart property — and every other value becomes its
+        // type default on round-trip. Pre-fix L2 metadata may still be on S3
+        // in the broken shape; treat any deserialized header whose core values
+        // look empty as an L2 miss so the caller falls through to NNTP.
+        var yencHeader = JsonSerializer.Deserialize<UsenetYencHeader>(headerJson, YencHeaderJsonOptions);
         if (yencHeader is null)
         {
             Log.Debug("L2 metadata contains invalid yEnc header for segment {SegmentId}; falling back to NNTP.", segmentId);
+            return null;
+        }
+        if (IsCorruptYencHeader(yencHeader))
+        {
+            Log.Warning(
+                "L2 metadata yEnc header is empty for segment {SegmentId} (likely written before JsonSerializer IncludeFields was set); falling back to NNTP.",
+                segmentId);
             return null;
         }
 
@@ -652,6 +704,18 @@ public sealed class LiveSegmentCache : IDisposable
         if (entry.IsExpired(_maxAge) || !File.Exists(entry.CachePath))
         {
             TryEvict(segmentId, entry);
+            entry = null!;
+            return false;
+        }
+
+        if (IsCorruptYencHeader(entry.YencHeaders))
+        {
+            Interlocked.Increment(ref _corruptHeadersEvicted);
+            Log.Warning(
+                "Evicting cached segment {SegmentId} with corrupt yEnc header (PartSize={PartSize} FileName={FileName}); forcing refetch",
+                segmentId, entry.YencHeaders.PartSize, entry.YencHeaders.FileName ?? "(null)");
+            TryEvict(segmentId, entry);
+            _headerCache.Remove(segmentId);
             entry = null!;
             return false;
         }
@@ -790,8 +854,13 @@ public sealed class LiveSegmentCache : IDisposable
                     continue;
                 }
 
+                CacheEntryMetadata? meta = null;
+                Exception? deserializeException = null;
                 try
                 {
+                    // Scope the FileStream tightly so Windows can delete the
+                    // .meta file later if we need to — FileStream(FileShare.Read)
+                    // blocks File.Delete on Windows until the handle is closed.
                     using var metaStream = new FileStream(
                         metaPath,
                         FileMode.Open,
@@ -800,16 +869,37 @@ public sealed class LiveSegmentCache : IDisposable
                         bufferSize: 4096,
                         useAsync: false
                     );
-                    var meta = JsonSerializer.Deserialize<CacheEntryMetadata>(metaStream);
-                    if (meta is null)
+                    meta = JsonSerializer.Deserialize<CacheEntryMetadata>(metaStream);
+                }
+                catch (Exception ex)
+                {
+                    deserializeException = ex;
+                }
+
+                if (deserializeException != null || meta is null)
+                {
+                    // Corrupt or unreadable .meta — clean up both files.
+                    DeleteFileQuietly(metaPath);
+                    DeleteFileQuietly(bodyPath);
+                    orphansRemoved++;
+                    continue;
+                }
+
+                try
+                {
+                    var yencHeader = meta.ToYencHeader();
+                    if (IsCorruptYencHeader(yencHeader))
                     {
+                        // Zero-yEnc sidecar — would poison GetOrAddHeaderAsync
+                        // on rehydrate. Drop both files; the next access
+                        // refetches from SharedHeaderCache or NNTP with
+                        // correct values.
                         DeleteFileQuietly(metaPath);
                         DeleteFileQuietly(bodyPath);
                         orphansRemoved++;
                         continue;
                     }
 
-                    var yencHeader = meta.ToYencHeader();
                     var entry = new CacheEntry(
                         meta.SegmentId,
                         bodyPath,
@@ -830,7 +920,7 @@ public sealed class LiveSegmentCache : IDisposable
                 }
                 catch
                 {
-                    // Corrupt .meta — clean up
+                    // Anything unexpected (e.g. ToYencHeader throws) — clean up.
                     DeleteFileQuietly(metaPath);
                     DeleteFileQuietly(bodyPath);
                     orphansRemoved++;
