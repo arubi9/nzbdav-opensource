@@ -1,124 +1,196 @@
 {
-  "dashboard": {
-    "title": "NZBDAV",
-    "panels": [
+  "title": "NZBDAV",
+  "uid": "nzbdav-main",
+  "schemaVersion": 39,
+  "tags": ["nzbdav"],
+  "timezone": "browser",
+  "refresh": "15s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
       {
-        "title": "Cache Hit Rate",
-        "type": "gauge",
-        "targets": [
-          {
-            "expr": "nzbdav_cache_hit_rate",
-            "legendFormat": "{{instance}}"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "min": 0,
-            "max": 1,
-            "thresholds": {
-              "steps": [
-                { "value": 0, "color": "red" },
-                { "value": 0.5, "color": "yellow" },
-                { "value": 0.8, "color": "green" }
-              ]
-            }
-          }
-        }
-      },
-      {
-        "title": "Active Streams",
-        "type": "stat",
-        "targets": [
-          {
-            "expr": "sum(nzbdav_streams_active)",
-            "legendFormat": "streams"
-          }
-        ]
-      },
-      {
-        "title": "NNTP Connection Utilization",
-        "type": "timeseries",
-        "targets": [
-          {
-            "expr": "nzbdav_nntp_connections_active",
-            "legendFormat": "active {{instance}}"
-          },
-          {
-            "expr": "nzbdav_nntp_connections_max",
-            "legendFormat": "max {{instance}}"
-          }
-        ]
-      },
-      {
-        "title": "Cache Segments by Category",
-        "type": "timeseries",
-        "targets": [
-          {
-            "expr": "nzbdav_cache_segments{category=\"video\"}",
-            "legendFormat": "video"
-          },
-          {
-            "expr": "nzbdav_cache_segments{category=\"small_file\"}",
-            "legendFormat": "small_file"
-          },
-          {
-            "expr": "nzbdav_cache_segments{category=\"unknown\"}",
-            "legendFormat": "unknown"
-          }
-        ]
-      },
-      {
-        "title": "Request Latency (p99)",
-        "type": "timeseries",
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m]))",
-            "legendFormat": "p99"
-          },
-          {
-            "expr": "histogram_quantile(0.50, rate(http_request_duration_seconds_bucket[5m]))",
-            "legendFormat": "p50"
-          }
-        ]
-      },
-      {
-        "title": "Cache Operations Rate",
-        "type": "timeseries",
-        "targets": [
-          {
-            "expr": "rate(nzbdav_cache_hits_total[5m])",
-            "legendFormat": "hits/s"
-          },
-          {
-            "expr": "rate(nzbdav_cache_misses_total[5m])",
-            "legendFormat": "misses/s"
-          },
-          {
-            "expr": "rate(nzbdav_cache_evictions_total[5m])",
-            "legendFormat": "evictions/s"
-          }
-        ]
-      },
-      {
-        "title": "Warming Sessions",
-        "type": "stat",
-        "targets": [
-          {
-            "expr": "sum(nzbdav_warming_sessions_active)",
-            "legendFormat": "sessions"
-          }
-        ]
-      },
-      {
-        "title": "Queue Status",
-        "type": "stat",
-        "targets": [
-          {
-            "expr": "nzbdav_queue_processing",
-            "legendFormat": "{{instance}}"
-          }
-        ]
+        "name": "instance",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "query": "label_values(nzbdav_cache_hit_rate, instance)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2,
+        "allValue": ".*"
       }
     ]
-  }
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Active Streams",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "sum(nzbdav_streams_active{instance=~\"$instance\"})", "legendFormat": "streams" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "value": 0, "color": "green" }, { "value": 10, "color": "orange" }, { "value": 20, "color": "red" } ] } } }
+    },
+    {
+      "id": 2,
+      "title": "L1 Cache Hit Rate",
+      "type": "gauge",
+      "gridPos": { "x": 4, "y": 0, "w": 5, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [ { "expr": "avg(nzbdav_cache_hit_rate{instance=~\"$instance\"})", "legendFormat": "hit rate" } ],
+      "fieldConfig": { "defaults": { "min": 0, "max": 1, "unit": "percentunit", "thresholds": { "steps": [ { "value": 0, "color": "red" }, { "value": 0.5, "color": "yellow" }, { "value": 0.8, "color": "green" } ] } } }
+    },
+    {
+      "id": 3,
+      "title": "L2 Hit Rate (1h)",
+      "type": "gauge",
+      "gridPos": { "x": 9, "y": 0, "w": 5, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "sum(rate(nzbdav_l2_cache_hits_total{instance=~\"$instance\"}[1h])) / clamp_min(sum(rate(nzbdav_l2_cache_hits_total{instance=~\"$instance\"}[1h])) + sum(rate(nzbdav_l2_cache_misses_total{instance=~\"$instance\"}[1h])), 0.001)", "legendFormat": "l2 hit rate" }
+      ],
+      "fieldConfig": { "defaults": { "min": 0, "max": 1, "unit": "percentunit", "thresholds": { "steps": [ { "value": 0, "color": "red" }, { "value": 0.2, "color": "yellow" }, { "value": 0.5, "color": "green" } ] } } }
+    },
+    {
+      "id": 4,
+      "title": "L2 Writer Stale (s since last write)",
+      "type": "stat",
+      "gridPos": { "x": 14, "y": 0, "w": 5, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "time() - max(nzbdav_l2_cache_last_write_unixtime{instance=~\"$instance\"})", "legendFormat": "seconds" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "steps": [ { "value": 0, "color": "green" }, { "value": 120, "color": "orange" }, { "value": 300, "color": "red" } ] } } }
+    },
+    {
+      "id": 5,
+      "title": "L2 Queue Depth",
+      "type": "stat",
+      "gridPos": { "x": 19, "y": 0, "w": 5, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "max(nzbdav_l2_cache_queue_depth{instance=~\"$instance\"})", "legendFormat": "pending" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "steps": [ { "value": 0, "color": "green" }, { "value": 100, "color": "yellow" }, { "value": 1000, "color": "red" } ] } } }
+    },
+
+    {
+      "id": 10,
+      "title": "L1 Cache Ops (per sec)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "sum by (instance) (rate(nzbdav_cache_hits_total{instance=~\"$instance\"}[5m]))", "legendFormat": "hits {{instance}}" },
+        { "expr": "sum by (instance) (rate(nzbdav_cache_misses_total{instance=~\"$instance\"}[5m]))", "legendFormat": "misses {{instance}}" },
+        { "expr": "sum by (instance) (rate(nzbdav_cache_evictions_total{instance=~\"$instance\"}[5m]))", "legendFormat": "evictions {{instance}}" },
+        { "expr": "sum by (instance) (rate(nzbdav_cache_dedupes_total{instance=~\"$instance\"}[5m]))", "legendFormat": "dedupes {{instance}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "id": 11,
+      "title": "L2 Cache Ops (per sec)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "sum by (instance) (rate(nzbdav_l2_cache_hits_total{instance=~\"$instance\"}[5m]))", "legendFormat": "hits {{instance}}" },
+        { "expr": "sum by (instance) (rate(nzbdav_l2_cache_misses_total{instance=~\"$instance\"}[5m]))", "legendFormat": "misses {{instance}}" },
+        { "expr": "sum by (instance) (rate(nzbdav_l2_cache_writes_total{instance=~\"$instance\"}[5m]))", "legendFormat": "writes {{instance}}" },
+        { "expr": "sum by (instance) (rate(nzbdav_l2_cache_write_failures_total{instance=~\"$instance\"}[5m]))", "legendFormat": "failures {{instance}}" },
+        { "expr": "sum by (instance) (rate(nzbdav_l2_cache_writes_dropped_total{instance=~\"$instance\"}[5m]))", "legendFormat": "dropped {{instance}}" },
+        { "expr": "sum by (instance) (rate(nzbdav_l2_cache_read_timeouts_total{instance=~\"$instance\"}[5m]))", "legendFormat": "read-timeouts {{instance}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+
+    {
+      "id": 20,
+      "title": "L1 Cache Bytes vs Capacity",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 11, "w": 12, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "nzbdav_cache_bytes{instance=~\"$instance\"}", "legendFormat": "used {{instance}}" },
+        { "expr": "nzbdav_cache_max_bytes{instance=~\"$instance\"}", "legendFormat": "max {{instance}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" } }
+    },
+    {
+      "id": 21,
+      "title": "L1 Segments by Category",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 11, "w": 12, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "sum by (category) (nzbdav_cache_segments{instance=~\"$instance\"})", "legendFormat": "{{category}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+
+    {
+      "id": 30,
+      "title": "NNTP Connections",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 18, "w": 12, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "nzbdav_nntp_connections_live{instance=~\"$instance\"}", "legendFormat": "live {{instance}}" },
+        { "expr": "nzbdav_nntp_connections_active{instance=~\"$instance\"}", "legendFormat": "active {{instance}}" },
+        { "expr": "nzbdav_nntp_connections_idle{instance=~\"$instance\"}", "legendFormat": "idle {{instance}}" },
+        { "expr": "nzbdav_nntp_connections_max{instance=~\"$instance\"}", "legendFormat": "max {{instance}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 31,
+      "title": "NNTP Lease Slots (total)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 18, "w": 12, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "sum by (kind) (nzbdav_nntp_lease_slots_total{instance=~\"$instance\"})", "legendFormat": "{{kind}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+
+    {
+      "id": 40,
+      "title": "Provider Health",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 25, "w": 8, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "nzbdav_nntp_providers_healthy{instance=~\"$instance\"}", "legendFormat": "healthy {{instance}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 41,
+      "title": "Warming & Queue",
+      "type": "timeseries",
+      "gridPos": { "x": 8, "y": 25, "w": 8, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "nzbdav_warming_sessions_active{instance=~\"$instance\"}", "legendFormat": "warming {{instance}}" },
+        { "expr": "nzbdav_queue_processing{instance=~\"$instance\"}", "legendFormat": "queue-processing {{instance}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 42,
+      "title": "Shared Header Cache Ops",
+      "type": "timeseries",
+      "gridPos": { "x": 16, "y": 25, "w": 8, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "sum by (instance) (rate(nzbdav_shared_header_cache_hits_total{instance=~\"$instance\"}[5m]))", "legendFormat": "hits {{instance}}" },
+        { "expr": "sum by (instance) (rate(nzbdav_shared_header_cache_misses_total{instance=~\"$instance\"}[5m]))", "legendFormat": "misses {{instance}}" },
+        { "expr": "sum by (instance) (rate(nzbdav_shared_header_cache_write_failures_total{instance=~\"$instance\"}[5m]))", "legendFormat": "fail {{instance}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    }
+  ]
 }

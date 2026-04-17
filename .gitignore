@@ -18,3 +18,12 @@ nuget
 .vscode/
 .worktrees/
 .claude/worktrees/
+
+###################
+# local dev state #
+###################
+
+# Local dev runtime data (SQLite + stream cache + data-protection keys).
+/nzbdav-config/
+# PlaybackInfo dump scratchpad from debugging.
+/pb.json
