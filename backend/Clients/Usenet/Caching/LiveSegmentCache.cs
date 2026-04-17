@@ -650,10 +650,24 @@ public sealed class LiveSegmentCache : IDisposable
         // UsenetYencHeader exposes data via public fields (not properties), so
         // JsonSerializer must be told to include fields or it only writes/reads
         // the single IsFilePart property — and every other value becomes its
-        // type default on round-trip. Pre-fix L2 metadata may still be on S3
-        // in the broken shape; treat any deserialized header whose core values
-        // look empty as an L2 miss so the caller falls through to NNTP.
-        var yencHeader = JsonSerializer.Deserialize<UsenetYencHeader>(headerJson, YencHeaderJsonOptions);
+        // type default on round-trip. Pre-fix L2 metadata on S3 is in the
+        // broken shape (only "IsFilePart":true) and now throws JsonException
+        // at deserialize time because the required fields are missing. Treat
+        // both the throw and a deserialized-but-empty header as an L2 miss so
+        // the caller falls through to NNTP.
+        UsenetYencHeader? yencHeader;
+        try
+        {
+            yencHeader = JsonSerializer.Deserialize<UsenetYencHeader>(headerJson, YencHeaderJsonOptions);
+        }
+        catch (JsonException ex)
+        {
+            Log.Warning(
+                "L2 metadata yEnc header for segment {SegmentId} is malformed or pre-fix ({Message}); falling back to NNTP.",
+                segmentId, ex.Message);
+            return null;
+        }
+
         if (yencHeader is null)
         {
             Log.Debug("L2 metadata contains invalid yEnc header for segment {SegmentId}; falling back to NNTP.", segmentId);
