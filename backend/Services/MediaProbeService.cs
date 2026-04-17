@@ -107,20 +107,21 @@ public class MediaProbeService : BackgroundService
             if (missing.Count == 0)
             {
                 Log.Information("ProbeDataGenerator backfill: all {Total} items already have probe data", videoItems.Count);
-                return;
+            }
+            else
+            {
+                Log.Information("ProbeDataGenerator backfill: {Missing}/{Total} items need probe data", missing.Count, videoItems.Count);
+
+                await ProcessBackfillBatchAsync(
+                    missing,
+                    (item, innerCt) => ProbeAndCacheFile(new DavDatabaseContext(), item, innerCt),
+                    ct).ConfigureAwait(false);
             }
 
-            Log.Information("ProbeDataGenerator backfill: {Missing}/{Total} items need probe data", missing.Count, videoItems.Count);
-
-            await ProcessBackfillBatchAsync(
-                missing,
-                (item, innerCt) => ProbeAndCacheFile(new DavDatabaseContext(), item, innerCt),
-                ct).ConfigureAwait(false);
-
-            // Phase 2 of the backfill: ensure the first segment of every
-            // video is present in L2 so a cold first-byte read hits S3
-            // (~50 ms) instead of NNTP (~500-1000 ms). Cheap — one segment
-            // per file, and no-op when L2 already has it.
+            // Phase 2 of the backfill (unconditional): ensure the first
+            // segment of every video is present in L2 so a cold first-byte
+            // read hits S3 (~50 ms) instead of NNTP (~500-1000 ms). Cheap -
+            // one segment per file, no-op when L2 already has it.
             await WarmFirstSegmentsIntoL2Async(videoItems, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
