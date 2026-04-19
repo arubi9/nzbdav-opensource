@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.StaticFiles;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Metrics;
@@ -16,6 +17,11 @@ public class StreamExecutionService
         HttpRequest request,
         CancellationToken cancellationToken)
     {
+        // Kill response buffering so bytes flush to wire immediately.
+        // Kestrel default buffers 4 KB before first flush, adding ~20-40 ms
+        // to TTFB on L1 cache hits. Video streaming wants minimum TTFB.
+        response.HttpContext.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
+
         response.ContentType = GetContentType(fileName);
         response.Headers.AcceptRanges = "bytes";
 

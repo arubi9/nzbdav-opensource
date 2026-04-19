@@ -102,7 +102,32 @@ public partial class Program
         var usePerNodeLeasing = NntpLeaseAgent.ShouldUsePerNodeLeasing(MultiNodeMode.IsEnabled, NodeRoleConfig.Current);
         var useLegacyConnectionCoordinator = MultiNodeMode.IsEnabled && NodeRoleConfig.Current == NodeRole.Combined;
         var maxRequestBodySize = EnvironmentUtil.GetLongVariable("MAX_REQUEST_BODY_SIZE") ?? 100 * 1024 * 1024;
-        builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = maxRequestBodySize);
+        builder.WebHost.ConfigureKestrel(options =>
+        {
+            // Uploads (WebDAV PUT) can be large — respect configured cap.
+            options.Limits.MaxRequestBodySize = maxRequestBodySize;
+
+            // Streaming workload wants long idle connections so viewers
+            // surviving pauses don't force a fresh TLS handshake on resume.
+            options.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(10);
+
+            // Fail slow-loris fast.
+            options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(10);
+
+            // Allow a single HTTP/2 connection to multiplex many concurrent
+            // Range requests (one viewer can pull parallel segments without
+            // opening N TCP connections).
+            options.Limits.Http2.MaxStreamsPerConnection = 256;
+
+            // Unbounded concurrent connections — rely on OS ephemeral-port
+            // range and downstream NNTP/L2 pressure for backpressure.
+            options.Limits.MaxConcurrentConnections = null;
+            options.Limits.MaxConcurrentUpgradedConnections = null;
+
+            // Force async IO — any sync Read/Write in the stream pipeline
+            // would throttle the thread pool under load.
+            options.AllowSynchronousIO = false;
+        });
         builder.Services.Configure<HostOptions>(opts => opts.ShutdownTimeout = TimeSpan.FromSeconds(30));
         builder.Host.UseSerilog();
         builder.Services.AddControllers();
