@@ -136,6 +136,9 @@ public partial class Program
         // filters only when credentials are invalid.
         builder.Services.AddHealthChecks()
             .AddCheck<NzbdavHealthCheck>("nzbdav");
+        // DatabaseStore depends on IHttpContextAccessor. Register it
+        // explicitly - AddControllers does not add this by default.
+        builder.Services.AddHttpContextAccessor();
         builder.Services
             .AddWebdavBasicAuthentication(configManager)
             .AddSingleton(encryptionService)
