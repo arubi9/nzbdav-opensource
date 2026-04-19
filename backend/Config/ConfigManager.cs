@@ -410,7 +410,13 @@ public class ConfigManager
     }
 
     public int GetL2WriteQueueCapacity()
-        => int.Parse(StringUtil.EmptyToNull(GetConfigValue("cache.l2.write-queue-capacity")) ?? "2048");
+        => int.Parse(StringUtil.EmptyToNull(GetConfigValue("cache.l2.write-queue-capacity")) ?? "16384");
+
+    public int GetL2WriterParallelism()
+        => int.Parse(StringUtil.EmptyToNull(GetConfigValue("cache.l2.writer-parallelism")) ?? "4");
+
+    public string GetL2PrewarmPolicy()
+        => StringUtil.EmptyToNull(GetConfigValue("cache.l2.prewarm-policy"))?.ToLowerInvariant() ?? "first-middle-last";
 
     public TimeSpan GetL2ReadTimeout()
         => TimeSpan.FromSeconds(

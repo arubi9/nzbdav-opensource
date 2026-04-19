@@ -234,6 +234,8 @@ public sealed class ObjectStorageSegmentCacheTests
     [Fact]
     public async Task WriterLoop_RecoversAfterTimeout()
     {
+        // Force single writer so ordering is deterministic: stalled write
+        // must timeout before OK write runs.
         var calls = 0;
 
         using var cache = new ObjectStorageSegmentCache(
@@ -247,13 +249,14 @@ public sealed class ObjectStorageSegmentCacheTests
                 if (n == 1)
                     await Task.Delay(TimeSpan.FromSeconds(5), ct).ConfigureAwait(false);
             },
-            writeTimeout: TimeSpan.FromMilliseconds(100));
+            writeTimeout: TimeSpan.FromMilliseconds(100),
+            writerParallelism: 1);
 
         cache.EnqueueWrite("segment-stalled", [1], SegmentCategory.SmallFile, null, CreateHeader("a.bin"));
         cache.EnqueueWrite("segment-ok", [2], SegmentCategory.SmallFile, null, CreateHeader("b.bin"));
 
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(3);
-        while (cache.L2Writes == 0 && DateTime.UtcNow < deadline)
+        while ((cache.L2Writes < 1 || cache.L2WriteFailures < 1) && DateTime.UtcNow < deadline)
             await Task.Delay(25);
 
         Assert.Equal(1, cache.L2Writes);
@@ -280,6 +283,90 @@ public sealed class ObjectStorageSegmentCacheTests
         Assert.Null(stream);
         Assert.Equal(1, cache.L2ReadTimeouts);
         Assert.Equal(1, cache.L2Misses);
+    }
+
+    [Fact]
+    public async Task MultipleWriters_DrainConcurrently()
+    {
+        // 8 writes, each takes 200 ms. Single writer = 1.6s, 4 writers = 400ms.
+        // We assert completion within 800 ms to prove parallelism.
+        var started = 0;
+        var peakConcurrent = 0;
+        var currentConcurrent = 0;
+        var lockObj = new object();
+
+        using var cache = new ObjectStorageSegmentCache(
+            bucketName: "bucket",
+            queueCapacity: 16,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
+            tryReadAsync: (_, _) => Task.FromResult<ObjectStorageSegmentCache.ReadResult?>(null),
+            writeAsync: async (_, _) =>
+            {
+                Interlocked.Increment(ref started);
+                int now;
+                lock (lockObj)
+                {
+                    currentConcurrent++;
+                    now = currentConcurrent;
+                    if (now > peakConcurrent) peakConcurrent = now;
+                }
+                await Task.Delay(200).ConfigureAwait(false);
+                lock (lockObj) { currentConcurrent--; }
+            },
+            writerParallelism: 4);
+
+        for (var i = 0; i < 8; i++)
+            cache.EnqueueWrite($"seg-{i}", [1], SegmentCategory.SmallFile, null, CreateHeader($"{i}.bin"));
+
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
+        while (cache.L2Writes < 8 && DateTime.UtcNow < deadline)
+            await Task.Delay(25);
+
+        Assert.Equal(8, cache.L2Writes);
+        Assert.True(peakConcurrent >= 2, $"Expected multi-worker concurrency, peak was {peakConcurrent}");
+        Assert.Equal(4, cache.WriterParallelism);
+    }
+
+    [Fact]
+    public async Task SingleWriter_PreservesLegacyBehavior()
+    {
+        using var cache = new ObjectStorageSegmentCache(
+            bucketName: "bucket",
+            queueCapacity: 16,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
+            tryReadAsync: (_, _) => Task.FromResult<ObjectStorageSegmentCache.ReadResult?>(null),
+            writeAsync: (_, _) => Task.CompletedTask,
+            writerParallelism: 1);
+
+        for (var i = 0; i < 5; i++)
+            cache.EnqueueWrite($"seg-{i}", [1], SegmentCategory.SmallFile, null, CreateHeader($"{i}.bin"));
+
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
+        while (cache.L2Writes < 5 && DateTime.UtcNow < deadline)
+            await Task.Delay(25);
+
+        Assert.Equal(5, cache.L2Writes);
+        Assert.Equal(1, cache.WriterParallelism);
+    }
+
+    [Fact]
+    public void WriterParallelism_RejectsInvalidValues()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => new ObjectStorageSegmentCache(
+            bucketName: "b",
+            queueCapacity: 4,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
+            tryReadAsync: (_, _) => Task.FromResult<ObjectStorageSegmentCache.ReadResult?>(null),
+            writeAsync: (_, _) => Task.CompletedTask,
+            writerParallelism: 0));
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new ObjectStorageSegmentCache(
+            bucketName: "b",
+            queueCapacity: 4,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
+            tryReadAsync: (_, _) => Task.FromResult<ObjectStorageSegmentCache.ReadResult?>(null),
+            writeAsync: (_, _) => Task.CompletedTask,
+            writerParallelism: 64));
     }
 
     [Fact]

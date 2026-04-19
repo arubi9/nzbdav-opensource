@@ -23,6 +23,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
     private sealed record ConfigBinding(
         string BucketName,
         int QueueCapacity,
+        int WriterParallelism,
         TimeSpan ReadTimeout,
         TimeSpan WriteTimeout,
         Func<CancellationToken, Task> EnsureBucketExistsAsync,
@@ -39,9 +40,10 @@ public sealed class ObjectStorageSegmentCache : IDisposable
     private readonly SemaphoreSlim _queueSignal = new(0);
     private readonly ConcurrentQueue<WriteRequest> _writeQueue = new();
     private readonly int _queueCapacity;
+    private readonly int _writerParallelism;
     private readonly TimeSpan _readTimeout;
     private readonly TimeSpan _writeTimeout;
-    private readonly Task _writerTask;
+    private readonly IReadOnlyList<Task> _writerTasks;
     private volatile int _queueCount;
     private volatile bool _shutdownRequested;
     private bool _disposed;
@@ -62,6 +64,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
     public long L2ReadTimeouts => Interlocked.Read(ref _l2ReadTimeouts);
     public long LastWriteUnixtime => Interlocked.Read(ref _lastWriteUnixtime);
     public int QueueDepth => _queueCount;
+    public int WriterParallelism => _writerParallelism;
     public string BucketName { get; }
 
     public ObjectStorageSegmentCache(ConfigManager configManager)
@@ -79,7 +82,8 @@ public sealed class ObjectStorageSegmentCache : IDisposable
             binding.DeleteByOwnerAsync,
             binding.StartWriter,
             binding.ReadTimeout,
-            binding.WriteTimeout)
+            binding.WriteTimeout,
+            binding.WriterParallelism)
     {
     }
 
@@ -92,23 +96,36 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         Func<Guid, CancellationToken, Task>? deleteByOwnerAsync = null,
         bool startWriter = true,
         TimeSpan? readTimeout = null,
-        TimeSpan? writeTimeout = null)
+        TimeSpan? writeTimeout = null,
+        int writerParallelism = 4)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(queueCapacity);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(writerParallelism);
+        if (writerParallelism > 32)
+            throw new ArgumentOutOfRangeException(nameof(writerParallelism), "Must be 1-32");
 
         BucketName = bucketName;
         _queueCapacity = queueCapacity;
+        _writerParallelism = writerParallelism;
         _readTimeout = readTimeout ?? TimeSpan.FromSeconds(30);
         _writeTimeout = writeTimeout ?? TimeSpan.FromSeconds(60);
         _ensureBucketExistsAsync = ensureBucketExistsAsync;
         _tryReadAsync = tryReadAsync;
         _writeAsync = writeAsync;
         _deleteByOwnerAsync = deleteByOwnerAsync;
-        // Seed so the `time() - last_write_unixtime` alert predicate does
-        // not fire spuriously during the window between boot and the first
-        // real write.
         _lastWriteUnixtime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        _writerTask = startWriter ? Task.Run(WriterLoopAsync) : Task.CompletedTask;
+
+        if (startWriter)
+        {
+            var tasks = new Task[writerParallelism];
+            for (var i = 0; i < writerParallelism; i++)
+                tasks[i] = Task.Run(WriterLoopAsync);
+            _writerTasks = tasks;
+        }
+        else
+        {
+            _writerTasks = Array.Empty<Task>();
+        }
     }
 
     public static string GetObjectKey(string segmentId)
@@ -214,14 +231,18 @@ public sealed class ObjectStorageSegmentCache : IDisposable
 
         _disposed = true;
         _shutdownRequested = true;
-        _queueSignal.Release();
+        // Wake every writer so they observe the shutdown flag.
+        if (_writerTasks.Count > 0)
+            _queueSignal.Release(_writerTasks.Count);
+
         try
         {
-            if (!_writerTask.Wait(TimeSpan.FromSeconds(10)))
+            var writerArray = _writerTasks.ToArray();
+            if (writerArray.Length > 0 && !Task.WaitAll(writerArray, TimeSpan.FromSeconds(10)))
             {
                 _shutdownCts.Cancel();
-                _queueSignal.Release();
-                _writerTask.Wait(TimeSpan.FromSeconds(1));
+                _queueSignal.Release(writerArray.Length);
+                Task.WaitAll(writerArray, TimeSpan.FromSeconds(1));
             }
         }
         catch
@@ -234,6 +255,9 @@ public sealed class ObjectStorageSegmentCache : IDisposable
 
     private async Task WriterLoopAsync()
     {
+        // Single-item-per-wait pattern: each Release() wakes exactly one
+        // writer. N workers drain N items concurrently; each handles one
+        // PUT at a time so slow backends don't block the whole pool.
         while (true)
         {
             try
@@ -245,54 +269,61 @@ public sealed class ObjectStorageSegmentCache : IDisposable
                 break;
             }
 
-            while (_writeQueue.TryDequeue(out var request))
+            if (!_writeQueue.TryDequeue(out var request))
             {
-                Interlocked.Decrement(ref _queueCount);
-
-                // Bound every PUT with _writeTimeout. Without this the
-                // single-threaded writer parks forever on a half-open TCP
-                // socket and stops draining the queue — observed in prod
-                // as writes_total frozen at 12 with 0 failures + 0 drops.
-                using var timeoutCts = new CancellationTokenSource(_writeTimeout);
-                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
-                    _shutdownCts.Token, timeoutCts.Token);
-
-                var sw = Stopwatch.StartNew();
-                try
-                {
-                    await _writeAsync(request, linkedCts.Token).ConfigureAwait(false);
-                    sw.Stop();
-                    Interlocked.Increment(ref _l2Writes);
-                    Interlocked.Exchange(ref _lastWriteUnixtime, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
-                    if (sw.Elapsed > _writeTimeout / 2)
-                    {
-                        Log.Warning(
-                            "Slow L2 write for segment {SegmentId} took {Elapsed:c} (threshold {Threshold:c})",
-                            request.SegmentId, sw.Elapsed, _writeTimeout / 2);
-                    }
-                }
-                catch (OperationCanceledException)
-                    when (timeoutCts.IsCancellationRequested && !_shutdownCts.IsCancellationRequested)
-                {
-                    Interlocked.Increment(ref _l2WriteFailures);
-                    Log.Warning(
-                        "L2 write timed out after {Timeout:c} for segment {SegmentId}",
-                        _writeTimeout, request.SegmentId);
-                }
-                catch (OperationCanceledException)
-                {
-                    // Shutdown in progress (possibly coincident with a timeout).
-                    return;
-                }
-                catch (Exception ex)
-                {
-                    Interlocked.Increment(ref _l2WriteFailures);
-                    Log.Warning(ex, "L2 write failed for segment {SegmentId}", request.SegmentId);
-                }
+                // Empty wake — typically a shutdown signal release.
+                if (_shutdownRequested && _writeQueue.IsEmpty)
+                    break;
+                continue;
             }
+
+            Interlocked.Decrement(ref _queueCount);
+            await ProcessOneWriteAsync(request).ConfigureAwait(false);
 
             if (_shutdownRequested && _writeQueue.IsEmpty)
                 break;
+        }
+    }
+
+    private async Task ProcessOneWriteAsync(WriteRequest request)
+    {
+        // Bound every PUT with _writeTimeout to prevent half-open sockets
+        // parking a writer indefinitely (stall fix from 2026-04-17 spec).
+        using var timeoutCts = new CancellationTokenSource(_writeTimeout);
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+            _shutdownCts.Token, timeoutCts.Token);
+
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            await _writeAsync(request, linkedCts.Token).ConfigureAwait(false);
+            sw.Stop();
+            Interlocked.Increment(ref _l2Writes);
+            Interlocked.Exchange(ref _lastWriteUnixtime, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+            if (sw.Elapsed > _writeTimeout / 2)
+            {
+                Log.Warning(
+                    "Slow L2 write for segment {SegmentId} took {Elapsed:c} (threshold {Threshold:c})",
+                    request.SegmentId, sw.Elapsed, _writeTimeout / 2);
+            }
+        }
+        catch (OperationCanceledException)
+            when (timeoutCts.IsCancellationRequested && !_shutdownCts.IsCancellationRequested)
+        {
+            Interlocked.Increment(ref _l2WriteFailures);
+            Log.Warning(
+                "L2 write timed out after {Timeout:c} for segment {SegmentId}",
+                _writeTimeout, request.SegmentId);
+        }
+        catch (OperationCanceledException)
+        {
+            // Shutdown coincident with operation — swallow, outer loop
+            // will exit on next iteration.
+        }
+        catch (Exception ex)
+        {
+            Interlocked.Increment(ref _l2WriteFailures);
+            Log.Warning(ex, "L2 write failed for segment {SegmentId}", request.SegmentId);
         }
     }
 
@@ -311,6 +342,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
             return new ConfigBinding(
                 bucketName,
                 configManager.GetL2WriteQueueCapacity(),
+                configManager.GetL2WriterParallelism(),
                 configManager.GetL2ReadTimeout(),
                 configManager.GetL2WriteTimeout(),
                 _ => Task.CompletedTask,
@@ -324,6 +356,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         return new ConfigBinding(
             bucketName,
             configManager.GetL2WriteQueueCapacity(),
+            configManager.GetL2WriterParallelism(),
             configManager.GetL2ReadTimeout(),
             configManager.GetL2WriteTimeout(),
             CreateEnsureBucketDelegate(client, bucketName),

@@ -84,6 +84,58 @@ public sealed class MediaProbeServiceTests
         Assert.Equal(new[] { "a.mkv", "b.mkv", "c.mkv" }, seen);
     }
 
+    [Fact]
+    public void ResolvePrewarmOffsets_FirstOnlyReturnsZero()
+    {
+        var offsets = MediaProbeService.ResolvePrewarmOffsets("first-only", 10);
+        Assert.Equal(new[] { 0 }, offsets);
+    }
+
+    [Fact]
+    public void ResolvePrewarmOffsets_FirstAndLast()
+    {
+        var offsets = MediaProbeService.ResolvePrewarmOffsets("first-and-last", 10);
+        Assert.Equal(new[] { 0, 9 }, offsets);
+    }
+
+    [Fact]
+    public void ResolvePrewarmOffsets_FirstMiddleLastIsDefault()
+    {
+        var offsets = MediaProbeService.ResolvePrewarmOffsets("unknown-policy", 100);
+        Assert.Equal(new[] { 0, 50, 99 }, offsets);
+    }
+
+    [Fact]
+    public void ResolvePrewarmOffsets_CollapsesOnShortVideo()
+    {
+        // 2 segments under first-middle-last -> only 0 and 1 (distinct)
+        var offsets = MediaProbeService.ResolvePrewarmOffsets("first-middle-last", 2);
+        Assert.Equal(new[] { 0, 1 }, offsets);
+    }
+
+    [Fact]
+    public void ResolvePrewarmOffsets_SingleSegmentVideo()
+    {
+        var offsets = MediaProbeService.ResolvePrewarmOffsets("first-middle-last", 1);
+        Assert.Equal(new[] { 0 }, offsets);
+    }
+
+    [Fact]
+    public void ResolvePrewarmOffsets_EmptyReturnsEmpty()
+    {
+        var offsets = MediaProbeService.ResolvePrewarmOffsets("first-middle-last", 0);
+        Assert.Empty(offsets);
+    }
+
+    [Fact]
+    public void ResolvePrewarmOffsets_AggressivePolicy()
+    {
+        // first-quartile-mid-threequartile-last on 100 segments
+        var offsets = MediaProbeService.ResolvePrewarmOffsets(
+            "first-quartile-mid-threequartile-last", 100);
+        Assert.Equal(new[] { 0, 25, 50, 75, 99 }, offsets);
+    }
+
     private static DavItem MakeItem(string name)
     {
         var id = Guid.NewGuid();

@@ -132,18 +132,20 @@ public class MediaProbeService : BackgroundService
     }
 
     /// <summary>
-    /// For every video in the library, check whether the file's first
-    /// segment is already in L2; if not, perform a single NNTP fetch and
-    /// enqueue an L2 write. Runs at Low NNTP priority so live streams are
-    /// never blocked.
+    /// For every video in the library, seed L2 with a small set of
+    /// strategic segments (configurable policy — default warms first,
+    /// middle, and last segment). Gives fast click-to-play AND fast
+    /// mid-file scrub without pulling entire videos. Runs at Low NNTP
+    /// priority so live streams are never blocked.
     /// </summary>
     private async Task WarmFirstSegmentsIntoL2Async(IReadOnlyList<DavItem> videoItems, CancellationToken ct)
     {
         using var priorityScope = ct.SetContext(
             new DownloadPriorityContext { Priority = SemaphorePriority.Low });
 
-        var warmed = 0;
-        var skipped = 0;
+        var policy = _configManager.GetL2PrewarmPolicy();
+        var itemsProcessed = 0;
+        var segmentsWarmed = 0;
         foreach (var item in videoItems)
         {
             ct.ThrowIfCancellationRequested();
@@ -153,28 +155,62 @@ public class MediaProbeService : BackgroundService
                 var segmentIds = await GetSegmentIds(dbContext, item, ct).ConfigureAwait(false);
                 if (segmentIds is null || segmentIds.Length == 0) continue;
 
-                var firstSegmentId = segmentIds[0];
-
+                var offsets = ResolvePrewarmOffsets(policy, segmentIds.Length);
                 using var fetchCtx = SegmentFetchContext.Set(SegmentCategory.SmallFile, item.ParentId ?? item.Id);
-                var seeded = await TrySeedL2FirstSegmentAsync(firstSegmentId, ct).ConfigureAwait(false);
-                if (seeded) warmed++;
-                else skipped++;
+                foreach (var offset in offsets)
+                {
+                    var segId = segmentIds[offset];
+                    await TrySeedL2FirstSegmentAsync(segId, ct).ConfigureAwait(false);
+                    segmentsWarmed++;
+                }
 
-                if ((warmed + skipped) % 100 == 0)
+                itemsProcessed++;
+                if (itemsProcessed % 100 == 0)
                     Log.Information(
-                        "L2 first-segment warm progress: warmed={Warmed} already-present={Skipped}",
-                        warmed, skipped);
+                        "L2 prewarm progress ({Policy}): items={Items} segments={Segments}",
+                        policy, itemsProcessed, segmentsWarmed);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception e)
             {
-                Log.Debug("L2 first-segment warm failed for {Name}: {Error}", item.Name, e.Message);
+                Log.Debug("L2 prewarm failed for {Name}: {Error}", item.Name, e.Message);
             }
         }
 
         Log.Information(
-            "L2 first-segment warm complete: warmed={Warmed} already-present={Skipped}",
-            warmed, skipped);
+            "L2 prewarm complete ({Policy}): items={Items} segments={Segments}",
+            policy, itemsProcessed, segmentsWarmed);
+    }
+
+    /// <summary>
+    /// Picks segment indices to prewarm for a given video based on the
+    /// configured policy. For shorter videos the unique offsets collapse
+    /// (e.g. a 2-segment video under first-middle-last returns indices
+    /// 0 and 1, not three). Always returns distinct, sorted indices.
+    /// </summary>
+    internal static int[] ResolvePrewarmOffsets(string policy, int segmentCount)
+    {
+        if (segmentCount <= 0) return Array.Empty<int>();
+        if (segmentCount == 1) return new[] { 0 };
+
+        var offsets = policy switch
+        {
+            "first-only" => new[] { 0 },
+            "first-and-last" => new[] { 0, segmentCount - 1 },
+            "first-quartile-mid-threequartile-last" => new[]
+            {
+                0,
+                segmentCount / 4,
+                segmentCount / 2,
+                segmentCount * 3 / 4,
+                segmentCount - 1,
+            },
+            // default: first-middle-last
+            _ => new[] { 0, segmentCount / 2, segmentCount - 1 },
+        };
+
+        // Deduplicate + sort (short videos can collapse offsets)
+        return offsets.Distinct().OrderBy(x => x).ToArray();
     }
 
     /// <summary>
