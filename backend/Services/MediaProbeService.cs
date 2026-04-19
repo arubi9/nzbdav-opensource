@@ -205,12 +205,26 @@ public class MediaProbeService : BackgroundService
                 segmentCount * 3 / 4,
                 segmentCount - 1,
             },
+            "dense" => GenerateEvenOffsets(segmentCount, 20),
+            "ultra-dense" => GenerateEvenOffsets(segmentCount, 40),
             // default: first-middle-last
             _ => new[] { 0, segmentCount / 2, segmentCount - 1 },
         };
 
         // Deduplicate + sort (short videos can collapse offsets)
         return offsets.Distinct().OrderBy(x => x).ToArray();
+    }
+
+    private static int[] GenerateEvenOffsets(int segmentCount, int targetCount)
+    {
+        if (segmentCount <= targetCount)
+        {
+            // Short video: use every segment
+            return Enumerable.Range(0, segmentCount).ToArray();
+        }
+        return Enumerable.Range(0, targetCount)
+            .Select(i => (int)Math.Round(i * (segmentCount - 1.0) / (targetCount - 1)))
+            .ToArray();
     }
 
     /// <summary>

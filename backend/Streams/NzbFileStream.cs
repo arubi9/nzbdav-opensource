@@ -1,6 +1,7 @@
 using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Clients.Usenet.Caching;
 using NzbWebDAV.Extensions;
+using NzbWebDAV.Metrics;
 using NzbWebDAV.Models;
 using NzbWebDAV.Utils;
 using UsenetSharp.Streams;
@@ -32,6 +33,14 @@ public class NzbFileStream(
     private Action? _onClassifiedAsPlayback;
     private bool _playbackCallbacksFired;
 
+    // yEnc uniform-layout fast path — populated by BindYencLayout.
+    // When all four fields are set and YencLayoutUniform is true, SeekSegment
+    // resolves offset → segment index with O(1) arithmetic (zero NNTP probes).
+    private long? _yencPartSize;
+    private long? _yencLastPartSize;
+    private int? _yencSegmentCount;
+    private bool? _yencLayoutUniform;
+
     public StreamClassification Classification => _classifier.Classification;
 
     public override bool CanSeek => true;
@@ -58,6 +67,25 @@ public class NzbFileStream(
     {
         _segmentContext = segmentContext;
         _onClassifiedAsPlayback = onClassifiedAsPlayback;
+    }
+
+    /// <summary>
+    /// Bind yEnc uniform-layout metadata so that offset → segment resolution
+    /// can be done with O(1) arithmetic instead of speculative NNTP probes.
+    /// Must be called before the first ReadAsync. When any field is null or
+    /// <paramref name="layoutUniform"/> is not <c>true</c>, the stream falls
+    /// back to the existing InterpolationSearch path unchanged.
+    /// </summary>
+    public void BindYencLayout(
+        long? partSize,
+        long? lastPartSize,
+        int? segmentCount,
+        bool? layoutUniform)
+    {
+        _yencPartSize = partSize;
+        _yencLastPartSize = lastPartSize;
+        _yencSegmentCount = segmentCount;
+        _yencLayoutUniform = layoutUniform;
     }
 
     public override void Flush()
@@ -150,6 +178,33 @@ public class NzbFileStream(
 
     private Task<InterpolationSearch.Result> SeekSegment(long byteOffset, CancellationToken ct)
     {
+        // Fast path: uniform yEnc layout — resolve offset to segment index with
+        // O(1) arithmetic and zero NNTP header probes.
+        if (_yencLayoutUniform == true
+            && _yencPartSize is { } partSize && partSize > 0
+            && _yencSegmentCount is { } segCount && segCount > 0
+            && _yencLastPartSize is { } lastPartSize)
+        {
+            var segmentIndex = YencLayout.SegmentForByteOffset(byteOffset, partSize, segCount, lastPartSize);
+
+            // Compute the byte range for that segment so the result matches
+            // the contract of InterpolationSearch.Result (FoundByteRange is used
+            // by the caller to compute the discard offset).
+            var segStart = segmentIndex < segCount - 1
+                ? (long)segmentIndex * partSize
+                : (long)(segCount - 1) * partSize;
+            var segSize = segmentIndex < segCount - 1 ? partSize : lastPartSize;
+            var segRange = LongRange.FromStartAndSize(segStart, segSize);
+
+            // Cache the range so future calls to GetSegmentRangeAsync avoid re-fetching.
+            _segmentRanges[segmentIndex] = segRange;
+
+            NzbdavMetricsCollector.IncrementYencFastPathHits();
+            return Task.FromResult(new InterpolationSearch.Result(segmentIndex, segRange));
+        }
+
+        // Fallback: speculative parallel InterpolationSearch (unchanged behaviour).
+        NzbdavMetricsCollector.IncrementYencFastPathMisses();
         return InterpolationSearch.Find(
             byteOffset,
             new LongRange(0, fileSegmentIds.Length),

@@ -18,6 +18,10 @@ public class DavItem
     public DateTimeOffset? ReleaseDate { get; set; }
     public DateTimeOffset? LastHealthCheck { get; set; }
     public DateTimeOffset? NextHealthCheck { get; set; }
+    public long? YencPartSize { get; set; }
+    public long? YencLastPartSize { get; set; }
+    public int? YencSegmentCount { get; set; }
+    public bool? YencLayoutUniform { get; set; }
 
     public static DavItem New
     (

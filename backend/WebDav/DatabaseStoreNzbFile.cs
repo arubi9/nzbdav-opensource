@@ -71,6 +71,13 @@ public class DatabaseStoreNzbFile(
             requestHint: hint
         );
 
+        stream.BindYencLayout(
+            davNzbFile.YencPartSize,
+            davNzbFile.YencLastPartSize,
+            davNzbFile.YencSegmentCount,
+            davNzbFile.YencLayoutUniform
+        );
+
         // C1 fix: warming is now classifier-driven — starts exactly when
         // NzbFileStream's classifier commits to Playback, not on the first
         // segment read (which fires for probes too).

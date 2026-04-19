@@ -136,6 +136,46 @@ public sealed class MediaProbeServiceTests
         Assert.Equal(new[] { 0, 25, 50, 75, 99 }, offsets);
     }
 
+    [Fact]
+    public void ResolvePrewarmOffsets_DenseTwentySegmentsOnLargeFile()
+    {
+        // 1000-segment file under dense policy returns exactly 20 offsets,
+        // first = 0, last = 999, evenly spaced.
+        var offsets = MediaProbeService.ResolvePrewarmOffsets("dense", 1000);
+        Assert.Equal(20, offsets.Length);
+        Assert.Equal(0, offsets[0]);
+        Assert.Equal(999, offsets[^1]);
+        // Expected values: Math.Round(i * 999/19) for i in 0..19
+        // Verify monotonic + roughly evenly spaced.
+        for (int i = 1; i < offsets.Length; i++)
+            Assert.True(offsets[i] > offsets[i - 1]);
+    }
+
+    [Fact]
+    public void ResolvePrewarmOffsets_UltraDenseFortySegmentsOnLargeFile()
+    {
+        var offsets = MediaProbeService.ResolvePrewarmOffsets("ultra-dense", 1000);
+        Assert.Equal(40, offsets.Length);
+        Assert.Equal(0, offsets[0]);
+        Assert.Equal(999, offsets[^1]);
+    }
+
+    [Fact]
+    public void ResolvePrewarmOffsets_DenseCollapsesOnShortVideo()
+    {
+        // 10-segment file under dense (asking for 20) returns all 10.
+        var offsets = MediaProbeService.ResolvePrewarmOffsets("dense", 10);
+        Assert.Equal(new[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }, offsets);
+    }
+
+    [Fact]
+    public void ResolvePrewarmOffsets_DenseOnExactlyTwentySegments()
+    {
+        // Boundary: segmentCount == targetCount returns every index.
+        var offsets = MediaProbeService.ResolvePrewarmOffsets("dense", 20);
+        Assert.Equal(Enumerable.Range(0, 20).ToArray(), offsets);
+    }
+
     private static DavItem MakeItem(string name)
     {
         var id = Guid.NewGuid();

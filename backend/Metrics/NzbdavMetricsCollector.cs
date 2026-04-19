@@ -74,6 +74,14 @@ public sealed class NzbdavMetricsCollector
         "nzbdav_streams_active",
         "Active video streams");
 
+    private static readonly Counter YencFastPathHitsCounter = Prometheus.Metrics.CreateCounter(
+        "nzbdav_yenc_fast_path_hits_total",
+        "Offset-to-segment lookups resolved via O(1) uniform yEnc layout (no NNTP probes)");
+
+    private static readonly Counter YencFastPathMissesCounter = Prometheus.Metrics.CreateCounter(
+        "nzbdav_yenc_fast_path_misses_total",
+        "Offset-to-segment lookups that fell back to InterpolationSearch (non-uniform or metadata absent)");
+
     static NzbdavMetricsCollector()
     {
         ActiveStreamsGauge.Set(0);
@@ -372,6 +380,16 @@ public sealed class NzbdavMetricsCollector
     {
         Interlocked.Decrement(ref _activeStreams);
         ActiveStreamsGauge.Dec();
+    }
+
+    public static void IncrementYencFastPathHits()
+    {
+        YencFastPathHitsCounter.Inc();
+    }
+
+    public static void IncrementYencFastPathMisses()
+    {
+        YencFastPathMissesCounter.Inc();
     }
 
     // No IDisposable — this is a singleton that lives for the app lifetime.
