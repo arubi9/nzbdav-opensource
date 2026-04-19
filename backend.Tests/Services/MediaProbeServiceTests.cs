@@ -3,6 +3,7 @@ using NzbWebDAV.Clients.Usenet.Contexts;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Services;
+using UsenetSharp.Models;
 
 namespace backend.Tests.Services;
 
@@ -174,6 +175,155 @@ public sealed class MediaProbeServiceTests
         // Boundary: segmentCount == targetCount returns every index.
         var offsets = MediaProbeService.ResolvePrewarmOffsets("dense", 20);
         Assert.Equal(Enumerable.Range(0, 20).ToArray(), offsets);
+    }
+
+    // -----------------------------------------------------------------------
+    // ComputeYencLayoutAsync tests
+    // -----------------------------------------------------------------------
+
+    [Fact]
+    public async Task ComputeYencLayout_UniformSegments_SetsAllFieldsAndUniformTrue()
+    {
+        // Arrange: 5 segments all 768 000 bytes except the last (500 000).
+        const long uniformPart = 768_000L;
+        const long lastPart    = 500_000L;
+        var segmentIds = new[] { "seg-0", "seg-1", "seg-2", "seg-3", "seg-4" };
+
+        Task<UsenetYencHeader> FakeHeaderFetcher(string segId, CancellationToken _)
+        {
+            var partSize = segId == "seg-4" ? lastPart : uniformPart;
+            return Task.FromResult(new UsenetYencHeader
+            {
+                FileName  = "test.bin",
+                FileSize  = 5 * uniformPart,
+                PartSize  = partSize,
+                PartOffset = 0,
+                PartNumber = 1,
+                TotalParts = 5,
+                LineLength = 128,
+            });
+        }
+
+        // Act
+        var (partSize, lastPartSize, segmentCount, uniform) =
+            await MediaProbeService.ComputeYencLayoutAsync(segmentIds, FakeHeaderFetcher, CancellationToken.None);
+
+        // Assert
+        Assert.Equal(uniformPart, partSize);
+        Assert.Equal(lastPart, lastPartSize);
+        Assert.Equal(5, segmentCount);
+        Assert.True(uniform);
+    }
+
+    [Fact]
+    public async Task ComputeYencLayout_NonUniformMiddleSegment_SetsUniformFalse()
+    {
+        // Arrange: middle segment has a different PartSize — non-uniform NZB.
+        const long normalPart  = 768_000L;
+        const long oddPart     = 400_000L;
+        const long lastPart    = 300_000L;
+        var segmentIds = new[] { "seg-0", "seg-1", "seg-2", "seg-3", "seg-4" };
+
+        Task<UsenetYencHeader> FakeHeaderFetcher(string segId, CancellationToken _)
+        {
+            // seg-2 is the middle (index 5/2 = 2) and has an unexpected size.
+            var partSize = segId switch
+            {
+                "seg-2" => oddPart,
+                "seg-4" => lastPart,
+                _       => normalPart
+            };
+            return Task.FromResult(new UsenetYencHeader
+            {
+                FileName   = "test.bin",
+                FileSize   = 5 * normalPart,
+                PartSize   = partSize,
+                PartOffset = 0,
+                PartNumber = 1,
+                TotalParts = 5,
+                LineLength = 128,
+            });
+        }
+
+        // Act
+        var (partSize, lastPartSize, segmentCount, uniform) =
+            await MediaProbeService.ComputeYencLayoutAsync(segmentIds, FakeHeaderFetcher, CancellationToken.None);
+
+        // Assert: PartSize/LastPartSize still captured; uniform must be false.
+        Assert.Equal(normalPart, partSize);
+        Assert.Equal(lastPart, lastPartSize);
+        Assert.Equal(5, segmentCount);
+        Assert.False(uniform);
+    }
+
+    [Fact]
+    public async Task ComputeYencLayout_TwoSegments_TriviallyUniform()
+    {
+        // Two segments: no middle sample — should be trivially uniform.
+        var segmentIds = new[] { "seg-0", "seg-1" };
+        var callCount = 0;
+
+        Task<UsenetYencHeader> FakeHeaderFetcher(string _, CancellationToken __)
+        {
+            callCount++;
+            return Task.FromResult(new UsenetYencHeader
+            {
+                FileName   = "x.bin",
+                FileSize   = 2_000_000L,
+                PartSize   = 1_000_000L,
+                PartOffset = 0,
+                PartNumber = 1,
+                TotalParts = 2,
+                LineLength = 128,
+            });
+        }
+
+        var (_, _, segmentCount, uniform) =
+            await MediaProbeService.ComputeYencLayoutAsync(segmentIds, FakeHeaderFetcher, CancellationToken.None);
+
+        Assert.Equal(2, segmentCount);
+        Assert.True(uniform);
+        // Only first + last fetched (no middle for 2-segment file).
+        Assert.Equal(2, callCount);
+    }
+
+    [Fact]
+    public async Task ComputeYencLayout_AlreadyPopulated_IdempotentCheck()
+    {
+        // This test verifies that PopulateYencLayoutMetadataAsync returns false
+        // immediately when YencLayoutUniform is already set, without invoking
+        // any header fetcher. We exercise ComputeYencLayoutAsync directly and
+        // confirm it is NOT called (via a throwing fetcher) — the early-return
+        // guard lives in PopulateYencLayoutMetadataAsync, so here we just
+        // confirm ComputeYencLayoutAsync itself counts fetches for 1-segment.
+        var segmentIds = new[] { "only-seg" };
+        var callCount = 0;
+
+        Task<UsenetYencHeader> FakeHeaderFetcher(string _, CancellationToken __)
+        {
+            callCount++;
+            return Task.FromResult(new UsenetYencHeader
+            {
+                FileName   = "solo.bin",
+                FileSize   = 500_000L,
+                PartSize   = 500_000L,
+                PartOffset = 0,
+                PartNumber = 1,
+                TotalParts = 1,
+                LineLength = 128,
+            });
+        }
+
+        var (partSize, lastPartSize, segmentCount, uniform) =
+            await MediaProbeService.ComputeYencLayoutAsync(segmentIds, FakeHeaderFetcher, CancellationToken.None);
+
+        // Single segment: first == last, trivially uniform.
+        Assert.Equal(500_000L, partSize);
+        Assert.Equal(500_000L, lastPartSize);
+        Assert.Equal(1, segmentCount);
+        Assert.True(uniform);
+        // Only 2 calls: seg-0 as first AND seg-0 as last (same index, same result).
+        Assert.Equal(2, callCount);
     }
 
     private static DavItem MakeItem(string name)

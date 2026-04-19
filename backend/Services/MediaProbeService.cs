@@ -14,6 +14,7 @@ using NzbWebDAV.Extensions;
 using NzbWebDAV.Queue;
 using NzbWebDAV.Utils;
 using Serilog;
+using UsenetSharp.Models;
 
 namespace NzbWebDAV.Services;
 
@@ -137,6 +138,9 @@ public class MediaProbeService : BackgroundService
     /// middle, and last segment). Gives fast click-to-play AND fast
     /// mid-file scrub without pulling entire videos. Runs at Low NNTP
     /// priority so live streams are never blocked.
+    /// Also populates the four yEnc layout metadata columns (YencPartSize /
+    /// YencLastPartSize / YencSegmentCount / YencLayoutUniform) on each item
+    /// so the O(1) fast path in NzbFileStream can skip InterpolationSearch.
     /// </summary>
     private async Task WarmFirstSegmentsIntoL2Async(IReadOnlyList<DavItem> videoItems, CancellationToken ct)
     {
@@ -146,6 +150,8 @@ public class MediaProbeService : BackgroundService
         var policy = _configManager.GetL2PrewarmPolicy();
         var itemsProcessed = 0;
         var segmentsWarmed = 0;
+        var metadataPopulated = 0;
+        var metadataSkipped = 0;
         foreach (var item in videoItems)
         {
             ct.ThrowIfCancellationRequested();
@@ -164,11 +170,16 @@ public class MediaProbeService : BackgroundService
                     segmentsWarmed++;
                 }
 
+                var populated = await PopulateYencLayoutMetadataAsync(
+                    dbContext, item, segmentIds, ct).ConfigureAwait(false);
+                if (populated) metadataPopulated++;
+                else metadataSkipped++;
+
                 itemsProcessed++;
                 if (itemsProcessed % 100 == 0)
                     Log.Information(
-                        "L2 prewarm progress ({Policy}): items={Items} segments={Segments}",
-                        policy, itemsProcessed, segmentsWarmed);
+                        "L2 prewarm progress ({Policy}): items={Items} segments={Segments} metaPopulated={MetaPopulated}",
+                        policy, itemsProcessed, segmentsWarmed, metadataPopulated);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception e)
@@ -178,8 +189,100 @@ public class MediaProbeService : BackgroundService
         }
 
         Log.Information(
-            "L2 prewarm complete ({Policy}): items={Items} segments={Segments}",
-            policy, itemsProcessed, segmentsWarmed);
+            "L2 prewarm complete ({Policy}): items={Items} segments={Segments} metaPopulated={MetaPopulated} metaSkipped={MetaSkipped}",
+            policy, itemsProcessed, segmentsWarmed, metadataPopulated, metadataSkipped);
+    }
+
+    /// <summary>
+    /// Populates YencPartSize / YencLastPartSize / YencSegmentCount /
+    /// YencLayoutUniform on the DavItem row if not yet set. Returns true
+    /// when the row was updated, false when it was already populated (idempotent).
+    /// Exceptions are caught and logged per-item so a single bad video does
+    /// not abort the whole prewarm pass.
+    /// </summary>
+    private async Task<bool> PopulateYencLayoutMetadataAsync(
+        DavDatabaseContext dbContext,
+        DavItem item,
+        string[] segmentIds,
+        CancellationToken ct)
+    {
+        // Idempotent: skip if already populated.
+        if (item.YencLayoutUniform != null)
+            return false;
+
+        if (segmentIds.Length <= 0)
+            return false;
+
+        try
+        {
+            Func<string, CancellationToken, Task<UsenetYencHeader>> headerFetcher =
+                (segId, token) => _liveSegmentCache.GetOrAddHeaderAsync(
+                    segId,
+                    innerCt => _usenetClient.GetYencHeadersAsync(segId, innerCt),
+                    token);
+
+            var (partSize, lastPartSize, segmentCount, uniform) =
+                await ComputeYencLayoutAsync(segmentIds, headerFetcher, ct).ConfigureAwait(false);
+
+            // Re-query with tracking so SaveChanges can detect the change.
+            await using var trackedCtx = new DavDatabaseContext();
+            var tracked = await trackedCtx.Items
+                .FirstOrDefaultAsync(x => x.Id == item.Id, ct)
+                .ConfigureAwait(false);
+
+            if (tracked is null) return false;
+
+            // Double-check idempotency on the freshly-loaded row.
+            if (tracked.YencLayoutUniform != null) return false;
+
+            tracked.YencPartSize = partSize;
+            tracked.YencLastPartSize = lastPartSize;
+            tracked.YencSegmentCount = segmentCount;
+            tracked.YencLayoutUniform = uniform;
+
+            await trackedCtx.SaveChangesAsync(ct).ConfigureAwait(false);
+
+            Log.Debug("YencLayout populated for {Name}: partSize={PartSize} lastPartSize={LastPartSize} segments={Segments} uniform={Uniform}",
+                item.Name, partSize, lastPartSize, segmentCount, uniform);
+
+            return true;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception e)
+        {
+            Log.Debug("YencLayout metadata population failed for {Name}: {Error}", item.Name, e.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Pure (static) helper that samples the first, last, and (optionally)
+    /// middle segment yEnc headers to determine the yEnc layout of a file.
+    /// Accepts an injected <paramref name="headerFetcher"/> so it is fully
+    /// testable without a live NNTP connection or database.
+    /// </summary>
+    internal static async Task<(long PartSize, long LastPartSize, int SegmentCount, bool Uniform)>
+        ComputeYencLayoutAsync(
+            string[] segmentIds,
+            Func<string, CancellationToken, Task<UsenetYencHeader>> headerFetcher,
+            CancellationToken ct)
+    {
+        var firstHeader = await headerFetcher(segmentIds[0], ct).ConfigureAwait(false);
+        var lastHeader = await headerFetcher(segmentIds[^1], ct).ConfigureAwait(false);
+
+        bool uniform;
+        if (segmentIds.Length >= 3)
+        {
+            var middleHeader = await headerFetcher(segmentIds[segmentIds.Length / 2], ct).ConfigureAwait(false);
+            uniform = middleHeader.PartSize == firstHeader.PartSize;
+        }
+        else
+        {
+            // 1 or 2 segments: trivially uniform.
+            uniform = true;
+        }
+
+        return (firstHeader.PartSize, lastHeader.PartSize, segmentIds.Length, uniform);
     }
 
     /// <summary>
