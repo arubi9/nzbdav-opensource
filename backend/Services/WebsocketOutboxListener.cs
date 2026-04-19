@@ -12,6 +12,7 @@ public sealed class WebsocketOutboxListener(WebsocketManager websocketManager) :
 {
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan ReconnectDelay = TimeSpan.FromSeconds(5);
+    private static volatile bool _sessionUrlWarningLogged;
     private long _lastSeenSeq;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -93,7 +94,11 @@ public sealed class WebsocketOutboxListener(WebsocketManager websocketManager) :
         var sessionConnectionString = EnvironmentUtil.GetDatabaseUrlSession();
         if (string.IsNullOrEmpty(sessionConnectionString))
         {
-            Log.Warning("DATABASE_URL_SESSION is not configured; WebsocketOutboxListener is running in poll-only mode.");
+            if (!_sessionUrlWarningLogged)
+            {
+                _sessionUrlWarningLogged = true;
+                Log.Warning("DATABASE_URL_SESSION is not configured; WebsocketOutboxListener is running in poll-only mode.");
+            }
             await InitializeStateFromOutbox(cancellationToken).ConfigureAwait(false);
             using var pollOnlyTimer = new PeriodicTimer(PollInterval);
             while (await pollOnlyTimer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
