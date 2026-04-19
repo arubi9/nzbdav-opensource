@@ -16,7 +16,8 @@ public class BackfillStrmFilesController(
 {
     protected override async Task<IActionResult> HandleRequest()
     {
-        var task = new BackfillStrmFilesTask(configManager, dbClient, websocketManager);
+        var force = HttpContext.Request.Query.ContainsKey("force");
+        var task = new BackfillStrmFilesTask(configManager, dbClient, websocketManager, forceOverwrite: force);
         var executed = await task.Execute().ConfigureAwait(false);
         return Ok(executed);
     }

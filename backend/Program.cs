@@ -36,10 +36,9 @@ public partial class Program
 {
     static async Task Main(string[] args)
     {
-        // Update thread-pool
         var coreCount = Environment.ProcessorCount;
-        var minThreads = Math.Max(coreCount * 2, 50); // 2x cores, minimum 50
-        var maxThreads = Math.Max(coreCount * 50, 1000); // 50x cores, minimum 1000
+        var minThreads = Math.Max(coreCount * 8, 200);
+        var maxThreads = Math.Max(coreCount * 50, 2000);
         ThreadPool.SetMinThreads(minThreads, minThreads);
         ThreadPool.SetMaxThreads(maxThreads, maxThreads);
 
@@ -87,14 +86,37 @@ public partial class Program
             TimeSpan.FromSeconds(configManager.GetSnapshotDebounceSeconds()));
         configManager.OnConfigChanged += (_, eventArgs) =>
         {
-            if (!eventArgs.ChangedConfig.ContainsKey("cache.snapshot-debounce-seconds")) return;
-
-            ContentIndexSnapshotInterceptor.SetDebounceInterval(
-                TimeSpan.FromSeconds(configManager.GetSnapshotDebounceSeconds()));
+            if (eventArgs.ChangedConfig.ContainsKey("cache.snapshot-debounce-seconds"))
+            {
+                ContentIndexSnapshotInterceptor.SetDebounceInterval(
+                    TimeSpan.FromSeconds(configManager.GetSnapshotDebounceSeconds()));
+            }
         };
 
         // initialize websocket-manager
         var websocketManager = new WebsocketManager();
+
+        configManager.OnConfigChanged += (_, eventArgs) =>
+        {
+            if (eventArgs.ChangedConfig.ContainsKey("general.base-url") && configManager.GetImportStrategy() == "strm")
+            {
+                Log.Information("Base URL changed — triggering strm file rewrite.");
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await using var dbCtx = new DavDatabaseContext();
+                        var dbCli = new DavDatabaseClient(dbCtx);
+                        var task = new NzbWebDAV.Tasks.BackfillStrmFilesTask(configManager, dbCli, websocketManager, forceOverwrite: true);
+                        await task.Execute().ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Warning(ex, "Auto strm rewrite after base-url change failed.");
+                    }
+                });
+            }
+        };
         Log.Information("NZBDAV starting in {Role} mode", NodeRoleConfig.Current);
 
         // initialize webapp
@@ -246,6 +268,8 @@ public partial class Program
             // database context and cache are torn down by the framework.
             builder.Services.AddHostedService<SnapshotFlushOnShutdownService>();
         }
+
+        builder.Services.AddHostedService<ConfigReloadService>();
 
         if (WebApplicationAuthExtensions.IsWebdavAuthDisabled())
             builder.Services.AddHostedService<InsecureAuthWarningService>();

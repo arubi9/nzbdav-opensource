@@ -6,6 +6,7 @@ using NzbWebDAV.Clients.Usenet.Caching;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Services.NntpLeasing;
+using Serilog;
 
 namespace NzbWebDAV.Services;
 
@@ -117,13 +118,20 @@ public class NzbdavHealthCheck : IHealthCheck
         var totalLookups = cacheStats.Hits + cacheStats.Misses;
         data["cache_hit_rate"] = totalLookups > 0 ? (double)cacheStats.Hits / totalLookups : 0;
 
-        // Hysteresis: enter Degraded at >0.90, exit at <0.80. Prevents
-        // flap when utilization hovers near the 90% boundary.
         var wasCacheDegraded = _cacheDegradedLatch;
         if (!wasCacheDegraded && cacheUtilization > DegradedEnterThreshold)
+        {
             _cacheDegradedLatch = true;
+            Log.Warning(
+                "Cache saturation entered degraded state. Utilization: {Utilization:P1} ({CachedMb:N0} MB / {MaxMb:N0} MB). " +
+                "Segments will fall through to L2. Increase NZBDAV_CACHE_MAX_SIZE_GB to reduce L2 round-trips.",
+                cacheUtilization, cacheStats.CachedBytes / (1024.0 * 1024), maxBytes / (1024.0 * 1024));
+        }
         else if (wasCacheDegraded && cacheUtilization < DegradedExitThreshold)
+        {
             _cacheDegradedLatch = false;
+            Log.Information("Cache utilization recovered to {Utilization:P1}. Exiting degraded state.", cacheUtilization);
+        }
         data["cache_degraded_latch"] = _cacheDegradedLatch;
 
         if (_cacheDegradedLatch)
@@ -140,14 +148,19 @@ public class NzbdavHealthCheck : IHealthCheck
             data["nntp_active"] = poolStats.TotalActive;
             data["nntp_max"] = poolStats.MaxPooled;
 
-            // Same hysteresis pattern as the cache check above. Keeps
-            // the /ready backpressure signal stable under normal load
-            // oscillations near the 90% boundary.
             var wasNntpDegraded = _nntpDegradedLatch;
             if (!wasNntpDegraded && utilization > DegradedEnterThreshold)
+            {
                 _nntpDegradedLatch = true;
+                Log.Warning(
+                    "NNTP pool entered degraded state. Utilization: {Utilization:P1} ({Active}/{Max} connections).",
+                    utilization, poolStats.TotalActive, poolStats.MaxPooled);
+            }
             else if (wasNntpDegraded && utilization < DegradedExitThreshold)
+            {
                 _nntpDegradedLatch = false;
+                Log.Information("NNTP pool recovered to {Utilization:P1}. Exiting degraded state.", utilization);
+            }
             data["nntp_degraded_latch"] = _nntpDegradedLatch;
 
             if (_nntpDegradedLatch)

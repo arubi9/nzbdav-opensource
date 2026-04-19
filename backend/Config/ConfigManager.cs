@@ -30,28 +30,48 @@ public class ConfigManager
     {
         await using var dbContext = new DavDatabaseContext();
         var configItems = await dbContext.ConfigItems.ToListAsync().ConfigureAwait(false);
+
+        var newValues = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var configItem in configItems)
+        {
+            var value = configItem.ConfigValue;
+            if (configItem.IsEncrypted)
+            {
+                var (plaintext, usedOldKey) = _encryption.Decrypt(configItem.ConfigValue);
+                value = plaintext;
+
+                if (usedOldKey)
+                {
+                    Log.Warning(
+                        "Config key '{Name}' was decrypted with NZBDAV_MASTER_KEY_OLD outside the startup rotation pass. " +
+                        "A full rotation requires a restart; keep NZBDAV_MASTER_KEY_OLD set until then.",
+                        configItem.ConfigName);
+                }
+            }
+
+            newValues[configItem.ConfigName] = value;
+        }
+
+        Dictionary<string, string>? changedConfig = null;
         lock (_config)
         {
-            _config.Clear();
-            foreach (var configItem in configItems)
+            foreach (var (key, value) in newValues)
             {
-                var value = configItem.ConfigValue;
-                if (configItem.IsEncrypted)
-                {
-                    var (plaintext, usedOldKey) = _encryption.Decrypt(configItem.ConfigValue);
-                    value = plaintext;
-
-                    if (usedOldKey)
-                    {
-                        Log.Warning(
-                            "Config key '{Name}' was decrypted with NZBDAV_MASTER_KEY_OLD outside the startup rotation pass. " +
-                            "A full rotation requires a restart; keep NZBDAV_MASTER_KEY_OLD set until then.",
-                            configItem.ConfigName);
-                    }
-                }
-
-                _config[configItem.ConfigName] = value;
+                if (_config.TryGetValue(key, out var existing) && existing == value)
+                    continue;
+                changedConfig ??= new Dictionary<string, string>(StringComparer.Ordinal);
+                changedConfig[key] = value;
             }
+
+            _config.Clear();
+            foreach (var (key, value) in newValues)
+                _config[key] = value;
+        }
+
+        if (changedConfig is { Count: > 0 })
+        {
+            Log.Information("Config hot-reloaded {Count} changed key(s): {Keys}", changedConfig.Count, string.Join(", ", changedConfig.Keys));
+            OnConfigChanged?.Invoke(this, new ConfigEventArgs { ChangedConfig = changedConfig });
         }
     }
 

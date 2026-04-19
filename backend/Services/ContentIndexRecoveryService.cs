@@ -8,32 +8,16 @@ using Serilog;
 
 namespace NzbWebDAV.Services;
 
-public sealed class ContentIndexRecoveryService(ConfigManager configManager) : IHostedService
+public sealed class ContentIndexRecoveryService(ConfigManager configManager) : BackgroundService
 {
-    public async Task StartAsync(CancellationToken cancellationToken)
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         try
         {
-            var snapshotReadResult = await ContentIndexSnapshotStore.ReadAsync(cancellationToken).ConfigureAwait(false);
-            foreach (var warning in snapshotReadResult.Warnings)
-                Log.Warning(warning);
-
-            var snapshot = snapshotReadResult.Snapshot;
-            if (snapshot == null || snapshot.Items.Count == 0) return;
-
-            await using var dbContext = new DavDatabaseContext();
-            var plan = await BuildRecoveryPlanAsync(dbContext, snapshot, configManager, cancellationToken).ConfigureAwait(false);
-            if (!plan.NeedsRecovery) return;
-
-            Log.Warning(
-                "Recovering /content from snapshot '{SourcePath}'. Full restore: {RestoreAll}. Missing items: {MissingItems}. Missing metadata rows: {MissingMetadata}.",
-                snapshotReadResult.SourcePath,
-                plan.RestoreAllContentItems,
-                plan.MissingItemIds.Count,
-                plan.MissingNzbFileIds.Count + plan.MissingRarFileIds.Count + plan.MissingMultipartFileIds.Count
-            );
-
-            await RestoreAsync(dbContext, snapshot, plan, cancellationToken).ConfigureAwait(false);
+            await RecoverAsync(stoppingToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
         }
         catch (Exception ex)
         {
@@ -41,9 +25,29 @@ public sealed class ContentIndexRecoveryService(ConfigManager configManager) : I
         }
     }
 
-    public Task StopAsync(CancellationToken cancellationToken)
+    internal async Task RecoverAsync(CancellationToken cancellationToken)
     {
-        return Task.CompletedTask;
+        var snapshotReadResult = await ContentIndexSnapshotStore.ReadAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var warning in snapshotReadResult.Warnings)
+            Log.Warning(warning);
+
+        var snapshot = snapshotReadResult.Snapshot;
+        if (snapshot == null || snapshot.Items.Count == 0) return;
+
+        await using var dbContext = new DavDatabaseContext();
+        var plan = await BuildRecoveryPlanAsync(dbContext, snapshot, configManager, cancellationToken).ConfigureAwait(false);
+        if (!plan.NeedsRecovery) return;
+
+        Log.Warning(
+            "Recovering /content from snapshot '{SourcePath}'. Full restore: {RestoreAll}. Missing items: {MissingItems}. Missing metadata rows: {MissingMetadata}.",
+            snapshotReadResult.SourcePath,
+            plan.RestoreAllContentItems,
+            plan.MissingItemIds.Count,
+            plan.MissingNzbFileIds.Count + plan.MissingRarFileIds.Count + plan.MissingMultipartFileIds.Count
+        );
+
+        await RestoreAsync(dbContext, snapshot, plan, cancellationToken).ConfigureAwait(false);
+        Log.Information("Content index recovery complete.");
     }
 
     internal static async Task<RecoveryPlan> BuildRecoveryPlanAsync

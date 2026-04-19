@@ -13,7 +13,8 @@ namespace NzbWebDAV.Tasks;
 public class BackfillStrmFilesTask(
     ConfigManager configManager,
     DavDatabaseClient dbClient,
-    WebsocketManager websocketManager
+    WebsocketManager websocketManager,
+    bool forceOverwrite = false
 ) : BaseTask
 {
     protected override async Task ExecuteInternal()
@@ -49,6 +50,7 @@ public class BackfillStrmFilesTask(
 
         var written = 0;
         var skipped = 0;
+        var updated = 0;
         var debounce = DebounceUtil.CreateDebounce(TimeSpan.FromMilliseconds(500));
 
         foreach (var item in eligibleItems)
@@ -56,29 +58,44 @@ public class BackfillStrmFilesTask(
             token.ThrowIfCancellationRequested();
 
             var strmPath = GetStrmFilePath(item, completedDownloadDir);
-            if (File.Exists(strmPath))
-            {
-                skipped++;
-                continue;
-            }
-
-            var dir = Path.GetDirectoryName(strmPath);
-            if (dir != null)
-                Directory.CreateDirectory(dir);
-
             var pathUrl = DatabaseStoreSymlinkFile.GetTargetPath(item.Id, "", '/').TrimStart('/');
             var downloadKey = GetWebdavItemRequest.GenerateDownloadKey(strmKey, pathUrl);
             var extension = Path.GetExtension(item.Name).ToLower().TrimStart('.');
             var targetUrl = $"{baseUrl}/view/{pathUrl}?downloadKey={downloadKey}&extension={extension}";
 
-            await File.WriteAllTextAsync(strmPath, targetUrl, token).ConfigureAwait(false);
-            written++;
+            if (File.Exists(strmPath))
+            {
+                if (!forceOverwrite)
+                {
+                    skipped++;
+                    continue;
+                }
 
-            debounce(() => ReportProgress(written, skipped, eligibleItems.Count));
+                var existing = await File.ReadAllTextAsync(strmPath, token).ConfigureAwait(false);
+                if (existing.Trim() == targetUrl)
+                {
+                    skipped++;
+                    continue;
+                }
+
+                await File.WriteAllTextAsync(strmPath, targetUrl, token).ConfigureAwait(false);
+                updated++;
+            }
+            else
+            {
+                var dir = Path.GetDirectoryName(strmPath);
+                if (dir != null)
+                    Directory.CreateDirectory(dir);
+
+                await File.WriteAllTextAsync(strmPath, targetUrl, token).ConfigureAwait(false);
+                written++;
+            }
+
+            debounce(() => ReportProgress(written, updated, skipped, eligibleItems.Count));
         }
 
-        ReportProgress(written, skipped, eligibleItems.Count);
-        Report($"Done! Written: {written}, Skipped (existing): {skipped}, Total eligible: {eligibleItems.Count}");
+        ReportProgress(written, updated, skipped, eligibleItems.Count);
+        Report($"Done! New: {written}, Updated: {updated}, Unchanged: {skipped}, Total eligible: {eligibleItems.Count}");
     }
 
     private static string GetStrmFilePath(DavItem davItem, string completedDownloadDir)
@@ -93,8 +110,8 @@ public class BackfillStrmFilesTask(
         _ = websocketManager.SendMessage(WebsocketTopic.StrmToSymlinksTaskProgress, message);
     }
 
-    private void ReportProgress(int written, int skipped, int total)
+    private void ReportProgress(int written, int updated, int skipped, int total)
     {
-        Report($"Backfilling strm files... Written: {written}, Skipped: {skipped}, Total: {total}");
+        Report($"Backfilling strm files... New: {written}, Updated: {updated}, Unchanged: {skipped}, Total: {total}");
     }
 }

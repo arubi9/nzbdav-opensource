@@ -67,7 +67,7 @@ public sealed class ContentIndexRecoveryServiceTests
         await _fixture.RecreateDatabaseAsync();
 
         var recoveryService = new ContentIndexRecoveryService(new ConfigManager());
-        await recoveryService.StartAsync(CancellationToken.None);
+        await recoveryService.RecoverAsync(CancellationToken.None);
 
         await using var restoredContext = await _fixture.CreateMigratedContextAsync();
         var restoredItems = await restoredContext.Items
@@ -103,7 +103,7 @@ public sealed class ContentIndexRecoveryServiceTests
         }
 
         var recoveryService = new ContentIndexRecoveryService(new ConfigManager());
-        await recoveryService.StartAsync(CancellationToken.None);
+        await recoveryService.RecoverAsync(CancellationToken.None);
 
         await using var verifyContext = await _fixture.CreateMigratedContextAsync();
         var contentItems = await verifyContext.Items

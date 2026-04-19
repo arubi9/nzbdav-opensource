@@ -199,6 +199,8 @@ public class WebsocketManager
             await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation, "Unauthorized", CancellationToken.None).ConfigureAwait(false);
     }
 
+    private static volatile bool _sessionUrlWarningLogged;
+
     private static async Task TryNotifyAsync()
     {
         try
@@ -206,7 +208,11 @@ public class WebsocketManager
             var sessionConnectionString = EnvironmentUtil.GetDatabaseUrlSession();
             if (string.IsNullOrEmpty(sessionConnectionString))
             {
-                Log.Warning("DATABASE_URL_SESSION is not configured; websocket outbox listeners will rely on catch-up polling.");
+                if (!_sessionUrlWarningLogged)
+                {
+                    _sessionUrlWarningLogged = true;
+                    Log.Warning("DATABASE_URL_SESSION is not configured; websocket outbox listeners will rely on catch-up polling.");
+                }
                 return;
             }
 
