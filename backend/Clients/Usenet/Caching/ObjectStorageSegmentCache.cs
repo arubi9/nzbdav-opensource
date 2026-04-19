@@ -26,6 +26,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         int WriterParallelism,
         TimeSpan ReadTimeout,
         TimeSpan WriteTimeout,
+        string StorageClass,
         Func<CancellationToken, Task> EnsureBucketExistsAsync,
         Func<string, CancellationToken, Task<ReadResult?>> TryReadAsync,
         Func<WriteRequest, CancellationToken, Task> WriteAsync,
@@ -43,6 +44,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
     private readonly int _writerParallelism;
     private readonly TimeSpan _readTimeout;
     private readonly TimeSpan _writeTimeout;
+    private readonly string _storageClass;
     private readonly IReadOnlyList<Task> _writerTasks;
     private volatile int _queueCount;
     private volatile bool _shutdownRequested;
@@ -66,6 +68,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
     public int QueueDepth => _queueCount;
     public int WriterParallelism => _writerParallelism;
     public string BucketName { get; }
+    public string StorageClass => _storageClass;
 
     public ObjectStorageSegmentCache(ConfigManager configManager)
         : this(CreateFromConfig(configManager))
@@ -83,7 +86,8 @@ public sealed class ObjectStorageSegmentCache : IDisposable
             binding.StartWriter,
             binding.ReadTimeout,
             binding.WriteTimeout,
-            binding.WriterParallelism)
+            binding.WriterParallelism,
+            binding.StorageClass)
     {
     }
 
@@ -97,14 +101,18 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         bool startWriter = true,
         TimeSpan? readTimeout = null,
         TimeSpan? writeTimeout = null,
-        int writerParallelism = 4)
+        int writerParallelism = 4,
+        string storageClass = "STANDARD")
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(queueCapacity);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(writerParallelism);
         if (writerParallelism > 32)
             throw new ArgumentOutOfRangeException(nameof(writerParallelism), "Must be 1-32");
+        if (string.IsNullOrEmpty(storageClass))
+            throw new ArgumentException("storageClass must not be null or empty.", nameof(storageClass));
 
         BucketName = bucketName;
+        _storageClass = storageClass;
         _queueCapacity = queueCapacity;
         _writerParallelism = writerParallelism;
         _readTimeout = readTimeout ?? TimeSpan.FromSeconds(30);
@@ -334,6 +342,8 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         var accessKey = configManager.GetL2AccessKey();
         var secretKey = configManager.GetL2SecretKey();
 
+        var storageClass = configManager.GetL2StorageClass();
+
         if (string.IsNullOrWhiteSpace(endpoint) ||
             string.IsNullOrWhiteSpace(accessKey) ||
             string.IsNullOrWhiteSpace(secretKey))
@@ -345,6 +355,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
                 configManager.GetL2WriterParallelism(),
                 configManager.GetL2ReadTimeout(),
                 configManager.GetL2WriteTimeout(),
+                storageClass,
                 _ => Task.CompletedTask,
                 (_, _) => Task.FromResult<ReadResult?>(null),
                 (_, _) => Task.CompletedTask,
@@ -359,9 +370,10 @@ public sealed class ObjectStorageSegmentCache : IDisposable
             configManager.GetL2WriterParallelism(),
             configManager.GetL2ReadTimeout(),
             configManager.GetL2WriteTimeout(),
+            storageClass,
             CreateEnsureBucketDelegate(client, bucketName),
             CreateReadDelegate(client, bucketName),
-            CreateWriteDelegate(client, bucketName),
+            CreateWriteDelegate(client, bucketName, storageClass),
             CreateDeleteByOwnerDelegate(client, bucketName),
             true);
     }
@@ -409,33 +421,13 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         };
     }
 
-    private static Func<WriteRequest, CancellationToken, Task> CreateWriteDelegate(IMinioClient client, string bucketName)
+    private static Func<WriteRequest, CancellationToken, Task> CreateWriteDelegate(
+        IMinioClient client, string bucketName, string storageClass)
     {
         return async (request, ct) =>
         {
             using var stream = new MemoryStream(request.Body, writable: false);
-            var headers = new Dictionary<string, string>(StringComparer.Ordinal)
-            {
-                ["x-amz-meta-segment-id"] = request.SegmentId,
-                ["x-amz-meta-yenc-filename"] = request.YencHeaders.FileName,
-                // UsenetYencHeader exposes its data via public fields; default
-                // JsonSerializer options skip fields and would store only the
-                // IsFilePart property, round-tripping every other value to
-                // zero and poisoning L2 promotions. See IsCorruptYencHeader /
-                // YencHeaderJsonOptions in LiveSegmentCache for the symptom.
-                ["x-amz-meta-yenc-header"] = JsonSerializer.Serialize(
-                    request.YencHeaders,
-                    YencHeaderJsonOptions),
-                ["x-amz-meta-category"] = request.Category switch
-                {
-                    SegmentCategory.SmallFile => "small_file",
-                    SegmentCategory.VideoSegment => "video",
-                    _ => "unknown"
-                }
-            };
-            if (request.OwnerNzbId.HasValue)
-                headers["x-amz-meta-owner-nzb-id"] = request.OwnerNzbId.Value.ToString();
-
+            var headers = BuildWriteHeadersInternal(request, storageClass);
             var args = new PutObjectArgs()
                 .WithBucket(bucketName)
                 .WithObject(GetObjectKey(request.SegmentId))
@@ -445,6 +437,34 @@ public sealed class ObjectStorageSegmentCache : IDisposable
                 .WithHeaders(headers);
             await client.PutObjectAsync(args, ct).ConfigureAwait(false);
         };
+    }
+
+    internal static Dictionary<string, string> BuildWriteHeadersInternal(WriteRequest request, string storageClass)
+    {
+        var headers = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["x-amz-meta-segment-id"] = request.SegmentId,
+            ["x-amz-meta-yenc-filename"] = request.YencHeaders.FileName,
+            // UsenetYencHeader exposes its data via public fields; default
+            // JsonSerializer options skip fields and would store only the
+            // IsFilePart property, round-tripping every other value to
+            // zero and poisoning L2 promotions. See IsCorruptYencHeader /
+            // YencHeaderJsonOptions in LiveSegmentCache for the symptom.
+            ["x-amz-meta-yenc-header"] = JsonSerializer.Serialize(
+                request.YencHeaders,
+                YencHeaderJsonOptions),
+            ["x-amz-meta-category"] = request.Category switch
+            {
+                SegmentCategory.SmallFile => "small_file",
+                SegmentCategory.VideoSegment => "video",
+                _ => "unknown"
+            }
+        };
+        if (request.OwnerNzbId.HasValue)
+            headers["x-amz-meta-owner-nzb-id"] = request.OwnerNzbId.Value.ToString();
+        if (!string.Equals(storageClass, "STANDARD", StringComparison.OrdinalIgnoreCase))
+            headers["x-amz-storage-class"] = storageClass;
+        return headers;
     }
 
     private static Func<Guid, CancellationToken, Task> CreateDeleteByOwnerDelegate(IMinioClient client, string bucketName)

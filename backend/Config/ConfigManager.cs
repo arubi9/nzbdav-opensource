@@ -426,6 +426,10 @@ public class ConfigManager
         => TimeSpan.FromSeconds(
             int.Parse(StringUtil.EmptyToNull(GetConfigValue("cache.l2.write-timeout-seconds")) ?? "60"));
 
+    public string GetL2StorageClass()
+        => StringUtil.EmptyToNull(GetConfigValue("cache.l2.storage-class"))?.ToUpperInvariant()
+           ?? "STANDARD";
+
     public class ConfigEventArgs : EventArgs
     {
         public required Dictionary<string, string> ChangedConfig { get; init; }

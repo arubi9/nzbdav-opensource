@@ -386,6 +386,47 @@ public sealed class ObjectStorageSegmentCacheTests
         Assert.Equal(2, cache.QueueDepth);
     }
 
+    [Fact]
+    public void BuildWriteHeaders_StandardClassOmitsHeader()
+    {
+        var req = new ObjectStorageSegmentCache.WriteRequest(
+            "seg-x", [1, 2, 3], SegmentCategory.SmallFile, null, CreateHeader("a.bin"));
+        var headers = ObjectStorageSegmentCache.BuildWriteHeadersInternal(req, "STANDARD");
+        Assert.False(headers.ContainsKey("x-amz-storage-class"));
+    }
+
+    [Fact]
+    public void BuildWriteHeaders_ExpressOneZoneInjectsHeader()
+    {
+        var req = new ObjectStorageSegmentCache.WriteRequest(
+            "seg-y", [1, 2, 3], SegmentCategory.VideoSegment, null, CreateHeader("b.bin"));
+        var headers = ObjectStorageSegmentCache.BuildWriteHeadersInternal(req, "EXPRESS_ONEZONE");
+        Assert.Equal("EXPRESS_ONEZONE", headers["x-amz-storage-class"]);
+    }
+
+    [Fact]
+    public void StorageClass_DefaultsToStandard()
+    {
+        using var cache = new ObjectStorageSegmentCache(
+            bucketName: "b", queueCapacity: 4,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
+            tryReadAsync: (_, _) => Task.FromResult<ObjectStorageSegmentCache.ReadResult?>(null),
+            writeAsync: (_, _) => Task.CompletedTask);
+        Assert.Equal("STANDARD", cache.StorageClass);
+    }
+
+    [Fact]
+    public void StorageClass_AcceptsCustomValue()
+    {
+        using var cache = new ObjectStorageSegmentCache(
+            bucketName: "b", queueCapacity: 4,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
+            tryReadAsync: (_, _) => Task.FromResult<ObjectStorageSegmentCache.ReadResult?>(null),
+            writeAsync: (_, _) => Task.CompletedTask,
+            storageClass: "EXPRESS_ONEZONE");
+        Assert.Equal("EXPRESS_ONEZONE", cache.StorageClass);
+    }
+
     private static UsenetYencHeader CreateHeader(string fileName)
     {
         return new UsenetYencHeader
