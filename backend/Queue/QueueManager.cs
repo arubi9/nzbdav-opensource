@@ -1,4 +1,5 @@
-﻿using NzbWebDAV.Clients.Usenet;
+using System.Collections.Concurrent;
+using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
@@ -12,7 +13,7 @@ namespace NzbWebDAV.Queue;
 
 public class QueueManager : IDisposable
 {
-    private InProgressQueueItem? _inProgressQueueItem;
+    private readonly ConcurrentDictionary<Guid, InProgressQueueItem> _inProgressItems = new();
 
     private readonly UsenetStreamingClient _usenetClient;
     private readonly CancellationTokenSource? _cancellationTokenSource;
@@ -49,7 +50,15 @@ public class QueueManager : IDisposable
 
     public (QueueItem? queueItem, int? progress) GetInProgressQueueItem()
     {
-        return (_inProgressQueueItem?.QueueItem, _inProgressQueueItem?.ProgressPercentage);
+        var first = _inProgressItems.Values.FirstOrDefault();
+        return (first?.QueueItem, first?.ProgressPercentage);
+    }
+
+    public IReadOnlyList<(QueueItem queueItem, int progress)> GetInProgressQueueItems()
+    {
+        return _inProgressItems.Values
+            .Select(x => (x.QueueItem, x.ProgressPercentage))
+            .ToList();
     }
 
     public void AwakenQueue(DateTime? dateTime = null)
@@ -71,14 +80,35 @@ public class QueueManager : IDisposable
         CancellationToken ct = default
     )
     {
+        // Hold the lock across cancel + await + DB delete so that no worker
+        // can re-pick a cancelled item before it has been removed from the DB.
         await LockAsync(async () =>
         {
-            var inProgressId = _inProgressQueueItem?.QueueItem?.Id;
-            if (inProgressId is not null && queueItemIds.Contains(inProgressId.Value))
+            // Snapshot matching in-progress items under the lock
+            var matchingInProgress = queueItemIds
+                .Select(id => _inProgressItems.TryGetValue(id, out var item) ? item : null)
+                .Where(item => item is not null)
+                .Select(item => item!)
+                .ToList();
+
+            // Cancel all matching items first so their processor loops terminate
+            foreach (var inProgress in matchingInProgress)
+                await inProgress.CancellationTokenSource.CancelAsync().ConfigureAwait(false);
+
+            // Wait for each cancelled processor to return and proactively
+            // evict from the dict. The worker's finally block will no-op
+            // TryRemove after this.
+            foreach (var inProgress in matchingInProgress)
             {
-                await _inProgressQueueItem!.CancellationTokenSource.CancelAsync().ConfigureAwait(false);
-                await _inProgressQueueItem.ProcessingTask.ConfigureAwait(false);
-                _inProgressQueueItem = null;
+                try
+                {
+                    await inProgress.ProcessingTask.ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Worker loop already logs; swallow here.
+                }
+                _inProgressItems.TryRemove(inProgress.QueueItem.Id, out _);
             }
 
             await dbClient.RemoveQueueItemsAsync(queueItemIds, ct).ConfigureAwait(false);
@@ -101,77 +131,154 @@ public class QueueManager : IDisposable
                 await Task.Delay(TimeSpan.FromSeconds(2), ct).ConfigureAwait(false);
         }
 
+        var parallelism = Math.Max(1, _configManager.GetQueueParallelism());
+        if (parallelism > 1)
+            Log.Information($"Queue processing with parallelism={parallelism}");
+
+        var workers = Enumerable.Range(0, parallelism)
+            .Select(workerId => ProcessWorkerAsync(workerId, ct))
+            .ToArray();
+        await Task.WhenAll(workers).ConfigureAwait(false);
+    }
+
+    private async Task ProcessWorkerAsync(int workerId, CancellationToken ct)
+    {
         while (!ct.IsCancellationRequested)
         {
+            // Declared at loop scope so the outer finally always disposes them,
+            // even if LockAsync throws after partially populating them.
+            InProgressQueueItem? inProgress = null;
+            ArticleCachingNntpClient? cachingUsenetClient = null;
+            Stream? queueNzbStream = null;
+            CancellationTokenSource? itemCts = null;
+            bool shouldSleep = false;
+            bool processedSuccessfully = false;
+
             try
             {
-                // get the next queue-item from the database
                 await using var dbContext = new DavDatabaseContext();
                 var dbClient = new DavDatabaseClient(dbContext);
-                var topItem = await LockAsync(() => dbClient.GetTopQueueItem(ct)).ConfigureAwait(false);
-                if (topItem.queueItem is null || topItem.queueNzbStream is null)
+
+                // Critical section: snapshot in-progress IDs, query next
+                // available item, and register it as in-progress atomically
+                // so two workers cannot pick the same item.
+                var captured = await LockAsync<CapturedResources>(async () =>
                 {
-                    try
+                    var excludedIds = _inProgressItems.Keys.ToList();
+                    var topItem = await dbClient.GetTopQueueItem(excludedIds, ct).ConfigureAwait(false);
+                    if (topItem.queueItem is null || topItem.queueNzbStream is null)
                     {
-                        // if we're done with the queue, wait a minute before checking again.
-                        // or wait until awoken by cancellation of _sleepingQueueToken
-                        await Task.Delay(TimeSpan.FromMinutes(1), _sleepingQueueToken.Token).ConfigureAwait(false);
-                    }
-                    catch when (_sleepingQueueToken.IsCancellationRequested)
-                    {
-                        lock (_sleepingQueueLock)
-                        {
-                            if (!_sleepingQueueToken.TryReset())
-                            {
-                                _sleepingQueueToken.Dispose();
-                                _sleepingQueueToken = new CancellationTokenSource();
-                            }
-                        }
+                        topItem.queueNzbStream?.Dispose();
+                        return new CapturedResources();
                     }
 
-                    continue;
-                }
+                    // the cache is scoped only to this single queue-item.
+                    var caching = new ArticleCachingNntpClient(_usenetClient);
+                    var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
-                // create an article-caching nntp-client.
-                // the cache will be scoped only to this single queue-item.
-                using var cachingUsenetClient = new ArticleCachingNntpClient(_usenetClient);
+                    var item = BeginProcessingQueueItem(dbClient, caching,
+                        topItem.queueItem, topItem.queueNzbStream, cts);
 
-                // process the queue-item
-                await using var queueNzbStream = topItem.queueNzbStream;
-                using var queueItemCancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                await LockAsync(() =>
-                {
-                    // ReSharper disable twice AccessToDisposedClosure
-                    _inProgressQueueItem = BeginProcessingQueueItem(dbClient, cachingUsenetClient,
-                        topItem.queueItem, queueNzbStream, queueItemCancellationTokenSource);
+                    // Lock + excluded-IDs filter guarantees no other worker has
+                    // this same item registered. Indexer set is safe here.
+                    _inProgressItems[topItem.queueItem.Id] = item;
+                    return new CapturedResources
+                    {
+                        InProgress = item,
+                        Caching = caching,
+                        NzbStream = topItem.queueNzbStream,
+                        Cts = cts,
+                    };
                 }).ConfigureAwait(false);
-                var processedSuccessfully = await (_inProgressQueueItem?.ProcessingTask ?? Task.FromResult(false))
-                    .ConfigureAwait(false);
 
-                // Fire event after successful processing
-                if (processedSuccessfully)
+                inProgress = captured.InProgress;
+                cachingUsenetClient = captured.Caching;
+                queueNzbStream = captured.NzbStream;
+                itemCts = captured.Cts;
+
+                if (inProgress is null)
                 {
-                    try
-                    {
-                        OnNzbProcessed?.Invoke(this, new NzbProcessedEventArgs(
-                            topItem.queueItem.Id,
-                            topItem.queueItem.JobName,
-                            topItem.queueItem.Category
-                        ));
-                    }
-                    catch (Exception ex)
-                    {
-                        Log.Debug($"Error in NzbProcessed event handler: {ex.Message}");
-                    }
+                    shouldSleep = true;
+                }
+                else
+                {
+                    // Process outside the lock so other workers can pick items concurrently.
+                    processedSuccessfully = await inProgress.ProcessingTask.ConfigureAwait(false);
                 }
             }
             catch (Exception e)
             {
-                Log.Error($"An unexpected error occured while processing the queue: {e.Message}");
+                Log.Error($"An unexpected error occured while processing the queue (worker {workerId}): {e.Message}");
+
+                // Back off briefly so a persistent failure does not spin the loop.
+                try { await Task.Delay(TimeSpan.FromSeconds(1), ct).ConfigureAwait(false); }
+                catch (OperationCanceledException) { /* shutting down */ }
             }
             finally
             {
-                await LockAsync(() => { _inProgressQueueItem = null; }).ConfigureAwait(false);
+                // Unregister and dispose resources regardless of success/failure.
+                if (inProgress is not null)
+                    _inProgressItems.TryRemove(inProgress.QueueItem.Id, out _);
+
+                cachingUsenetClient?.Dispose();
+                if (queueNzbStream is not null)
+                {
+                    try { await queueNzbStream.DisposeAsync().ConfigureAwait(false); }
+                    catch (Exception ex) { Log.Debug($"queueNzbStream dispose error: {ex.Message}"); }
+                }
+                itemCts?.Dispose();
+            }
+
+            if (processedSuccessfully && inProgress is not null)
+            {
+                try
+                {
+                    OnNzbProcessed?.Invoke(this, new NzbProcessedEventArgs(
+                        inProgress.QueueItem.Id,
+                        inProgress.QueueItem.JobName,
+                        inProgress.QueueItem.Category
+                    ));
+                }
+                catch (Exception ex)
+                {
+                    Log.Debug($"Error in NzbProcessed event handler: {ex.Message}");
+                }
+            }
+
+            if (shouldSleep)
+                await SleepUntilAwokenAsync(ct).ConfigureAwait(false);
+        }
+    }
+
+    private async Task SleepUntilAwokenAsync(CancellationToken ct)
+    {
+        // Capture the current sleep token reference so the catch filter
+        // matches against the same token that was passed to Task.Delay,
+        // even if another worker replaces _sleepingQueueToken concurrently.
+        CancellationTokenSource sleepCts;
+        lock (_sleepingQueueLock)
+            sleepCts = _sleepingQueueToken;
+
+        try
+        {
+            // if we're done with the queue, wait a minute before checking again
+            // or wait until awoken by cancellation of _sleepingQueueToken.
+            await Task.Delay(TimeSpan.FromMinutes(1), sleepCts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (sleepCts.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            // Reset the shared token so the next idle period can sleep again.
+            // Only the first waking worker succeeds; others find it already reset.
+            lock (_sleepingQueueLock)
+            {
+                if (ReferenceEquals(_sleepingQueueToken, sleepCts) && _sleepingQueueToken.IsCancellationRequested)
+                {
+                    if (!_sleepingQueueToken.TryReset())
+                    {
+                        _sleepingQueueToken.Dispose();
+                        _sleepingQueueToken = new CancellationTokenSource();
+                    }
+                }
             }
         }
     }
@@ -255,9 +362,17 @@ public class QueueManager : IDisposable
 
     private class InProgressQueueItem
     {
-        public QueueItem QueueItem { get; init; }
+        public QueueItem QueueItem { get; init; } = null!;
         public int ProgressPercentage { get; set; }
-        public Task<bool> ProcessingTask { get; init; }
-        public CancellationTokenSource CancellationTokenSource { get; init; }
+        public Task<bool> ProcessingTask { get; init; } = null!;
+        public CancellationTokenSource CancellationTokenSource { get; init; } = null!;
+    }
+
+    private sealed class CapturedResources
+    {
+        public InProgressQueueItem? InProgress { get; init; }
+        public ArticleCachingNntpClient? Caching { get; init; }
+        public Stream? NzbStream { get; init; }
+        public CancellationTokenSource? Cts { get; init; }
     }
 }

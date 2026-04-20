@@ -367,6 +367,14 @@ public class ConfigManager
     public int GetCacheMaxAgeHours()
         => int.Parse(StringUtil.EmptyToNull(GetConfigValue("cache.max-age-hours")) ?? "6");
 
+    public int GetQueueParallelism()
+    {
+        var envOverride = EnvironmentUtil.GetEnvironmentVariable("NZBDAV_QUEUE_PARALLELISM");
+        if (!string.IsNullOrEmpty(envOverride) && int.TryParse(envOverride, out var envVal))
+            return Math.Max(1, envVal);
+        return int.Parse(StringUtil.EmptyToNull(GetConfigValue("queue.parallelism")) ?? "1");
+    }
+
     public string? GetCacheDirectory()
         => StringUtil.EmptyToNull(GetConfigValue("cache.directory"));
 

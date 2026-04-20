@@ -2,6 +2,7 @@
 using Microsoft.AspNetCore.Mvc;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
+using NzbWebDAV.Database.Models;
 using NzbWebDAV.Queue;
 
 namespace NzbWebDAV.Api.SabControllers.GetQueue;
@@ -15,28 +16,35 @@ public class GetQueueController(
 {
     private async Task<GetQueueResponse> GetQueueAsync(GetQueueRequest request)
     {
-        // get in progress item
-        var (inProgressQueueItem, progressPercentage) = queueManager.GetInProgressQueueItem();
+        // get all in-progress items (queue may process N items concurrently)
+        var inProgressItems = queueManager.GetInProgressQueueItems();
+        var inProgressById = inProgressItems.ToDictionary(x => x.queueItem.Id);
+        var inProgressIds = inProgressById.Keys.ToHashSet();
 
         // get total count
         var ct = request.CancellationToken;
         var totalCount = await dbClient.GetQueueItemsCount(request.Category, ct).ConfigureAwait(false);
 
-        // get queued items
+        // get queued items (exclude any currently being processed)
         var getQueueItemsTask = dbClient.GetQueueItems(request.Category, request.Start, request.Limit, ct);
         var queueItems = (await getQueueItemsTask.ConfigureAwait(false))
-            .Where(x => x.Id != inProgressQueueItem?.Id)
+            .Where(x => !inProgressIds.Contains(x.Id))
             .ToArray();
 
-        // get slots
-        var slots = queueItems
-            .Prepend(request is { Start: 0, Limit: > 0 } ? inProgressQueueItem : null)
+        // get slots — prepend all in-progress items at the top of the first page
+        var prependedInProgress = request is { Start: 0, Limit: > 0 }
+            ? inProgressItems.Select(x => (QueueItem?)x.queueItem).ToList()
+            : new List<QueueItem?>();
+
+        var slots = prependedInProgress
+            .Concat(queueItems.Select(q => (QueueItem?)q))
             .Where(queueItem => queueItem != null)
             .Select((queueItem, index) =>
             {
-                var percentage = (queueItem == inProgressQueueItem ? progressPercentage : 0)!.Value;
-                var status = queueItem == inProgressQueueItem ? "Downloading" : "Queued";
-                return GetQueueResponse.QueueSlot.FromQueueItem(queueItem!, index, percentage, status);
+                var isInProgress = inProgressById.TryGetValue(queueItem!.Id, out var inProgress);
+                var percentage = isInProgress ? inProgress.progress : 0;
+                var status = isInProgress ? "Downloading" : "Queued";
+                return GetQueueResponse.QueueSlot.FromQueueItem(queueItem, index, percentage, status);
             })
             .ToList();
 
