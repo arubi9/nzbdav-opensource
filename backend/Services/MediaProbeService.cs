@@ -368,24 +368,46 @@ public class MediaProbeService : BackgroundService
         using var priorityScope = ct.SetContext(
             new DownloadPriorityContext { Priority = SemaphorePriority.Low });
 
+        var concurrency = GetBackfillConcurrency();
+        Log.Information("ProbeDataGenerator backfill starting with concurrency={Concurrency}", concurrency);
+
         var generated = 0;
-        foreach (var item in items)
+        var generatedLock = new Lock();
+        var options = new ParallelOptions
         {
-            ct.ThrowIfCancellationRequested();
+            MaxDegreeOfParallelism = concurrency,
+            CancellationToken = ct,
+        };
+
+        await Parallel.ForEachAsync(items, options, async (item, innerCt) =>
+        {
             try
             {
-                await processItem(item, ct).ConfigureAwait(false);
-                generated++;
-                if (generated % 20 == 0)
-                    Log.Information("ProbeDataGenerator backfill progress: {Done}/{Total}", generated, items.Count);
+                await processItem(item, innerCt).ConfigureAwait(false);
+                int done;
+                lock (generatedLock) { done = ++generated; }
+                if (done % 20 == 0)
+                    Log.Information("ProbeDataGenerator backfill progress: {Done}/{Total}", done, items.Count);
+            }
+            catch (OperationCanceledException) when (innerCt.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception e)
             {
                 Log.Debug("Backfill probe failed for {Name}: {Error}", item.Name, e.Message);
             }
-        }
+        }).ConfigureAwait(false);
 
         Log.Information("ProbeDataGenerator backfill complete: {Generated}/{Missing} probes created", generated, items.Count);
+    }
+
+    private static int GetBackfillConcurrency()
+    {
+        var env = Environment.GetEnvironmentVariable("NZBDAV_PROBE_CONCURRENCY");
+        if (!string.IsNullOrEmpty(env) && int.TryParse(env, out var n) && n > 0)
+            return Math.Min(n, 32);
+        return 5;
     }
 
     private async Task ProbeFilesForJob(QueueManager.NzbProcessedEventArgs args, CancellationToken ct)
