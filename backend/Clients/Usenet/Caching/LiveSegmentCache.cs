@@ -416,7 +416,12 @@ public sealed class LiveSegmentCache : IDisposable
                     TryEvict(pair.Key, pair.Value);
             }
 
-            if (Interlocked.Read(ref _cachedBytes) <= _maxCacheSizeBytes) return;
+            // Low-watermark compaction: target 85% of cap so there's headroom
+            // for incoming writes before hitting the ceiling again. Reactive
+            // eviction-at-cap oscillates between 100% and "saturated" on
+            // every burst; aiming lower gives breathing room.
+            var pruneTarget = (long)(_maxCacheSizeBytes * 0.85);
+            if (Interlocked.Read(ref _cachedBytes) <= pruneTarget) return;
 
             // Pass 2: Evict VideoSegment by LRU
             var videoEntries = _cachedSegments.ToArray()
@@ -426,7 +431,7 @@ public sealed class LiveSegmentCache : IDisposable
             foreach (var pair in videoEntries)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (Interlocked.Read(ref _cachedBytes) <= _maxCacheSizeBytes) return;
+                if (Interlocked.Read(ref _cachedBytes) <= pruneTarget) return;
                 TryEvict(pair.Key, pair.Value);
             }
 
@@ -438,7 +443,7 @@ public sealed class LiveSegmentCache : IDisposable
             foreach (var pair in unknownEntries)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (Interlocked.Read(ref _cachedBytes) <= _maxCacheSizeBytes) return;
+                if (Interlocked.Read(ref _cachedBytes) <= pruneTarget) return;
                 TryEvict(pair.Key, pair.Value);
             }
 
@@ -450,7 +455,7 @@ public sealed class LiveSegmentCache : IDisposable
             foreach (var pair in smallFileEntries)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (Interlocked.Read(ref _cachedBytes) <= _maxCacheSizeBytes) return;
+                if (Interlocked.Read(ref _cachedBytes) <= pruneTarget) return;
                 TryEvict(pair.Key, pair.Value);
             }
         }
