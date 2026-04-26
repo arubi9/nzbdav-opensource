@@ -199,7 +199,9 @@ public sealed class LiveSegmentCacheBehaviorTests
             .AddSegment("video", Encoding.ASCII.GetBytes("2222"), partOffset: 4)
             .AddSegment("unknown", Encoding.ASCII.GetBytes("3333"), partOffset: 8);
 
-        using var liveCache = new LiveSegmentCache(cacheScope.Path, maxCacheSizeBytes: 8, maxAge: TimeSpan.FromHours(1));
+        // Cap chosen so 3×4-byte segments (12B) exceed cap but evicting only the
+        // VideoSegment (→8B) drops below the 85% low-watermark target (11×0.85≈9.35).
+        using var liveCache = new LiveSegmentCache(cacheScope.Path, maxCacheSizeBytes: 11, maxAge: TimeSpan.FromHours(1));
         using var client = new LiveSegmentCachingNntpClient(fakeNntpClient, liveCache);
 
         await CacheSegmentAsync(client, "small", SegmentCategory.SmallFile, Guid.NewGuid());

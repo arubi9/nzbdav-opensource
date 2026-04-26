@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using System.Xml;
 
 namespace NzbWebDAV.Models.Nzb;
@@ -50,10 +51,10 @@ public class NzbDocument
             if (reader is { NodeType: XmlNodeType.Element, Name: "meta" })
             {
                 var type = reader.GetAttribute("type") ?? string.Empty;
-                var value = await reader.ReadElementContentAsStringAsync().ConfigureAwait(false);
+                var value = await ReadElementContentTolerantAsync(reader).ConfigureAwait(false);
                 metadata.Add(type, value);
 
-                // ReadElementContentAsStringAsync advances the reader - continue to check current position
+                // helper advances the reader past EndElement - continue to check current position
                 continue;
             }
 
@@ -87,6 +88,38 @@ public class NzbDocument
         return file;
     }
 
+    // Some NZBs in the wild include nested elements inside <meta> or <segment>
+    // (e.g. <segment number="1" bytes="383848">message-id<extra/></segment>).
+    // ReadElementContentAsStringAsync throws "'Element' is an invalid XmlNodeType"
+    // on mixed content. ReadInnerXmlAsync tolerates it; we strip any tags to
+    // recover the text portion. Falls back to empty string on total parse failure
+    // so a single bad element doesn't abort the whole NZB.
+    private static readonly Regex TagStrippingRegex = new("<[^>]*>", RegexOptions.Compiled);
+
+    private static async Task<string> ReadElementContentTolerantAsync(XmlReader reader)
+    {
+        if (reader.IsEmptyElement)
+        {
+            await reader.ReadAsync().ConfigureAwait(false);
+            return string.Empty;
+        }
+
+        try
+        {
+            var inner = await reader.ReadInnerXmlAsync().ConfigureAwait(false);
+            // Fast path: well-formed NZBs have plain text content
+            if (inner.IndexOf('<') < 0) return inner.Trim();
+            // Slow path: strip nested elements/comments, keep text only
+            return TagStrippingRegex.Replace(inner, string.Empty).Trim();
+        }
+        catch (XmlException)
+        {
+            // Truly unrecoverable element — skip it and continue parsing the rest
+            try { await reader.SkipAsync().ConfigureAwait(false); } catch { }
+            return string.Empty;
+        }
+    }
+
     private static async Task ReadSegmentsAsync(XmlReader reader, NzbFile file)
     {
         if (reader.IsEmptyElement)
@@ -105,11 +138,11 @@ public class NzbDocument
                 {
                     Number = int.TryParse(numberAttr, out var number) ? number : 0,
                     Bytes = long.TryParse(bytesAttr, out var bytes) ? bytes : 0,
-                    MessageId = await reader.ReadElementContentAsStringAsync().ConfigureAwait(false)
+                    MessageId = await ReadElementContentTolerantAsync(reader).ConfigureAwait(false)
                 };
                 file.Segments.Add(segment);
 
-                // ReadElementContentAsStringAsync advances the reader - continue to check current position
+                // helper advances the reader past EndElement - continue to check current position
                 continue;
             }
 
