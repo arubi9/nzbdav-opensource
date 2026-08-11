@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using NzbWebDAV.Database;
 
@@ -10,9 +11,11 @@ using NzbWebDAV.Database;
 namespace NzbWebDAV.Database.Migrations
 {
     [DbContext(typeof(DavDatabaseContext))]
-    partial class DavDatabaseContextModelSnapshot : ModelSnapshot
+    [Migration("20260809130000_AddSetupMutationFenceAndCompletion")]
+    partial class AddSetupMutationFenceAndCompletion
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.4");
@@ -649,43 +652,6 @@ namespace NzbWebDAV.Database.Migrations
                     b.ToTable("setup_mutation_fence", null, t =>
                         {
                             t.HasCheckConstraint("CK_setup_mutation_fence_singleton", "\"id\" = 1");
-                        });
-                });
-
-            modelBuilder.Entity("NzbWebDAV.Database.Models.SetupRunLease", b =>
-                {
-                    b.Property<int>("Id")
-                        .HasColumnType("INTEGER")
-                        .HasColumnName("id");
-
-                    b.Property<long>("Generation")
-                        .HasColumnType("INTEGER")
-                        .HasColumnName("generation");
-
-                    b.Property<string>("GrantHash")
-                        .IsRequired()
-                        .HasColumnType("TEXT")
-                        .HasColumnName("grant_hash");
-
-                    b.Property<DateTime>("LeaseUntilUtc")
-                        .HasColumnType("TIMESTAMP WITH TIME ZONE")
-                        .HasColumnName("lease_until_utc");
-
-                    b.Property<string>("OwnerId")
-                        .IsRequired()
-                        .HasColumnType("TEXT")
-                        .HasColumnName("owner_id");
-
-                    b.Property<string>("Purpose")
-                        .IsRequired()
-                        .HasColumnType("TEXT")
-                        .HasColumnName("purpose");
-
-                    b.HasKey("Id");
-
-                    b.ToTable("setup_run_leases", null, t =>
-                        {
-                            t.HasCheckConstraint("CK_setup_run_leases_singleton", "\"id\" = 1");
                         });
                 });
 

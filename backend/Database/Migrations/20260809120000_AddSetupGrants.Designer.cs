@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using NzbWebDAV.Database;
 
@@ -10,9 +11,11 @@ using NzbWebDAV.Database;
 namespace NzbWebDAV.Database.Migrations
 {
     [DbContext(typeof(DavDatabaseContext))]
-    partial class DavDatabaseContextModelSnapshot : ModelSnapshot
+    [Migration("20260809120000_AddSetupGrants")]
+    partial class AddSetupGrants
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.4");
@@ -522,57 +525,6 @@ namespace NzbWebDAV.Database.Migrations
                     b.ToTable("QueueNzbContents", (string)null);
                 });
 
-            modelBuilder.Entity("NzbWebDAV.Database.Models.SetupCompletionOperation", b =>
-                {
-                    b.Property<int>("Id")
-                        .HasColumnType("INTEGER")
-                        .HasColumnName("id");
-
-                    b.Property<string>("ActiveSessionCiphertext")
-                        .HasColumnType("TEXT")
-                        .HasColumnName("active_session_ciphertext");
-
-                    b.Property<string>("CandidateOperationCiphertext")
-                        .HasColumnType("TEXT")
-                        .HasColumnName("candidate_operation_ciphertext");
-
-                    b.Property<string>("CandidateSessionCiphertext")
-                        .HasColumnType("TEXT")
-                        .HasColumnName("candidate_session_ciphertext");
-
-                    b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("TIMESTAMP WITH TIME ZONE")
-                        .HasColumnName("created_at_utc");
-
-                    b.Property<string>("EmergencyOperationCiphertext")
-                        .HasColumnType("TEXT")
-                        .HasColumnName("emergency_operation_ciphertext");
-
-                    b.Property<string>("EmergencySessionCiphertext")
-                        .HasColumnType("TEXT")
-                        .HasColumnName("emergency_session_ciphertext");
-
-                    b.Property<string>("OperationId")
-                        .IsRequired()
-                        .HasColumnType("TEXT")
-                        .HasColumnName("operation_id");
-
-                    b.Property<bool>("RevocationPending")
-                        .HasColumnType("INTEGER")
-                        .HasColumnName("revocation_pending");
-
-                    b.Property<string>("RevocationSessionCiphertext")
-                        .HasColumnType("TEXT")
-                        .HasColumnName("revocation_session_ciphertext");
-
-                    b.HasKey("Id");
-
-                    b.ToTable("setup_completion_operations", null, t =>
-                        {
-                            t.HasCheckConstraint("CK_setup_completion_operations_singleton", "\"id\" = 1");
-                        });
-                });
-
             modelBuilder.Entity("NzbWebDAV.Database.Models.SetupGrant", b =>
                 {
                     b.Property<int>("Id")
@@ -627,65 +579,6 @@ namespace NzbWebDAV.Database.Migrations
                     b.ToTable("setup_grants", null, t =>
                         {
                             t.HasCheckConstraint("CK_setup_grants_singleton", "\"id\" = 1");
-                        });
-                });
-
-            modelBuilder.Entity("NzbWebDAV.Database.Models.SetupMutationFence", b =>
-                {
-                    b.Property<int>("Id")
-                        .HasColumnType("INTEGER")
-                        .HasColumnName("id");
-
-                    b.Property<long>("Epoch")
-                        .HasColumnType("INTEGER")
-                        .HasColumnName("epoch");
-
-                    b.Property<string>("ReservedCandidateOperationId")
-                        .HasColumnType("TEXT")
-                        .HasColumnName("reserved_candidate_operation_id");
-
-                    b.HasKey("Id");
-
-                    b.ToTable("setup_mutation_fence", null, t =>
-                        {
-                            t.HasCheckConstraint("CK_setup_mutation_fence_singleton", "\"id\" = 1");
-                        });
-                });
-
-            modelBuilder.Entity("NzbWebDAV.Database.Models.SetupRunLease", b =>
-                {
-                    b.Property<int>("Id")
-                        .HasColumnType("INTEGER")
-                        .HasColumnName("id");
-
-                    b.Property<long>("Generation")
-                        .HasColumnType("INTEGER")
-                        .HasColumnName("generation");
-
-                    b.Property<string>("GrantHash")
-                        .IsRequired()
-                        .HasColumnType("TEXT")
-                        .HasColumnName("grant_hash");
-
-                    b.Property<DateTime>("LeaseUntilUtc")
-                        .HasColumnType("TIMESTAMP WITH TIME ZONE")
-                        .HasColumnName("lease_until_utc");
-
-                    b.Property<string>("OwnerId")
-                        .IsRequired()
-                        .HasColumnType("TEXT")
-                        .HasColumnName("owner_id");
-
-                    b.Property<string>("Purpose")
-                        .IsRequired()
-                        .HasColumnType("TEXT")
-                        .HasColumnName("purpose");
-
-                    b.HasKey("Id");
-
-                    b.ToTable("setup_run_leases", null, t =>
-                        {
-                            t.HasCheckConstraint("CK_setup_run_leases_singleton", "\"id\" = 1");
                         });
                 });
 
