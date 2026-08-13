@@ -37,6 +37,7 @@ import {
   FALLBACK_JELLYFIN_URL,
 } from "~/onboarding/jellyfin-link";
 import { getCsrfToken, validateCsrfToken } from "~/onboarding/onboarding-csrf.server";
+import { updateFromInput } from "./input-change";
 const WIZARD_STEPS = ["services", "jellyfin", "usenet", "indexers", "configure", "repair", "ready"] as const;
 
 type WizardStep = (typeof WIZARD_STEPS)[number];
@@ -1292,7 +1293,8 @@ export default function OnboardingRoute({ loaderData, actionData }: Route.Compon
                 id="provider-host"
                 name="provider-host"
                 value={providerDraft.Host}
-                onChange={(event) => setProviderDraft((current) => ({ ...current, Host: event.currentTarget.value }))}
+                onChange={(event) => updateFromInput(event, (value) =>
+                  setProviderDraft((current) => ({ ...current, Host: value })), "value")}
               />
               <BootstrapForm.Label htmlFor="provider-port">Port</BootstrapForm.Label>
               <BootstrapForm.Control
@@ -1300,14 +1302,16 @@ export default function OnboardingRoute({ loaderData, actionData }: Route.Compon
                 name="provider-port"
                 type="number"
                 value={providerDraft.Port}
-                onChange={(event) => setProviderDraft((current) => ({ ...current, Port: event.currentTarget.value }))}
+                onChange={(event) => updateFromInput(event, (value) =>
+                  setProviderDraft((current) => ({ ...current, Port: value })), "value")}
               />
               <BootstrapForm.Label htmlFor="provider-user">Username</BootstrapForm.Label>
               <BootstrapForm.Control
                 id="provider-user"
                 name="provider-user"
                 value={providerDraft.User}
-                onChange={(event) => setProviderDraft((current) => ({ ...current, User: event.currentTarget.value }))}
+                onChange={(event) => updateFromInput(event, (value) =>
+                  setProviderDraft((current) => ({ ...current, User: value })), "value")}
               />
               <BootstrapForm.Label htmlFor="provider-pass">Password</BootstrapForm.Label>
               <BootstrapForm.Control id="provider-pass" name="provider-pass" type="password" autoComplete="new-password" />
@@ -1317,16 +1321,16 @@ export default function OnboardingRoute({ loaderData, actionData }: Route.Compon
                 name="provider-max"
                 type="number"
                 value={providerDraft.MaxConnections}
-                onChange={(event) => setProviderDraft((current) => ({ ...current, MaxConnections: event.currentTarget.value }))}
+                onChange={(event) => updateFromInput(event, (value) =>
+                  setProviderDraft((current) => ({ ...current, MaxConnections: value })), "value")}
               />
               <BootstrapForm.Label htmlFor="provider-type">Type</BootstrapForm.Label>
               <BootstrapForm.Select
                 id="provider-type"
                 name="provider-type"
                 value={providerDraft.Type}
-                onChange={(event) =>
-                  setProviderDraft((current) => ({ ...current, Type: Number.parseInt(event.currentTarget.value, 10) }))
-                }
+                onChange={(event) => updateFromInput(event, (value) =>
+                  setProviderDraft((current) => ({ ...current, Type: Number.parseInt(value, 10) })), "value")}
               >
                 <option value={1}>Pooled</option>
                 <option value={2}>Backup &amp; Health Checks</option>
@@ -1338,7 +1342,8 @@ export default function OnboardingRoute({ loaderData, actionData }: Route.Compon
                 name="provider-ssl"
                 type="checkbox"
                 checked={providerDraft.UseSsl}
-                onChange={(event) => setProviderDraft((current) => ({ ...current, UseSsl: event.currentTarget.checked }))}
+                onChange={(event) => updateFromInput(event, (checked) =>
+                  setProviderDraft((current) => ({ ...current, UseSsl: checked })), "checked")}
               />
               <input type="hidden" name="action" value="add-provider" />
               <input type="hidden" name="csrfToken" value={fullstackData.csrfToken} />
@@ -1384,14 +1389,16 @@ export default function OnboardingRoute({ loaderData, actionData }: Route.Compon
                 id="indexer-name"
                 name="indexer-name"
                 value={indexerDraft.Name}
-                onChange={(event) => setIndexerDraft((current) => ({ ...current, Name: event.currentTarget.value }))}
+                onChange={(event) => updateFromInput(event, (value) =>
+                  setIndexerDraft((current) => ({ ...current, Name: value })), "value")}
               />
               <BootstrapForm.Label htmlFor="indexer-url">URL</BootstrapForm.Label>
               <BootstrapForm.Control
                 id="indexer-url"
                 name="indexer-url"
                 value={indexerDraft.Url}
-                onChange={(event) => setIndexerDraft((current) => ({ ...current, Url: event.currentTarget.value }))}
+                onChange={(event) => updateFromInput(event, (value) =>
+                  setIndexerDraft((current) => ({ ...current, Url: value })), "value")}
               />
               <BootstrapForm.Label htmlFor="indexer-apikey">API Key</BootstrapForm.Label>
               <BootstrapForm.Control
