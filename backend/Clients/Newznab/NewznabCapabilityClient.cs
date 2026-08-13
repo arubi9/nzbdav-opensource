@@ -233,9 +233,16 @@ public sealed class NewznabCapabilityClient
             ? new NewznabCapabilityResult(displayName, NewznabCapabilityStatus.InvalidCredentials)
             : new NewznabCapabilityResult(displayName, NewznabCapabilityStatus.MalformedResponse);
 
-    private static Uri BuildCapabilityUri(Uri baseUri)
+    internal static Uri BuildCapabilityUri(Uri baseUri)
     {
         var builder = new UriBuilder(baseUri) { Fragment = string.Empty };
+        // The operator enters one URL that is also handed to Prowlarr, whose
+        // Newznab schema splits it into baseUrl (scheme + host, no path) and a
+        // separate apiPath defaulting to "/api". A pathless base URL is
+        // therefore correct input, not a full API endpoint, so mirror that
+        // default here instead of querying the indexer's website root.
+        if (builder.Path is "" or "/")
+            builder.Path = "/api";
         var existingQuery = builder.Query.TrimStart('?');
         builder.Query = string.IsNullOrEmpty(existingQuery) ? "t=caps" : $"{existingQuery}&t=caps";
         return builder.Uri;

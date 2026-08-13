@@ -204,6 +204,22 @@ public sealed class NewznabCapabilityClientTests
         Assert.DoesNotContain("https://", output);
     }
 
+    [Theory]
+    // Prowlarr's Newznab schema splits the operator's value into baseUrl
+    // (scheme + host, no path) and a separate apiPath defaulting to "/api".
+    // A pathless base URL is therefore valid input and must not be queried
+    // at the indexer's website root, which serves HTML rather than caps XML.
+    [InlineData("https://api.nzbgeek.info", "https://api.nzbgeek.info/api?t=caps")]
+    [InlineData("https://api.nzbgeek.info/", "https://api.nzbgeek.info/api?t=caps")]
+    // An explicit path is the operator's choice and is preserved verbatim.
+    [InlineData("https://indexer.example/api", "https://indexer.example/api?t=caps")]
+    [InlineData("https://indexer.example/custom/path", "https://indexer.example/custom/path?t=caps")]
+    [InlineData("https://indexer.example/api?extra=1", "https://indexer.example/api?extra=1&t=caps")]
+    public void Capability_uri_defaults_to_the_prowlarr_api_path(string baseUrl, string expected)
+    {
+        Assert.Equal(expected, NewznabCapabilityClient.BuildCapabilityUri(new Uri(baseUrl)).ToString());
+    }
+
     private static NewznabCapabilityClient CreateClient(string body, int maxResponseBytes = 256 * 1024) =>
         new(new HttpClient(new RecordingHandler(body)), TimeSpan.FromSeconds(1), maxResponseBytes,
             hostResolver: static (_, _) => Task.FromResult(new[] { IPAddress.Parse("192.168.1.10") }));
