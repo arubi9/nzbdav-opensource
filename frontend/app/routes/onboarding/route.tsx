@@ -340,7 +340,7 @@ const mapFailureMessage = (status: SetupStatus): string | null => {
     "provider-failed": "The provider could not be verified.",
     "provider-auth-failed": "The provider credentials were not accepted.",
     "indexer-failed": "The indexer could not be verified.",
-    "indexer-capability-failed": "The indexer capability check failed.",
+    "indexer-capability-failed": "The indexer capability check failed, so setup continued without it. Prowlarr manages indexers \u2014 add or fix the indexer there. Check the Newznab URL includes its API path (for example /api).",
     "configuration-failed": "The setup configuration was rejected.",
     "compatibility-failed": "A required service or plugin is incompatible.",
     "jellyfin-version-failed": "The Jellyfin version is not supported.",

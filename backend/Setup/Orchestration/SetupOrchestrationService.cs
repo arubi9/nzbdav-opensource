@@ -580,9 +580,10 @@ public sealed class SetupOrchestrationService
 
         // Validation is deliberately before the first durable write. Invalid
         // Usenet credentials can therefore never become persisted or Ready.
+        string? indexerWarning;
         try
         {
-            await ExecuteExternalMutationAsync(
+            indexerWarning = await ExecuteExternalMutationAsync(
                     () => ValidateSetupInputsAsync(request, cancellationToken),
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -618,7 +619,15 @@ public sealed class SetupOrchestrationService
         }, completed: false, runLease, cancellationToken).ConfigureAwait(false);
         await RequireRunLeaseAsync(cancellationToken).ConfigureAwait(false);
 
-        steps["provider-indexers"] = SetupStepState.Complete;
+        if (indexerWarning is not null)
+        {
+            _progressReasons["provider-indexers"] = indexerWarning;
+            steps["provider-indexers"] = SetupStepState.Warning;
+        }
+        else
+        {
+            steps["provider-indexers"] = SetupStepState.Complete;
+        }
         await UpdateProgressAsync(steps, cancellationToken).ConfigureAwait(false);
 
         return await RunSetupAsync(request, steps, cancellationToken).ConfigureAwait(false);
@@ -763,12 +772,13 @@ public sealed class SetupOrchestrationService
             throw;
         }
 
+        string? indexerWarning;
         try
         {
             // Retry/recovery runs validate stored credentials again before any
             // step can become complete. This protects older or manually
             // altered rows from reaching Ready.
-            await ExecuteExternalMutationAsync(
+            indexerWarning = await ExecuteExternalMutationAsync(
                     () => ValidateSetupInputsAsync(configuration, cancellationToken),
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -797,7 +807,15 @@ public sealed class SetupOrchestrationService
 
         await EnsureNoRevocationPendingAsync(cancellationToken).ConfigureAwait(false);
 
-        steps["provider-indexers"] = SetupStepState.Complete;
+        if (indexerWarning is not null)
+        {
+            _progressReasons["provider-indexers"] = indexerWarning;
+            steps["provider-indexers"] = SetupStepState.Warning;
+        }
+        else
+        {
+            steps["provider-indexers"] = SetupStepState.Complete;
+        }
         await UpdateProgressAsync(steps, cancellationToken).ConfigureAwait(false);
 
         return await RunSetupAsync(configuration, steps, cancellationToken).ConfigureAwait(false);
@@ -1681,7 +1699,13 @@ public sealed class SetupOrchestrationService
         return response.IsSuccessStatusCode;
     }
 
-    private async Task ValidateSetupInputsAsync(SetupConfigurationData request, CancellationToken cancellationToken)
+    /// <summary>
+    /// Validates setup inputs. Usenet provider failures are fatal because nothing
+    /// works without them. Indexer capability failures are only advisory: Prowlarr
+    /// owns indexer management and runs its own test, so a bad Newznab URL or key
+    /// must not block the rest of setup. Returns a warning reason code, or null.
+    /// </summary>
+    private async Task<string?> ValidateSetupInputsAsync(SetupConfigurationData request, CancellationToken cancellationToken)
     {
         var providerValidation = RunBoundedAsync(
             request.Providers.Providers,
@@ -1709,13 +1733,14 @@ public sealed class SetupOrchestrationService
         }
 
         var indexerFailures = indexerResults.Where(result => result.Status != NewznabCapabilityStatus.Valid).ToArray();
-        if (indexerFailures.Length > 0)
-        {
-            foreach (var failure in indexerFailures)
-                Log.Warning("Indexer capability check failed: {Indexer} {Status} (HTTP {StatusCode})",
-                    failure.DisplayName, failure.Status, failure.HttpStatusCode);
-            throw new SetupValidationFailureException(SetupReasonCodes.IndexerCapabilityFailed);
-        }
+        if (indexerFailures.Length == 0)
+            return null;
+
+        foreach (var failure in indexerFailures)
+            Log.Warning("Indexer capability check failed: {Indexer} {Status} (HTTP {StatusCode}). " +
+                "Setup continues; Prowlarr manages this indexer.",
+                failure.DisplayName, failure.Status, failure.HttpStatusCode);
+        return SetupReasonCodes.IndexerCapabilityFailed;
     }
 
     private async Task<NewznabCapabilityResult> ValidateIndexerCapabilityAsync(

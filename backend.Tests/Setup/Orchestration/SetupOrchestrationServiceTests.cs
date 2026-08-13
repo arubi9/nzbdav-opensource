@@ -93,7 +93,7 @@ public sealed class SetupOrchestrationServiceTests
     }
 
     [Fact]
-    public async Task ConfigureAsync_InvalidIndexerDoesNotPublishPartialSetupSecrets()
+    public async Task ConfigureAsync_InvalidIndexerWarnsButDoesNotBlockSetup()
     {
         var configPath = Path.Combine(Path.GetTempPath(), $"nzbdav-tests/setup-orch-invalid-indexer-{Guid.NewGuid():N}");
         using var _ = new backend.Tests.Config.TemporaryEnvironment(
@@ -133,10 +133,12 @@ public sealed class SetupOrchestrationServiceTests
 
         var status = await service.ConfigureAsync(request, CancellationToken.None);
 
-        Assert.Equal(SetupStepState.Failed, status.Steps.Single(step => step.Name == "provider-indexers").State);
+        // Prowlarr owns indexer management, so a failed capability check is
+        // advisory only: the step warns, and setup still persists its inputs.
+        Assert.Equal(SetupStepState.Warning, status.Steps.Single(step => step.Name == "provider-indexers").State);
         Assert.Equal(SetupReasonCodes.IndexerCapabilityFailed, status.Steps.Single(step => step.Name == "provider-indexers").Code);
-        Assert.False(await context.ConfigItems.AnyAsync(item => item.ConfigName == "usenet.providers"));
-        Assert.False(await context.ConfigItems.AnyAsync(item => item.ConfigName == "setup.indexers"));
+        Assert.True(await context.ConfigItems.AnyAsync(item => item.ConfigName == "usenet.providers"));
+        Assert.True(await context.ConfigItems.AnyAsync(item => item.ConfigName == "setup.indexers"));
     }
 
     [Fact]
