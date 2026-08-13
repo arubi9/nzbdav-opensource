@@ -31,20 +31,29 @@ The easiest way to get started is by using the official Docker image.
 To try it out, run the following command to pull and run the image with port `3000` exposed:
 
 ```bash
-docker run --rm -it -p 3000:3000 nzbdav/nzbdav:alpha
+NZBDAV_MASTER_KEY="$(openssl rand -base64 32)"
+docker run --rm -it \
+  -e NZBDAV_MASTER_KEY="$NZBDAV_MASTER_KEY" \
+  -p 3000:3000 \
+  nzbdav/nzbdav:alpha
 ```
 
 And if you would like to persist saved settings, attach a volume at `/config`
 
-```
+```bash
 mkdir -p $(pwd)/nzbdav && \
+NZBDAV_MASTER_KEY="$(openssl rand -base64 32)" && \
+echo "Save this key before restarting with the same /config volume: $NZBDAV_MASTER_KEY" && \
 docker run --rm -it \
   -v $(pwd)/nzbdav:/config \
+  -e NZBDAV_MASTER_KEY="$NZBDAV_MASTER_KEY" \
   -e PUID=1000 \
   -e PGID=1000 \
   -p 3000:3000 \
   nzbdav/nzbdav:alpha
 ```
+Keep the same `NZBDAV_MASTER_KEY` for every restart that uses the same `/config` volume; encrypted settings cannot be recovered if the key is lost.
+
 After starting the container, be sure to navigate to the Settings page on the UI to finish setting up your usenet connection settings.
 
 <p align="center">
@@ -75,4 +84,3 @@ If you'd like to get the most out of NzbDav, check out the [comprehensive guide]
 
 **NOTE:**
 **NZBDAV is intended for use with legally obtained content only. The project maintainers do not condone piracy and will not provide support for users suspected of engaging in copyright infringement.**
-
