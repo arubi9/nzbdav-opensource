@@ -1565,6 +1565,24 @@ public sealed class SetupOrchestrationService
         CancellationToken cancellationToken,
         string? repairSession = null)
     {
+        // The health check has eleven distinct failure reasons but only ever
+        // surfaced one opaque banner. Log whichever reason it lands on so the
+        // failing service is identifiable without attaching a debugger.
+        var state = await VerifySetupCoreAsync(discovered, pluginApiKey, indexerJson, cancellationToken, repairSession)
+            .ConfigureAwait(false);
+        if (state != SetupStepState.Complete)
+            Log.Warning("Setup health-check did not complete: {State} {Reason}",
+                state, _progressReasons.GetValueOrDefault("health-check") ?? "(no reason recorded)");
+        return state;
+    }
+
+    private async Task<SetupStepState> VerifySetupCoreAsync(
+        ArrApiKeys discovered,
+        string? pluginApiKey,
+        string indexerJson,
+        CancellationToken cancellationToken,
+        string? repairSession = null)
+    {
         if (string.IsNullOrWhiteSpace(pluginApiKey))
         {
             _progressReasons["health-check"] = SetupReasonCodes.PluginMismatch;
