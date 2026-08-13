@@ -47,3 +47,10 @@ test-results/**
 *.tmp
 *.temp
 NUL
+
+# Main-stack runtime state.
+jellyfin-config
+strm-library
+**/.react-router
+**/build
+**/dist-node

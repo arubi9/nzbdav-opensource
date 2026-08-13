@@ -144,8 +144,8 @@ public class MediaProbeService : BackgroundService
     /// </summary>
     private async Task WarmFirstSegmentsIntoL2Async(IReadOnlyList<DavItem> videoItems, CancellationToken ct)
     {
-        using var priorityScope = ct.SetContext(
-            new DownloadPriorityContext { Priority = SemaphorePriority.Low });
+        var lowPriority = new DownloadPriorityContext { Priority = SemaphorePriority.Low };
+        using var priorityScope = ct.SetContext(lowPriority);
 
         var policy = _configManager.GetL2PrewarmPolicy();
         var itemsProcessed = 0;
@@ -365,8 +365,8 @@ public class MediaProbeService : BackgroundService
         Func<DavItem, CancellationToken, Task> processItem,
         CancellationToken ct)
     {
-        using var priorityScope = ct.SetContext(
-            new DownloadPriorityContext { Priority = SemaphorePriority.Low });
+        var lowPriority = new DownloadPriorityContext { Priority = SemaphorePriority.Low };
+        using var priorityScope = ct.SetContext(lowPriority);
 
         var concurrency = GetBackfillConcurrency();
         Log.Information("ProbeDataGenerator backfill starting with concurrency={Concurrency}", concurrency);
@@ -381,6 +381,7 @@ public class MediaProbeService : BackgroundService
 
         await Parallel.ForEachAsync(items, options, async (item, innerCt) =>
         {
+            using var innerPriorityScope = innerCt.SetContext(lowPriority);
             try
             {
                 await processItem(item, innerCt).ConfigureAwait(false);
