@@ -25,5 +25,7 @@ nuget
 
 # Local dev runtime data (SQLite + stream cache + data-protection keys).
 /nzbdav-config/
+/jellyfin-config/
 # PlaybackInfo dump scratchpad from debugging.
 /pb.json
+/.pi/

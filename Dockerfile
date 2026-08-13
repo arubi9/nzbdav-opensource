@@ -6,9 +6,10 @@ FROM --platform=$BUILDPLATFORM node:alpine AS frontend-build
 WORKDIR /frontend
 COPY ./frontend ./
 
-RUN npm install
+RUN npm ci
 RUN npm run build
 RUN npm run build:server
+RUN npm run test:server-startup
 RUN npm prune --omit=dev
 
 # -------- Stage 2: Build backend --------
@@ -17,10 +18,15 @@ FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0-alpine AS backe
 WORKDIR /backend
 COPY ./backend ./
 
-# Accept build-time architecture as ARG (e.g., x64 or arm64)
+# Map Docker build architecture names to .NET runtime identifiers.
 ARG TARGETARCH
 RUN dotnet restore
-RUN dotnet publish -c Release -r linux-musl-${TARGETARCH} -o ./publish
+RUN case "$TARGETARCH" in \
+        amd64) RID_ARCH=x64 ;; \
+        arm64) RID_ARCH=arm64 ;; \
+        *) echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && dotnet publish -c Release -r linux-musl-${RID_ARCH} -o ./publish
 
 # -------- Stage 3: Combined runtime image --------
 FROM mcr.microsoft.com/dotnet/aspnet:10.0-alpine
@@ -34,7 +40,8 @@ RUN mkdir /config \
 # Copy frontend
 COPY --from=frontend-build /frontend/node_modules ./frontend/node_modules
 COPY --from=frontend-build /frontend/package.json ./frontend/package.json
-COPY --from=frontend-build /frontend/dist-node/server.js ./frontend/dist-node/server.js
+# Keep the complete compiled module graph; server.js imports sibling runtime modules.
+COPY --from=frontend-build /frontend/dist-node ./frontend/dist-node
 COPY --from=frontend-build /frontend/build ./frontend/build
 
 # Copy backend
