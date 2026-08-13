@@ -72,7 +72,8 @@ public sealed class MediaProbeServiceTests
             MakeItem("c.mkv")
         };
 
-        var seen = new List<string>();
+        // Backfill runs items in parallel, so collection must be thread-safe and order-agnostic.
+        var seen = new System.Collections.Concurrent.ConcurrentBag<string>();
         Task ThrowOnMiddle(DavItem item, CancellationToken _)
         {
             seen.Add(item.Name);
@@ -82,7 +83,7 @@ public sealed class MediaProbeServiceTests
 
         await MediaProbeService.ProcessBackfillBatchAsync(items, ThrowOnMiddle, CancellationToken.None);
 
-        Assert.Equal(new[] { "a.mkv", "b.mkv", "c.mkv" }, seen);
+        Assert.Equal(new[] { "a.mkv", "b.mkv", "c.mkv" }, seen.OrderBy(x => x).ToArray());
     }
 
     [Fact]
