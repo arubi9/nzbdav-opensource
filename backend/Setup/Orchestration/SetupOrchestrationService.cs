@@ -1708,8 +1708,14 @@ public sealed class SetupOrchestrationService
             throw new SetupValidationFailureException(reason);
         }
 
-        if (indexerResults.Any(result => result.Status != NewznabCapabilityStatus.Valid))
+        var indexerFailures = indexerResults.Where(result => result.Status != NewznabCapabilityStatus.Valid).ToArray();
+        if (indexerFailures.Length > 0)
+        {
+            foreach (var failure in indexerFailures)
+                Log.Warning("Indexer capability check failed: {Indexer} {Status} (HTTP {StatusCode})",
+                    failure.DisplayName, failure.Status, failure.HttpStatusCode);
             throw new SetupValidationFailureException(SetupReasonCodes.IndexerCapabilityFailed);
+        }
     }
 
     private async Task<NewznabCapabilityResult> ValidateIndexerCapabilityAsync(

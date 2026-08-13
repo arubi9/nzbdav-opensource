@@ -28,6 +28,21 @@ interface ArrConfig {
     QueueRules: QueueRule[];
 }
 
+/** `arr.instances` is absent or empty until setup persists it, so never parse it bare. */
+export function parseArrConfig(raw: string | undefined): ArrConfig {
+    let parsed: Partial<ArrConfig> = {};
+    try {
+        parsed = raw ? JSON.parse(raw) ?? {} : {};
+    } catch {
+        parsed = {};
+    }
+    return {
+        RadarrInstances: parsed.RadarrInstances ?? [],
+        SonarrInstances: parsed.SonarrInstances ?? [],
+        QueueRules: parsed.QueueRules ?? [],
+    };
+}
+
 const queueStatusMessages = [
     {
         display: "Found matching series via grab history, but release was matched to series by ID. Automatic import is not possible.",
@@ -96,7 +111,7 @@ export function ArrsSettings({ config, setNewConfig, clearSecrets = new Set(), h
         onSecretChange?.("arr.instances", clear);
         if (clear) setNewConfig({ ...config, "arr.instances": config["arr.instances"] });
     };
-    const arrConfig = JSON.parse(config["arr.instances"]);
+    const arrConfig = parseArrConfig(config["arr.instances"]);
 
     const updateConfig = useCallback((newArrConfig: ArrConfig) => {
         setNewConfig({ ...config, "arr.instances": JSON.stringify(newArrConfig) });
