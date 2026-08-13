@@ -94,6 +94,21 @@ public sealed class FullStackComposeTests
     }
 
     [Fact]
+    public void JellyfinEntrypoint_ReclaimsCategoryRootOwnershipAfterTheOneTimeVolumeScan()
+    {
+        // initialize_volume early-returns once its marker matches, so the roots
+        // NZBDAV seeds as root on a later start would otherwise stay root-owned
+        // and the plugin's library writes fail with errno=13.
+        var jellyfinEntrypoint = File.ReadAllText(Path.Combine(RepoRoot, "jellyfin-stack", "entrypoint.sh"));
+
+        Assert.Contains("for path in /media/nzbdav/movies /media/nzbdav/tv; do", jellyfinEntrypoint, StringComparison.Ordinal);
+        Assert.Contains("chown \"$puid:$pgid\" -- \"$path\"", jellyfinEntrypoint, StringComparison.Ordinal);
+        Assert.True(
+            jellyfinEntrypoint.IndexOf("initialize_volume /media/nzbdav", StringComparison.Ordinal)
+            < jellyfinEntrypoint.IndexOf("for path in /media/nzbdav/movies /media/nzbdav/tv; do", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void DeploymentSmoke_NoRestageProofUsesInodeAndPayloadHashNotJellyfinMetadataMtime()
     {
         var smoke = File.ReadAllText(Path.Combine(RepoRoot, "tools", "full-stack-deployment-smoke.sh"));

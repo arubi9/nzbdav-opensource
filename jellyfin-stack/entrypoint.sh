@@ -77,6 +77,18 @@ initialize_volume /config
 initialize_volume /cache
 initialize_volume /media/nzbdav
 
+# The ownership marker makes initialize_volume a one-time recursive scan, so a
+# path created in the shared volume after that first run stays root-owned. The
+# NZBDAV container starts first and seeds these same category roots, which left
+# the plugin unable to write its library:
+#   IOException: Failed to create '/media/nzbdav/movies/<release>' ... errno=13
+# Both roots are fixed and shallow, so correcting them on every start is cheap
+# and does not reintroduce a full-tree scan.
+for path in /media/nzbdav/movies /media/nzbdav/tv; do
+    [ ! -L "$path" ] || fail "$path must not be a symlink"
+    chown "$puid:$pgid" -- "$path"
+done
+
 plugins_dir=/config/plugins
 plugin_dir="$plugins_dir/Nzbdav"
 [ ! -L "$plugins_dir" ] || fail "$plugins_dir must not be a symlink"

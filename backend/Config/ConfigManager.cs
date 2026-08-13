@@ -1023,7 +1023,14 @@ public class ConfigManager
 
     public string GetImportStrategy()
     {
-        return GetConfigValue("api.import-strategy") ?? "symlinks";
+        // The full-stack image has no rclone mount: its compose wires the Arr
+        // root folders and the Jellyfin library to the strm output directory.
+        // Defaulting to symlinks there made every completed job report a
+        // /mnt/nzbdav/completed-symlinks path that exists in no container, so
+        // the Arrs failed the import with "No files found are eligible for
+        // import". An explicit operator value still wins.
+        return GetConfigValue("api.import-strategy")
+            ?? (SetupEnvironmentOptions.FromEnvironment().FullStackEnabled ? "strm" : "symlinks");
     }
 
     public string GetStrmCompletedDownloadDir()
