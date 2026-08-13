@@ -38,9 +38,28 @@ public sealed class ConfigManagerEncryptionTests
         configManager.UpdateValues(configItems);
 
         Assert.True(configItems[0].IsEncrypted);
-        Assert.StartsWith("v1:", configItems[0].ConfigValue);
+        Assert.StartsWith("v2:", configItems[0].ConfigValue);
         Assert.False(configItems[1].IsEncrypted);
         Assert.Equal("http://example.test", configItems[1].ConfigValue);
+    }
+
+    [Fact]
+    public void GetUsenetProviderConfig_AcceptsTheStringEnumPersistenceContract()
+    {
+        using var encryption = new ConfigEncryptionService();
+        var configManager = new ConfigManager(encryption);
+        configManager.UpdateValues(
+        [
+            new ConfigItem
+            {
+                ConfigName = "usenet.providers",
+                ConfigValue = "{\"Providers\":[{\"Type\":\"Pooled\",\"Host\":\"news.example\",\"Port\":563,\"UseSsl\":true,\"User\":\"user\",\"Pass\":\"password\",\"MaxConnections\":1}]}"
+            }
+        ]);
+
+        var provider = Assert.Single(configManager.GetUsenetProviderConfig().Providers);
+        Assert.Equal(NzbWebDAV.Models.ProviderType.Pooled, provider.Type);
+        Assert.Equal("news.example", provider.Host);
     }
 
     [Fact]
@@ -53,7 +72,7 @@ public sealed class ConfigManagerEncryptionTests
         await using (var setupContext = await _fixture.CreateMigratedContextAsync())
         {
             var apiKeyRow = await setupContext.ConfigItems.SingleAsync(x => x.ConfigName == "api.key");
-            apiKeyRow.ConfigValue = encryption.Encrypt("restored-api-key");
+            apiKeyRow.ConfigValue = encryption.Encrypt("api.key", "restored-api-key");
             apiKeyRow.IsEncrypted = true;
             await setupContext.SaveChangesAsync();
         }
@@ -76,7 +95,7 @@ public sealed class ConfigManagerEncryptionTests
                 new ConfigItem
                 {
                     ConfigName = "api.key",
-                    ConfigValue = "v1:already-encrypted",
+                    ConfigValue = encryption.Encrypt("api.key", "already-encrypted"),
                 }
             ]));
 
@@ -102,7 +121,7 @@ public sealed class ConfigManagerEncryptionTests
 
         Assert.Equal("plain-secret", original[0].ConfigValue);
         Assert.False(original[0].IsEncrypted);
-        Assert.StartsWith("v1:", prepared[0].ConfigValue);
+        Assert.StartsWith("v2:", prepared[0].ConfigValue);
         Assert.True(prepared[0].IsEncrypted);
     }
 }

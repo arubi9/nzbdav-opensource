@@ -1,3 +1,6 @@
+using System;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
@@ -7,24 +10,46 @@ using NzbWebDAV.Utils;
 
 namespace NzbWebDAV.Api.Filters;
 
-public class ApiKeyAuthFilter(ConfigManager configManager, IAuthFailureTracker failureTracker) : IAsyncActionFilter
+public class ApiKeyAuthFilter(ConfigManager configManager, IAuthFailureTracker failureTracker, TimeProvider? timeProvider = null) : IAsyncActionFilter
 {
-    private static readonly string[] InternalKeyAllowedPathPrefixes =
+    private static readonly PathString[] PluginReadOnlyRoutes =
     [
-        "/api/encryption-status"
+        "/api/manifest",
+        "/api/meta",
+        "/api/probe",
+        "/api/browse"
     ];
 
     // Thread-safe: immutable record swapped atomically via volatile reference.
     // Singleton filter accessed by concurrent requests.
-    private volatile CachedKeyData? _cachedKey;
+    private static readonly int MaxPluginApiKeyOverlapSeconds = 14 * 24 * 60 * 60;
+
+    private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
+    private volatile CachedKeyData? _cachedUserKey;
     private sealed record CachedKeyData(string Source, byte[] Bytes);
 
     public async Task OnActionExecutionAsync(ActionExecutingContext context, ActionExecutionDelegate next)
     {
         var request = context.HttpContext.Request;
         var ip = context.HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        var providedKey = request.Headers["X-Api-Key"].FirstOrDefault()
+                          ?? request.Query["apikey"].FirstOrDefault();
+        var token = request.Query["token"].FirstOrDefault();
 
-        // Check if this IP is blocked from too many failed attempts
+        // Credentials are checked before consulting the failure block. A
+        // shared proxy address can be blocked because another caller sent
+        // bad credentials, but it must not deny a valid caller.
+        var validApiKey = ValidateApiKey(request, providedKey ?? string.Empty);
+        var validStreamToken = !string.IsNullOrEmpty(token)
+                               && StreamTokenService.ValidateToken(token, request.Path, configManager, request.Method);
+
+        if (validApiKey | validStreamToken)
+        {
+            await next().ConfigureAwait(false);
+            return;
+        }
+
+        // Only invalid attempts consult and update the IP failure tracker.
         if (await failureTracker.IsBlockedAsync(ip).ConfigureAwait(false))
         {
             context.HttpContext.Response.Headers.RetryAfter = "60";
@@ -35,67 +60,78 @@ public class ApiKeyAuthFilter(ConfigManager configManager, IAuthFailureTracker f
             return;
         }
 
-        var providedKey = request.Headers["X-Api-Key"].FirstOrDefault()
-                          ?? request.Query["apikey"].FirstOrDefault();
-
-        if (string.IsNullOrEmpty(providedKey))
-        {
-            var token = request.Query["token"].FirstOrDefault();
-            if (!string.IsNullOrEmpty(token)
-                && StreamTokenService.ValidateToken(token, request.Path, configManager, request.Method))
-            {
-                await next().ConfigureAwait(false);
-                return;
-            }
-        }
-
-        if (string.IsNullOrEmpty(providedKey) || !ValidateApiKey(request, providedKey))
-        {
-            await failureTracker.RecordFailureAsync(ip).ConfigureAwait(false);
-            context.Result = new UnauthorizedObjectResult(new { error = "Invalid or missing API key" });
-            return;
-        }
-
-        await next().ConfigureAwait(false);
+        await failureTracker.RecordFailureAsync(ip).ConfigureAwait(false);
+        context.Result = new UnauthorizedObjectResult(new { error = "Invalid or missing API key" });
     }
 
     private bool ValidateApiKey(HttpRequest request, string providedKey)
     {
-        var providedBytes = System.Text.Encoding.UTF8.GetBytes(providedKey);
+        if (string.IsNullOrEmpty(providedKey))
+            return false;
 
-        // Accept the persisted user-facing API key (used by external clients: Jellyfin, etc.)
-        var expectedKey = configManager.GetApiKey();
-        var cached = _cachedKey;
-        if (cached is null || cached.Source != expectedKey)
+        var providedBytes = Encoding.UTF8.GetBytes(providedKey);
+
+        // Evaluate all allowed keys on every request to preserve constant-time behavior.
+        var cached = _cachedUserKey;
+        if (cached is null || cached.Source != configManager.GetApiKey())
         {
-            cached = new CachedKeyData(expectedKey, System.Text.Encoding.UTF8.GetBytes(expectedKey));
-            _cachedKey = cached;
+            var source = configManager.GetApiKey();
+            cached = new CachedKeyData(source, Encoding.UTF8.GetBytes(source));
+            _cachedUserKey = cached;
         }
 
-        // FixedTimeEquals returns false immediately for different-length spans.
-        // This leaks key length, which is acceptable for API keys (length is not secret).
-        if (System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(providedBytes, cached.Bytes))
-            return true;
+        var userBytes = cached.Bytes;
+        var internalKey = NzbWebDAV.Utils.EnvironmentUtil.GetEnvironmentVariable("FRONTEND_BACKEND_API_KEY") ?? string.Empty;
+        var internalBytes = Encoding.UTF8.GetBytes(internalKey);
+        var pluginKey = configManager.GetPluginApiKey() ?? string.Empty;
+        var pluginPreviousKey = configManager.GetSetupPluginApiKeyPrevious() ?? string.Empty;
+        var pluginPreviousExpiresAt = configManager.GetSetupPluginApiKeyPreviousExpiresAtUtc();
 
-        if (!AllowsInternalKey(request.Path))
-            return false;
+        var nowUtc = _timeProvider.GetUtcNow().UtcDateTime;
+        var pluginPreviousActive = IsValidPluginPreviousKey(pluginPreviousKey, pluginPreviousExpiresAt, nowUtc);
 
-        var internalKey = EnvironmentUtil.GetEnvironmentVariable("FRONTEND_BACKEND_API_KEY");
-        if (string.IsNullOrEmpty(internalKey))
-            return false;
+        var pluginMatch = !string.IsNullOrEmpty(pluginKey)
+            ? CryptographicOperations.FixedTimeEquals(providedBytes, Encoding.UTF8.GetBytes(pluginKey))
+            : false;
+        var pluginPreviousMatch = !string.IsNullOrEmpty(pluginPreviousKey)
+            ? CryptographicOperations.FixedTimeEquals(
+                providedBytes,
+                Encoding.UTF8.GetBytes(pluginPreviousKey))
+            : false;
 
-        var internalBytes = System.Text.Encoding.UTF8.GetBytes(internalKey);
-        return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(providedBytes, internalBytes);
+        var pluginRouteMatch = IsPluginReadEndpoint(request.Path, request.Method)
+            && (pluginMatch || (pluginPreviousActive && pluginPreviousMatch));
+
+        var userMatch = CryptographicOperations.FixedTimeEquals(providedBytes, userBytes);
+        var internalMatch = !string.IsNullOrEmpty(internalKey)
+            ? CryptographicOperations.FixedTimeEquals(providedBytes, internalBytes)
+            : false;
+
+        return userMatch | internalMatch | pluginRouteMatch;
     }
 
-    private static bool AllowsInternalKey(PathString path)
+    private static bool IsValidPluginPreviousKey(string previousKey, DateTime? previousExpiresAt, DateTime nowUtc)
     {
-        foreach (var prefix in InternalKeyAllowedPathPrefixes)
-        {
-            if (path.StartsWithSegments(prefix, StringComparison.OrdinalIgnoreCase))
-                return true;
-        }
+        if (string.IsNullOrWhiteSpace(previousKey))
+            return false;
 
-        return false;
+        if (previousExpiresAt is null)
+            return false;
+
+        if (previousExpiresAt <= nowUtc)
+            return false;
+
+        if (previousExpiresAt.Value > nowUtc.AddSeconds(MaxPluginApiKeyOverlapSeconds))
+            return false;
+
+        return true;
+    }
+
+    private static bool IsPluginReadEndpoint(PathString path, string method)
+    {
+        if (!HttpMethods.IsGet(method) && !HttpMethods.IsHead(method))
+            return false;
+
+        return PluginReadOnlyRoutes.Any(route => path.StartsWithSegments(route, StringComparison.OrdinalIgnoreCase));
     }
 }

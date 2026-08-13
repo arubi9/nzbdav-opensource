@@ -190,20 +190,35 @@ public class UsenetStreamingClient : WrappingNntpClient
         _downloadingClient?.UpdateMaxDownloadConnections(maxDownloadConnections);
     }
 
-    public static async ValueTask<INntpClient> CreateNewConnection
+    public static ValueTask<INntpClient> CreateNewConnection
     (
         UsenetProviderConfig.ConnectionDetails connectionDetails,
         CancellationToken ct
+    ) => CreateNewConnection(connectionDetails, ct, static () => new BaseNntpClient());
+
+    // Internal factory seam keeps failure cleanup testable without replacing
+    // the production NNTP implementation.
+    internal static async ValueTask<INntpClient> CreateNewConnection
+    (
+        UsenetProviderConfig.ConnectionDetails connectionDetails,
+        CancellationToken ct,
+        Func<INntpClient> connectionFactory
     )
     {
-        var connection = new BaseNntpClient();
-        var host = connectionDetails.Host;
-        var port = connectionDetails.Port;
-        var useSsl = connectionDetails.UseSsl;
-        var user = connectionDetails.User;
-        var pass = connectionDetails.Pass;
-        await connection.ConnectAsync(host, port, useSsl, ct).ConfigureAwait(false);
-        await connection.AuthenticateAsync(user, pass, ct).ConfigureAwait(false);
-        return connection;
+        ArgumentNullException.ThrowIfNull(connectionFactory);
+        var connection = connectionFactory();
+        try
+        {
+            await connection.ConnectAsync(connectionDetails.Host, connectionDetails.Port, connectionDetails.UseSsl, ct).ConfigureAwait(false);
+            await connection.AuthenticateAsync(connectionDetails.User, connectionDetails.Pass, ct).ConfigureAwait(false);
+            return connection;
+        }
+        catch
+        {
+            // A failed connect/authentication still owns a socket and must be
+            // disposed exactly once. Successful callers own the returned client.
+            connection.Dispose();
+            throw;
+        }
     }
 }

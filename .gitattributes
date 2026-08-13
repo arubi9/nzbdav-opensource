@@ -1,2 +1,6 @@
 * text=auto
 * text eol=lf
+# Docker invokes the root supervisor directly. Keep its shebang byte-stable.
+entrypoint.sh text eol=lf
+# Keep the independently executed Jellyfin supervisor byte-stable too.
+jellyfin-stack/entrypoint.sh text eol=lf

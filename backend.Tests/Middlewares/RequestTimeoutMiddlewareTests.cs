@@ -27,6 +27,20 @@ public sealed class RequestTimeoutMiddlewareTests
     }
 
     [Fact]
+    public void SetupRoutesUseTenMinuteBudgetWhileUnrelatedRoutesRemainThirtySeconds()
+    {
+        var setup = new DefaultHttpContext();
+        setup.Request.Path = "/api/setup/retry";
+        var unrelated = new DefaultHttpContext();
+        unrelated.Request.Path = "/api/meta/123";
+
+        Assert.True(RequestTimeoutMiddleware.IsLongRunningSetupRequest(setup));
+        Assert.False(RequestTimeoutMiddleware.IsLongRunningSetupRequest(unrelated));
+        Assert.Equal(TimeSpan.FromMinutes(10), RequestTimeoutMiddleware.SetupTimeout);
+        Assert.Equal(TimeSpan.FromSeconds(30), RequestTimeoutMiddleware.MetadataTimeout);
+    }
+
+    [Fact]
     public async Task InvokeAsync_MetadataRequest_ReplacesAbortTokenWithTimeoutToken()
     {
         var seenToken = CancellationToken.None;

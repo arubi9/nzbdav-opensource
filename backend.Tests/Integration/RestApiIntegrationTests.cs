@@ -77,11 +77,14 @@ public sealed class RestApiFactoryFixture : IAsyncLifetime
     private readonly string? _previousConfigPath = Environment.GetEnvironmentVariable("CONFIG_PATH");
     private readonly string? _previousApiKey = Environment.GetEnvironmentVariable("FRONTEND_BACKEND_API_KEY");
     private readonly string? _previousMasterKey = Environment.GetEnvironmentVariable("NZBDAV_MASTER_KEY");
+    private bool _processEnvironmentGateHeld;
 
     public WebApplicationFactory<NzbWebDAV.Program> Factory { get; private set; } = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
+        await backend.Tests.Config.ProcessEnvironmentGate.Instance.WaitAsync();
+        _processEnvironmentGateHeld = true;
         Directory.CreateDirectory(_configPath);
         ResetDatabaseFiles();
         Environment.SetEnvironmentVariable("CONFIG_PATH", _configPath);
@@ -100,12 +103,17 @@ public sealed class RestApiFactoryFixture : IAsyncLifetime
         Factory = new WebApplicationFactory<NzbWebDAV.Program>();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         Factory.Dispose();
         Environment.SetEnvironmentVariable("CONFIG_PATH", _previousConfigPath);
         Environment.SetEnvironmentVariable("FRONTEND_BACKEND_API_KEY", _previousApiKey);
         Environment.SetEnvironmentVariable("NZBDAV_MASTER_KEY", _previousMasterKey);
+        if (_processEnvironmentGateHeld)
+        {
+            backend.Tests.Config.ProcessEnvironmentGate.Instance.Release();
+            _processEnvironmentGateHeld = false;
+        }
         await Task.Yield();
 
         try

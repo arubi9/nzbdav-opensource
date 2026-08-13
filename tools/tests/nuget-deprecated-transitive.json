@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "projects": [
+    {
+      "path": "backend/NzbWebDAV.csproj",
+      "frameworks": [
+        {
+          "framework": "net10.0",
+          "transitivePackages": [
+            {
+              "id": "System.Web.Http",
+              "resolvedVersion": "5.2.9",
+              "deprecationReasons": [
+                "Legacy",
+                "Other"
+              ],
+              "alternativePackage": {
+                "id": "Microsoft.AspNetCore.Mvc",
+                "versionRange": "[2.0.0, )"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

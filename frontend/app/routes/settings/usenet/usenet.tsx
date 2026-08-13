@@ -1,23 +1,25 @@
 import styles from "./usenet.module.css"
-import { type Dispatch, type SetStateAction, useState, useCallback, useEffect, useMemo } from "react";
+import { type Dispatch, type SetStateAction, useCallback, useEffect, useState } from "react";
 import { Button } from "react-bootstrap";
 import { receiveMessage } from "~/utils/websocket-util";
+import { csrfFetch } from "~/utils/csrf-fetch";
 
-const usenetConnectionsTopic = {'cxs': 'state'};
+const usenetConnectionsTopic = { "cxs": "state" };
 
+export type UsenetProviderDraft = ConnectionDetails;
 type UsenetSettingsProps = {
-    config: Record<string, string>
-    setNewConfig: Dispatch<SetStateAction<Record<string, string>>>
+    providers: ConnectionDetails[]
+    setProviders: Dispatch<SetStateAction<ConnectionDetails[]>>
 };
 
-enum ProviderType {
+export enum ProviderType {
     Disabled = 0,
     Pooled = 1,
     BackupAndStats = 2,
     BackupOnly = 3,
 }
 
-type ConnectionDetails = {
+export type ConnectionDetails = {
     Type: ProviderType;
     Host: string;
     Port: number;
@@ -25,6 +27,8 @@ type ConnectionDetails = {
     User: string;
     Pass: string;
     MaxConnections: number;
+    Id?: string;
+    HasPassword?: boolean;
 };
 
 type ConnectionCounts = {
@@ -33,10 +37,6 @@ type ConnectionCounts = {
     max: number;
 }
 
-type UsenetProviderConfig = {
-    Providers: ConnectionDetails[];
-};
-
 const PROVIDER_TYPE_LABELS: Record<ProviderType, string> = {
     [ProviderType.Disabled]: "Disabled",
     [ProviderType.Pooled]: "Pool Connections",
@@ -44,27 +44,33 @@ const PROVIDER_TYPE_LABELS: Record<ProviderType, string> = {
     [ProviderType.BackupOnly]: "Backup Only",
 };
 
-function parseProviderConfig(jsonString: string): UsenetProviderConfig {
-    try {
-        if (!jsonString || jsonString.trim() === "") {
-            return { Providers: [] };
-        }
-        return JSON.parse(jsonString);
-    } catch {
-        return { Providers: [] };
+export const addProvider = (providers: ConnectionDetails[], provider: ConnectionDetails): ConnectionDetails[] => [
+    ...providers,
+    { ...provider },
+];
+
+export const editProvider = (providers: ConnectionDetails[], index: number, provider: ConnectionDetails): ConnectionDetails[] => providers.map((existing, existingIndex) =>
+    existingIndex === index ? { ...provider } : existing,
+);
+
+export const removeProvider = (providers: ConnectionDetails[], index: number): ConnectionDetails[] => providers.filter((_, existingIndex) => existingIndex !== index);
+
+export const reorderProviders = (providers: ConnectionDetails[], fromIndex: number, toIndex: number): ConnectionDetails[] => {
+    if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0 || fromIndex >= providers.length || toIndex >= providers.length) {
+        return providers;
     }
-}
+    const next = [...providers];
+    const [provider] = next.splice(fromIndex, 1);
+    next.splice(toIndex, 0, provider);
+    return next;
+};
 
-function serializeProviderConfig(config: UsenetProviderConfig): string {
-    return JSON.stringify(config);
-}
 
-export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
+export function UsenetSettings({ providers, setProviders }: UsenetSettingsProps) {
     // state
     const [showModal, setShowModal] = useState(false);
     const [editingIndex, setEditingIndex] = useState<number | null>(null);
     const [connections, setConnections] = useState<{[index: number]: ConnectionCounts}>({});
-    const providerConfig = useMemo(() => parseProviderConfig(config["usenet.providers"]), [config]);
 
     // handlers
     const handleAddProvider = useCallback(() => {
@@ -78,38 +84,46 @@ export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
     }, []);
 
     const handleDeleteProvider = useCallback((index: number) => {
-        const newProviderConfig = { ...providerConfig };
-        newProviderConfig.Providers = providerConfig.Providers.filter((_, i) => i !== index);
-        setNewConfig({ ...config, "usenet.providers": serializeProviderConfig(newProviderConfig) });
-    }, [config, providerConfig, setNewConfig]);
+        setProviders((current) => removeProvider(current, index));
+    }, [setProviders]);
 
     const handleCloseModal = useCallback(() => {
         setShowModal(false);
         setEditingIndex(null);
     }, []);
 
+    const handleMoveProvider = useCallback((fromIndex: number, toIndex: number) => {
+        setProviders((current) => reorderProviders(current, fromIndex, toIndex));
+    }, [setProviders]);
+
+    const canMoveProviderUp = (index: number): boolean => {
+        return index > 0;
+    };
+
+    const canMoveProviderDown = (index: number): boolean => {
+        return index + 1 < providers.length;
+    };
     const handleSaveProvider = useCallback((provider: ConnectionDetails) => {
-        const newProviderConfig = { ...providerConfig };
+        const nextProvider: ConnectionDetails = { ...provider };
         if (editingIndex !== null) {
-            newProviderConfig.Providers[editingIndex] = provider;
+            setProviders((current) => editProvider(current, editingIndex, nextProvider));
         } else {
-            newProviderConfig.Providers.push(provider);
+            setProviders((current) => addProvider(current, nextProvider));
         }
-        setNewConfig({ ...config, "usenet.providers": serializeProviderConfig(newProviderConfig) });
         handleCloseModal();
-    }, [config, providerConfig, editingIndex, setNewConfig, handleCloseModal]);
+    }, [editingIndex, setProviders, handleCloseModal]);
 
     const handleConnectionsMessage = useCallback((message: string) => {
         const parts = (message || "0|0|0|0|1|0").split("|");
         const [index, live, idle, _0, _1, _2] = parts.map((x: any) => Number(x));
         if (showModal) return;
-        if (index >= providerConfig.Providers.length) return;
-        setConnections(prev => ({...prev, [index]: {
+        if (index >= providers.length) return;
+        setConnections((prev) => ({ ...prev, [index]: {
             active: live - idle,
             live: live,
-            max: providerConfig.Providers[index]?.MaxConnections || 1
+            max: providers[index]?.MaxConnections || 1,
         }}));
-    }, [setConnections]);
+    }, [setConnections, providers, showModal]);
 
     // effects
     useEffect(() => {
@@ -140,14 +154,14 @@ export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
                         Add
                     </Button>
                 </div>
-                {providerConfig.Providers.length === 0 ? (
+                {providers.length === 0 ? (
                     <p className={styles.alertMessage}>
                         No Usenet providers configured.
                         Click on the "Add" button to get started.
                     </p>
                 ) : (
                     <div className={styles["providers-grid"]}>
-                        {providerConfig.Providers.map((provider, index) => (
+                        {providers.map((provider, index) => (
                             <div key={index} className={styles["provider-card"]}>
                                 <div className={styles["provider-card-inner"]}>
                                     <div className={styles["provider-header"]}>
@@ -161,6 +175,27 @@ export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
                                         </div>
                                         <div className={styles["provider-header-actions"]}>
                                             <button
+                                                type="button"
+                                                className={`${styles["header-action-button"]} ${styles["reorder"]}`}
+                                                data-reorder="up"
+                                                aria-label={`Move provider ${index + 1} up`}
+                                                onClick={() => handleMoveProvider(index, index - 1)}
+                                                disabled={!canMoveProviderUp(index)}
+                                            >
+                                                ↑
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className={`${styles["header-action-button"]} ${styles["reorder"]}`}
+                                                data-reorder="down"
+                                                aria-label={`Move provider ${index + 1} down`}
+                                                onClick={() => handleMoveProvider(index, index + 1)}
+                                                disabled={!canMoveProviderDown(index)}
+                                            >
+                                                ↓
+                                            </button>
+                                            <button
+                                                type="button"
                                                 className={styles["header-action-button"]}
                                                 onClick={() => handleEditProvider(index)}
                                                 title="Edit Provider"
@@ -171,6 +206,7 @@ export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
                                                 </svg>
                                             </button>
                                             <button
+                                                type="button"
                                                 className={`${styles["header-action-button"]} ${styles["delete"]}`}
                                                 onClick={() => handleDeleteProvider(index)}
                                                 title="Delete Provider"
@@ -274,7 +310,7 @@ export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
 
             <ProviderModal
                 show={showModal}
-                provider={editingIndex !== null ? providerConfig.Providers[editingIndex] : null}
+                provider={editingIndex !== null ? providers[editingIndex] : null}
                 onClose={handleCloseModal}
                 onSave={handleSaveProvider}
             />
@@ -308,13 +344,17 @@ function ProviderModal({ show, provider, onClose, onSave }: ProviderModalProps) 
             setPort(provider?.Port?.toString() || "");
             setUseSsl(provider?.UseSsl ?? true);
             setUser(provider?.User || "");
-            setPass(provider?.Pass || "");
+            setPass("");
             setMaxConnections(provider?.MaxConnections?.toString() || "");
             setType(provider?.Type ?? ProviderType.Pooled);
             setConnectionTested(false);
             setTestError(null);
         }
     }, [show, provider]);
+
+    useEffect(() => {
+        if (!show) setPass("");
+    }, [show]);
 
     // Handle Escape key to close modal
     useEffect(() => {
@@ -342,7 +382,7 @@ function ProviderModal({ show, provider, onClose, onSave }: ProviderModalProps) 
             formData.append('user', user);
             formData.append('pass', pass);
 
-            const response = await fetch('/api/test-usenet-connection', {
+            const response = await csrfFetch('/api/test-usenet-connection', {
                 method: 'POST',
                 body: formData,
             });
@@ -359,7 +399,7 @@ function ProviderModal({ show, provider, onClose, onSave }: ProviderModalProps) 
                 setTestError("Failed to test connection");
             }
         } catch (error) {
-            setTestError("Network error: " + (error instanceof Error ? error.message : "Unknown error"));
+            setTestError("Unable to test the connection. Please try again.");
         } finally {
             setIsTestingConnection(false);
         }
@@ -367,6 +407,8 @@ function ProviderModal({ show, provider, onClose, onSave }: ProviderModalProps) 
 
     const handleSave = useCallback(() => {
         onSave({
+            Id: provider?.Id,
+            HasPassword: provider?.HasPassword || pass.trim() !== "",
             Type: type,
             Host: host,
             Port: parseInt(port, 10),
@@ -375,7 +417,7 @@ function ProviderModal({ show, provider, onClose, onSave }: ProviderModalProps) 
             Pass: pass,
             MaxConnections: parseInt(maxConnections, 10),
         });
-    }, [type, host, port, useSsl, user, pass, maxConnections, onSave]);
+    }, [provider?.Id, provider?.HasPassword, type, host, port, useSsl, user, pass, maxConnections, onSave]);
 
     const handleOverlayClick = useCallback((e: React.MouseEvent) => {
         if (e.target === e.currentTarget) {
@@ -386,10 +428,11 @@ function ProviderModal({ show, provider, onClose, onSave }: ProviderModalProps) 
     const isFormValid = host.trim() !== ""
         && isPositiveInteger(port)
         && user.trim() !== ""
-        && pass.trim() !== ""
+        && (provider !== null || pass.trim() !== "")
         && isPositiveInteger(maxConnections);
 
-    const canSave = isFormValid && (connectionTested || type == ProviderType.Disabled);
+    const canSave = isFormValid && (connectionTested || type == ProviderType.Disabled ||
+        (provider !== null && pass.trim() === ""));
 
     if (!show) return null;
 
@@ -563,8 +606,10 @@ function ProviderModal({ show, provider, onClose, onSave }: ProviderModalProps) 
     );
 }
 
-export function isUsenetSettingsUpdated(config: Record<string, string>, newConfig: Record<string, string>) {
-    return config["usenet.providers"] !== newConfig["usenet.providers"]
+export function isUsenetSettingsUpdated(config: ConnectionDetails[], newConfig: ConnectionDetails[]) {
+    return JSON.stringify(config.map(({ Pass: _pass, ...provider }) => provider)) !==
+        JSON.stringify(newConfig.map(({ Pass: _pass, ...provider }) => provider)) ||
+        newConfig.some(provider => provider.Pass.length > 0);
 }
 
 export function isPositiveInteger(value: string) {

@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "projects": [
+    {
+      "path": "backend/NzbWebDAV.csproj",
+      "frameworks": [
+        {
+          "framework": "net10.0",
+          "transitivePackages": [
+            {
+              "id": "System.Text.Json",
+              "resolvedVersion": "8.0.5",
+              "vulnerabilities": [
+                {
+                  "severity": "Moderate",
+                  "advisoryurl": "https://github.com/advisories/GHSA-hh2w-p6rv-4g8g"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

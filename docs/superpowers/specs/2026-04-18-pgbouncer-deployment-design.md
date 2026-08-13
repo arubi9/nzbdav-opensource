@@ -107,10 +107,10 @@ pgbouncer:
 - Before: `postgresql://nzbdav:pw@10.0.0.5:5432/nzbdav`
 - After: `postgresql://nzbdav:pw@10.0.0.5:6432/nzbdav`
 
-No code change. Npgsql handles transaction pool mode transparently
-provided NZBDAV doesn't rely on session-scoped features (it doesn't —
-verified: no advisory locks, no prepared statements, no temp tables,
-no SET LOCAL outside transactions).
+Operational code uses PgBouncer transaction pooling. Migrations are the
+exception: they hold a session-scoped advisory lock and therefore require a
+direct PostgreSQL endpoint supplied through `MIGRATION_DATABASE_URL`; startup
+fails closed if the effective migration URL points at PgBouncer.
 
 ## Prepared statement concern
 

@@ -197,15 +197,15 @@ public sealed class ContentIndexDatabaseFixture : IAsyncLifetime
         Environment.SetEnvironmentVariable("CONFIG_PATH", _configPath);
     }
 
-    public Task InitializeAsync()
+    public ValueTask InitializeAsync()
     {
         Directory.CreateDirectory(_configPath);
-        return Task.CompletedTask;
+        return ValueTask.CompletedTask;
     }
 
-    public Task DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        return ResetAsync();
+        return new ValueTask(ResetAsync());
     }
 
     public async Task ResetAsync()
@@ -375,6 +375,6 @@ public sealed class DelaySaveChangesInterceptor(Func<Task> onSavingChangesAsync)
 }
 
 [CollectionDefinition(nameof(ContentIndexDatabaseCollection), DisableParallelization = true)]
-public sealed class ContentIndexDatabaseCollection : ICollectionFixture<ContentIndexDatabaseFixture>
+public sealed class ContentIndexDatabaseCollection : ICollectionFixture<ContentIndexDatabaseFixture>, ICollectionFixture<backend.Tests.Config.ProcessEnvironmentFixture>
 {
 }

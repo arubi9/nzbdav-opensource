@@ -4,6 +4,8 @@ using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Interceptors;
+using NzbWebDAV.Database.Models;
+using NzbWebDAV.Services;
 
 namespace backend.Tests.Database;
 
@@ -72,6 +74,151 @@ public sealed class DavDatabaseContextMigrationTests
             runsIngest);
 
         Assert.Equal(runsIngest, HasContentIndexSnapshotInterceptor(options));
+    }
+
+    [Theory]
+    [InlineData("Host=pgbouncer;Port=5432;Database=nzbdav", true)]
+    [InlineData("Host=postgres;Port=6432;Database=nzbdav", true)]
+    [InlineData("Host=postgres;Port=5432;Database=nzbdav;Pool Mode=transaction", true)]
+    [InlineData("Host=postgres;Port=5432;Database=nzbdav", false)]
+    public void PostgresEndpointDetection_RejectsPooledMigrationEndpoints(string databaseUrl, bool expected)
+    {
+        Assert.Equal(expected, DavDatabaseContextOptionsFactory.IsPgbouncerConnection(databaseUrl));
+    }
+
+    [Fact]
+    public async Task RuntimeInitialization_UsesSqliteMigrationsForFreshTargetAndReupgrade()
+    {
+        var configPath = CreateConfigPath("runtime-sqlite-migration");
+
+        try
+        {
+            using var environment = new backend.Tests.Config.TemporaryEnvironment(
+                ("DATABASE_URL", null),
+                ("CONFIG_PATH", configPath));
+
+            await using var dbContext = new DavDatabaseContext();
+            await DatabaseInitialization.InitializeAsync(dbContext, CancellationToken.None, HistoricalCutoff);
+            await AssertMigrationHistoryAsync(dbContext, ExpectedMigrationIds.TakeWhile(id => id != SetupGrantsMigration));
+            Assert.False(await TableExistsAsync(dbContext, "setup_grants"));
+
+            dbContext.ConfigItems.Add(new NzbWebDAV.Database.Models.ConfigItem
+            {
+                ConfigName = "migration-sentinel",
+                ConfigValue = "survives",
+                IsEncrypted = false
+            });
+            await dbContext.SaveChangesAsync();
+
+            await DatabaseInitialization.InitializeAsync(dbContext, CancellationToken.None);
+            await AssertMigrationHistoryAsync(dbContext, ExpectedMigrationIds);
+            Assert.Equal(5, await dbContext.Items.CountAsync(x =>
+                x.Id == DavItem.Root.Id
+                || x.Id == DavItem.NzbFolder.Id
+                || x.Id == DavItem.ContentFolder.Id
+                || x.Id == DavItem.SymlinkFolder.Id
+                || x.Id == DavItem.IdsFolder.Id));
+            Assert.Equal(2, await dbContext.ConfigItems.CountAsync(x =>
+                x.ConfigName == "api.key" || x.ConfigName == "api.strm-key"));
+            Assert.Equal("survives", await ScalarAsync(dbContext, "SELECT ConfigValue FROM ConfigItems WHERE ConfigName = 'migration-sentinel';"));
+
+            await DatabaseInitialization.InitializeAsync(dbContext, CancellationToken.None, SetupMutationFenceMigration);
+            Assert.False(await TableExistsAsync(dbContext, "setup_run_leases"));
+            await AssertMigrationHistoryAsync(dbContext, ExpectedMigrationIds.Take(ExpectedMigrationIds.Length - 1));
+
+            await DatabaseInitialization.InitializeAsync(dbContext, CancellationToken.None);
+            await AssertMigrationHistoryAsync(dbContext, ExpectedMigrationIds);
+            Assert.Equal("survives", await ScalarAsync(dbContext, "SELECT ConfigValue FROM ConfigItems WHERE ConfigName = 'migration-sentinel';"));
+        }
+        finally
+        {
+            DeleteDatabaseFiles();
+            DeleteConfigPath(configPath);
+        }
+    }
+
+    [Fact]
+    public async Task ExplicitZeroTarget_LeavesFreshSqliteWithoutSchemaOrBootstrap()
+    {
+        var configPath = CreateConfigPath("explicit-zero-target");
+
+        try
+        {
+            using var environment = new backend.Tests.Config.TemporaryEnvironment(
+                ("DATABASE_URL", null),
+                ("CONFIG_PATH", configPath));
+
+            await using var dbContext = new DavDatabaseContext();
+            await DatabaseInitialization.InitializeAsync(dbContext, CancellationToken.None, "0");
+
+            Assert.False(await TableExistsAsync(dbContext, "__EFMigrationsHistory"));
+            Assert.False(await TableExistsAsync(dbContext, "DavItems"));
+            Assert.False(await TableExistsAsync(dbContext, "ConfigItems"));
+        }
+        finally
+        {
+            DeleteDatabaseFiles();
+            DeleteConfigPath(configPath);
+        }
+    }
+
+    [Fact]
+    public async Task ExplicitLatestTarget_MigratesWithoutCurrentBootstrap_OnSqlite()
+    {
+        var configPath = CreateConfigPath("explicit-latest-target");
+
+        try
+        {
+            using var environment = new backend.Tests.Config.TemporaryEnvironment(
+                ("DATABASE_URL", null),
+                ("CONFIG_PATH", configPath));
+
+            await using var dbContext = new DavDatabaseContext();
+            await DatabaseInitialization.InitializeAsync(dbContext, CancellationToken.None, LatestMigration);
+
+            Assert.True(await TableExistsAsync(dbContext, "setup_run_leases"));
+            // Remove rows seeded by historical migrations, then repeat the
+            // explicit target. The current bootstrap must not recreate them.
+            await dbContext.Database.ExecuteSqlRawAsync(
+                "DELETE FROM DavItems WHERE Id = '00000000-0000-0000-0000-000000000004';");
+            await dbContext.Database.ExecuteSqlRawAsync(
+                "DELETE FROM ConfigItems WHERE ConfigName = 'api.strm-key';");
+            await DatabaseInitialization.InitializeAsync(dbContext, CancellationToken.None, LatestMigration);
+            Assert.Equal(0, await dbContext.Items.CountAsync(x => x.Id == DavItem.IdsFolder.Id));
+            Assert.Equal(0, await dbContext.ConfigItems.CountAsync(x => x.ConfigName == "api.strm-key"));
+        }
+        finally
+        {
+            DeleteDatabaseFiles();
+            DeleteConfigPath(configPath);
+        }
+    }
+
+    [Fact]
+    public async Task TableOnlySqliteSchema_IsRejectedWithoutCreatingHistory()
+    {
+        var configPath = CreateConfigPath("table-only-schema");
+
+        try
+        {
+            using var environment = new backend.Tests.Config.TemporaryEnvironment(
+                ("DATABASE_URL", null),
+                ("CONFIG_PATH", configPath));
+
+            await using var dbContext = new DavDatabaseContext();
+            await dbContext.Database.ExecuteSqlRawAsync("CREATE TABLE DavItems (Id TEXT NOT NULL);");
+
+            var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => DatabaseInitialization.InitializeAsync(dbContext, CancellationToken.None, "0"));
+            Assert.Contains("without migration history is unsupported", exception.Message, StringComparison.Ordinal);
+            Assert.True(await TableExistsAsync(dbContext, "DavItems"));
+            Assert.False(await TableExistsAsync(dbContext, "__EFMigrationsHistory"));
+        }
+        finally
+        {
+            DeleteDatabaseFiles();
+            DeleteConfigPath(configPath);
+        }
     }
 
     [Fact]

@@ -3,9 +3,12 @@ import styles from "./route.module.css"
 import { backendClient } from "~/clients/backend-client.server";
 import { HealthTable } from "./components/health-table/health-table";
 import { HealthStats } from "./components/health-stats/health-stats";
+import type { HealthResult, RepairAction } from "~/clients/backend-client.server";
 import { useCallback, useEffect, useState } from "react";
 import { receiveMessage } from "~/utils/websocket-util";
 import { Alert } from "react-bootstrap";
+import { isAuthenticated } from "~/auth/authentication.server";
+import { DEFAULT_NO_CACHE_HEADERS } from "~/onboarding/onboarding-request.server";
 
 const topicNames = {
     healthItemStatus: 'hs',
@@ -16,7 +19,12 @@ const topicSubscriptions = {
     [topicNames.healthItemProgress]: 'event',
 }
 
-export async function loader() {
+export async function loader({ request }: Route.LoaderArgs) {
+    // Protect direct single-fetch health reads; root authentication is not a
+    // sufficient boundary for React Router's `_routes` requests.
+    if (!await isAuthenticated(request)) {
+        return new Response(null, { status: 401, headers: DEFAULT_NO_CACHE_HEADERS });
+    }
     const enabledKey = 'repair.enable';
     const [queueData, historyData, config] = await Promise.all([
         backendClient.getHealthCheckQueue(30),
@@ -64,11 +72,13 @@ export default function Health({ loaderData }: Route.ComponentProps) {
         setHistoryStats(x => {
             const healthResultNum = Number(healthResult);
             const repairActionNum = Number(repairAction);
+            const safeResult = (Number.isFinite(healthResultNum) ? (healthResultNum as HealthResult) : 0);
+            const safeRepair = (Number.isFinite(repairActionNum) ? (repairActionNum as RepairAction) : 0);
 
             // attempt to find and update a matching statistic
             let updated = false;
-            const newStats = x.map(stat => {
-                if (stat.result === healthResultNum && stat.repairStatus === repairActionNum) {
+            const newStats = x.map((stat) => {
+                if (stat.result === safeResult && stat.repairStatus === safeRepair) {
                     updated = true;
                     return { ...stat, count: stat.count + 1 };
                 }
@@ -80,10 +90,10 @@ export default function Health({ loaderData }: Route.ComponentProps) {
                 return [
                     ...x,
                     {
-                        result: healthResultNum,
-                        repairStatus: repairActionNum,
-                        count: 1
-                    }
+                        result: safeResult,
+                        repairStatus: safeRepair,
+                        count: 1,
+                    },
                 ];
             }
 

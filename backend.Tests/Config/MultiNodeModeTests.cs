@@ -43,4 +43,4 @@ public sealed class TemporaryEnvironment : IDisposable
 }
 
 [CollectionDefinition(nameof(EnvironmentVariableCollection), DisableParallelization = true)]
-public sealed class EnvironmentVariableCollection;
+public sealed class EnvironmentVariableCollection : ICollectionFixture<ProcessEnvironmentFixture>;

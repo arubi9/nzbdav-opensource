@@ -488,8 +488,8 @@ public class MediaProbeService : BackgroundService
 
         // Run ffprobe against the NZBDAV stream URL (which now serves from cache)
         var baseUrl = _configManager.GetBaseUrl().TrimEnd('/');
-        var apiKey = _configManager.GetApiKey();
-        var streamUrl = $"{baseUrl}/api/stream/{videoFile.Id}?apikey={apiKey}";
+        var token = StreamTokenService.GenerateToken($"/api/stream/{videoFile.Id}", _configManager);
+        var streamUrl = $"{baseUrl}/api/stream/{videoFile.Id}?token={Uri.EscapeDataString(token)}";
 
         var probeResult = await RunFfprobe(streamUrl, ct).ConfigureAwait(false);
         if (probeResult is null) return;

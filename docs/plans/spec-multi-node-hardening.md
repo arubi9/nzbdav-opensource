@@ -293,16 +293,18 @@ commit).
 
 ### Migration execution
 
-PgBouncer transaction mode DOES work with EF Core migrations because each
-migration is a single transaction. However, some migrations use features
-that require session state (advisory locks for concurrency protection).
+PgBouncer transaction mode is not an allowed migration endpoint. Some
+migration coordination uses session state (advisory locks), so startup fails
+closed unless a direct endpoint is available.
 Recommended practice: run migrations against Postgres DIRECTLY, not through
-PgBouncer:
+PgBouncer. Set `MIGRATION_DATABASE_URL` to that direct endpoint; keep
+operational queries on the pooled `DATABASE_URL`:
 
 ```bash
 # In the multi-node compose, during deployment:
+# MIGRATION_DATABASE_URL=Host=postgres;Port=5432;... is configured on the node
 docker compose exec nzbdav-ingest sh -c \
-  'DATABASE_URL="Host=postgres;Port=5432;..." dotnet NzbWebDAV.dll --db-migration'
+  'dotnet NzbWebDAV.dll --db-migration'
 ```
 
 This is documented in the setup guide.
@@ -313,7 +315,8 @@ This is documented in the setup guide.
 |---|---|
 | `docs/deployment/docker-compose.multi-node.yml` | Add `pgbouncer` + `pgbouncer-session` services, update every `DATABASE_URL` to point at port 6432 |
 | `backend/Database/DavDatabaseContext.cs` | Add `No Reset On Close` + `Server Compatibility Mode=Redshift` to the Npgsql connection string when `DATABASE_URL` points at PgBouncer (detected via `Host=pgbouncer` substring match, or just always set them when `DATABASE_URL` is set) |
-| `backend/Utils/EnvironmentUtil.cs` | Add `DATABASE_URL_SESSION` getter |
+| `backend/Utils/EnvironmentUtil.cs` | Add `DATABASE_URL_SESSION` and `MIGRATION_DATABASE_URL` getters |
+| `backend/Services/DatabaseInitialization.cs` | Use a direct migration endpoint and session advisory lock |
 | `docs/deployment/setup-guide.md` | Add PgBouncer section; update migration instructions to bypass PgBouncer |
 
 ---

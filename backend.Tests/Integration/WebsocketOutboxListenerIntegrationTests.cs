@@ -17,10 +17,10 @@ public sealed class WebsocketOutboxListenerIntegrationTests : IClassFixture<Post
         _fixture = fixture;
     }
 
-    [SkippableFact]
+    [Fact]
     public async Task CatchUpOnce_ReplaysRowsNewerThanLastSeen()
     {
-        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
+        Assert.SkipUnless(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         using var environment = new backend.Tests.Config.TemporaryEnvironment(
@@ -44,10 +44,10 @@ public sealed class WebsocketOutboxListenerIntegrationTests : IClassFixture<Post
         Assert.Equal("42", GetLastMessage(manager, WebsocketTopic.QueueItemProgress));
     }
 
-    [SkippableFact]
+    [Fact]
     public async Task CatchUpOnce_AdvancesPastUnknownTopics()
     {
-        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
+        Assert.SkipUnless(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         using var environment = new backend.Tests.Config.TemporaryEnvironment(
@@ -76,10 +76,10 @@ public sealed class WebsocketOutboxListenerIntegrationTests : IClassFixture<Post
         Assert.Equal(poisonSeq, GetLastSeenSeq(listener));
     }
 
-    [SkippableFact]
+    [Fact]
     public async Task InitializeStateFromOutbox_RestoresLatestStatefulMessages_WithoutReplayingEvents()
     {
-        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
+        Assert.SkipUnless(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         using var environment = new backend.Tests.Config.TemporaryEnvironment(
@@ -115,10 +115,10 @@ public sealed class WebsocketOutboxListenerIntegrationTests : IClassFixture<Post
         Assert.Null(GetLastMessage(manager, WebsocketTopic.QueueItemAdded));
     }
 
-    [SkippableFact]
+    [Fact]
     public async Task RunListenerLoop_WithoutSessionDatabase_RunsInPollOnlyMode()
     {
-        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
+        Assert.SkipUnless(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         using var environment = new backend.Tests.Config.TemporaryEnvironment(
@@ -144,10 +144,10 @@ public sealed class WebsocketOutboxListenerIntegrationTests : IClassFixture<Post
         Assert.Equal("item-1|Queued", GetLastMessage(manager, WebsocketTopic.QueueItemStatus));
     }
 
-    [SkippableFact]
+    [Fact]
     public async Task SweepOnce_RemovesExpiredRows()
     {
-        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
+        Assert.SkipUnless(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         using var environment = new backend.Tests.Config.TemporaryEnvironment(

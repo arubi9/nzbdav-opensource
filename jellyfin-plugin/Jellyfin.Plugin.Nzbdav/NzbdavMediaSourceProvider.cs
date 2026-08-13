@@ -21,53 +21,89 @@ namespace Jellyfin.Plugin.Nzbdav;
 /// </summary>
 public sealed class NzbdavMediaSourceProvider : IMediaSourceProvider
 {
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNameCaseInsensitive = true
-    };
-
     private readonly ILogger<NzbdavMediaSourceProvider> _logger;
+    private readonly Func<NzbdavOperationConfiguration?> _configurationAccessor;
 
     public NzbdavMediaSourceProvider(ILogger<NzbdavMediaSourceProvider> logger)
+        : this(logger, NzbdavOperationConfigurationAccessor.CaptureFromPlugin)
     {
-        _logger = logger;
     }
 
-    public Task<IEnumerable<MediaSourceInfo>> GetMediaSources(
+    // One accessor supplies an immutable configuration lease for the entire
+    // operation. Keeping this seam explicit makes provider tests independent
+    // of Jellyfin's mutable plugin singleton.
+    internal NzbdavMediaSourceProvider(
+        ILogger<NzbdavMediaSourceProvider> logger,
+        Func<NzbdavOperationConfiguration?> configurationAccessor)
+    {
+        _logger = logger;
+        _configurationAccessor = configurationAccessor;
+    }
+
+    public async Task<IEnumerable<MediaSourceInfo>> GetMediaSources(
         BaseItem item, CancellationToken cancellationToken)
     {
+        if (item is null || !IsNzbdavStrmItem(item))
+            return [];
+
         try
         {
-            if (item is null || !IsNzbdavStrmItem(item))
-                return Task.FromResult<IEnumerable<MediaSourceInfo>>([]);
+            // This lease covers recovery, the tombstone check, and every byte
+            // read used to build the source. In particular, do not release it
+            // after recovery and then check/read the two pathnames separately:
+            // a scheduled reconcile could retire the journal in that window.
+            // Snapshot before the first await. A queued provider operation
+            // must never combine the root from one configuration revision with
+            // the endpoint from another after the media gate becomes available.
+            var operationConfiguration = _configurationAccessor();
+            if (operationConfiguration is null || !operationConfiguration.IsValid)
+                return [];
 
-            var streamUrl = ReadStreamUrl(item.Path);
-            if (streamUrl is null)
-                return Task.FromResult<IEnumerable<MediaSourceInfo>>([]);
+            using var gate = await NzbdavLibrarySyncTask.EnterMediaGateAsync(cancellationToken)
+                .ConfigureAwait(false);
 
-            var sidecarPath = Path.ChangeExtension(item.Path, ".mediainfo.json");
-            if (!File.Exists(sidecarPath))
-                return Task.FromResult<IEnumerable<MediaSourceInfo>>([]);
+            if (!NzbdavLibrarySyncTask.RecoverForMediaUnderGate(
+                    operationConfiguration.LibraryPath, item.Path, cancellationToken))
+                return [];
 
-            FfprobeOutput? probe;
-            using (var fs = File.OpenRead(sidecarPath))
-            {
-                probe = JsonSerializer.Deserialize<FfprobeOutput>(fs, JsonOptions);
-            }
+            // Linux stale reconciliation retains the source pathname and uses
+            // an identity+content-bound tombstone. Do not serve that retained
+            // inode; a foreign replacement at the same pathname remains visible.
+            if (NzbdavLibrarySyncTask.IsLogicallyTombstoned(operationConfiguration.LibraryPath, item.Path))
+                return [];
 
-            if (probe is null)
-                return Task.FromResult<IEnumerable<MediaSourceInfo>>([]);
+            // Jellyfin's BaseItem.Id is a library/database identity, not the
+            // NZBDAV manifest identity. The completed marker binds the stream
+            // URL GUID to its own manifest item id.
+            if (!NzbdavLibrarySyncTask.TryReadManagedMediaForProvider(
+                    operationConfiguration.LibraryPath,
+                    item.Path,
+                    operationConfiguration.NzbdavBaseUrl,
+                    Guid.Empty,
+                    out var streamUrl,
+                    out var probeBytes))
+                return [];
 
-            var source = BuildMediaSource(item, streamUrl, probe);
-            return Task.FromResult<IEnumerable<MediaSourceInfo>>([source]);
+            if (!TryDeserializeProbe(probeBytes, out var probe) || probe is null)
+                return [];
+
+            // BuildMediaSource is intentionally inside the same lease as the
+            // reads above. Jellyfin may inspect the returned object only after
+            // this method returns, but it never receives a partially-built
+            // source from a path that changed during construction.
+            return [BuildMediaSource(item, streamUrl, probe)];
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(
                 ex,
-                "Failed to build NZBDAV media source for {ItemPath}; falling back to Jellyfin probe",
+                "Failed to build NZBDAV media source for {ItemPath}; refusing unproven ownership",
                 item?.Path);
-            return Task.FromResult<IEnumerable<MediaSourceInfo>>([]);
+            return [];
         }
     }
 
@@ -84,26 +120,6 @@ public sealed class NzbdavMediaSourceProvider : IMediaSourceProvider
         var path = item.Path;
         if (string.IsNullOrEmpty(path)) return false;
         return path.EndsWith(".strm", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string? ReadStreamUrl(string strmPath)
-    {
-        try
-        {
-            var content = File.ReadLines(strmPath).FirstOrDefault()?.Trim();
-            if (string.IsNullOrEmpty(content)) return null;
-
-            var baseUrl = Plugin.Instance?.Configuration?.NzbdavBaseUrl;
-            if (string.IsNullOrEmpty(baseUrl)) return null;
-
-            return content.StartsWith(baseUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase)
-                ? content
-                : null;
-        }
-        catch
-        {
-            return null;
-        }
     }
 
     private MediaSourceInfo BuildMediaSource(BaseItem item, string streamUrl, FfprobeOutput probe)
@@ -225,6 +241,20 @@ public sealed class NzbdavMediaSourceProvider : IMediaSourceProvider
         }
 
         return stream;
+    }
+
+    private static bool TryDeserializeProbe(byte[] bytes, out FfprobeOutput? probe)
+    {
+        try
+        {
+            probe = FfprobeJsonParser.Parse(bytes);
+            return true;
+        }
+        catch (JsonException)
+        {
+            probe = null;
+            return false;
+        }
     }
 
     private static int GetDisposition(FfprobeStream s, string key)

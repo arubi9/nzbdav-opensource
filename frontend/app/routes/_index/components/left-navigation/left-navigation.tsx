@@ -7,9 +7,11 @@ import { LiveUsenetConnections } from "../live-usenet-connections/live-usenet-co
 export type LeftNavigationProps = {
     version?: string,
     isFrontendAuthDisabled?: boolean,
+    csrfToken?: string,
+    resumeSetup?: boolean,
 }
 
-export function LeftNavigation({ version, isFrontendAuthDisabled }: LeftNavigationProps) {
+export function LeftNavigation({ version, isFrontendAuthDisabled, csrfToken, resumeSetup }: LeftNavigationProps) {
     return (
         <div className={styles.container}>
             <Item target="/queue">
@@ -28,6 +30,11 @@ export function LeftNavigation({ version, isFrontendAuthDisabled }: LeftNavigati
                 <div className={styles["settings-icon"]} />
                 <div className={styles.title}>Settings</div>
             </Item>
+            {resumeSetup ? (
+                <Item target="/onboarding">
+                    <div className={styles.title}>Resume setup</div>
+                </Item>
+            ) : null}
             <LiveUsenetConnections />
 
             <div className={styles.footer}>
@@ -47,6 +54,7 @@ export function LeftNavigation({ version, isFrontendAuthDisabled }: LeftNavigati
                     <hr />
                     <Form method="post" action="/logout">
                         <input name="confirm" value="true" type="hidden" />
+                        {csrfToken ? <input name="csrfToken" value={csrfToken} type="hidden" /> : null}
                         <button className={styles.unstyled + ' ' + styles.item} type="submit">
                             <div className={styles["logout-icon"]} />
                             <div className={styles.title}>Logout</div>

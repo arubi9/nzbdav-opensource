@@ -17,15 +17,30 @@ public static class SevenZipUtil
     )
     {
         await using var cancellableStream = new CancellableStream(stream, ct);
-        return await Task.Run(() => GetSevenZipEntries(cancellableStream, password), ct).ConfigureAwait(false);
+        var archive = await SevenZipArchive
+            .OpenAsyncArchive(cancellableStream, new ReaderOptions { Password = password }, ct)
+            .ConfigureAwait(false);
+        await using (archive.ConfigureAwait(false))
+        {
+            var entries = new List<SevenZipEntry>();
+            var index = 0;
+            await foreach (var rawEntry in archive.EntriesAsync.WithCancellation(ct))
+            {
+                if (rawEntry is not SevenZipArchiveEntry entry) continue;
+                if (!entry.IsDirectory)
+                    entries.Add(new SevenZipEntry(entry, (SevenZipArchive)entry.Archive, index++, password));
+            }
+            return entries;
+        }
     }
 
     public static List<SevenZipEntry> GetSevenZipEntries(Stream stream, string? password = null)
     {
-        using var archive = SevenZipArchive.Open(stream, new ReaderOptions() { Password = password });
+        using var archive = SevenZipArchive.OpenArchive(stream, new ReaderOptions { Password = password });
         return archive.Entries
+            .OfType<SevenZipArchiveEntry>()
             .Where(x => !x.IsDirectory)
-            .Select((entry, index) => new SevenZipEntry(entry, archive, index, password))
+            .Select((entry, index) => new SevenZipEntry(entry, (SevenZipArchive)entry.Archive, index, password))
             .ToList();
     }
 

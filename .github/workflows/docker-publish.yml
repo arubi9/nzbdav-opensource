@@ -7,8 +7,239 @@ on:
   workflow_dispatch:
 
 jobs:
+  deployment-gates:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Run real Alpine deployment shell suites
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Keep the filesystem, PID namespace, and mount policy real. The
+          # pinned image is supplied with the exact tools these suites exercise;
+          # do not replace these invocations with source-string assertions.
+          # CAP_SYS_ADMIN is intentional: bootstrap-secrets.tests.sh creates
+          # bind mounts and checks the kernel mount table. The focused
+          # capability is sufficient for both real suites; do not broaden it
+          # to --privileged.
+          docker run --rm --cap-add=SYS_ADMIN \
+            --tmpfs /config --tmpfs /cache --tmpfs /media/nzbdav \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
+            --workdir /workspace \
+            -e CI=true \
+            alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce \
+            /bin/sh -euxc '
+              apk add --no-cache bash coreutils curl nodejs npm procps python3 su-exec util-linux
+              command -v ps
+              command -v python3
+              command -v curl
+              command -v node
+              command -v timeout
+              test -f /workspace/tools/full-stack-deployment-supervisor.py
+              /workspace/entrypoint.tests.sh
+              /workspace/bootstrap-secrets.tests.sh
+              /workspace/tools/full-stack-deployment-smoke.tests.sh
+            '
+
+      - name: Run Jellyfin plugin entrypoint crash-recovery gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This is a real tmpfs mount test, not a source-text assertion. The
+          # entrypoint suite must be root so it can exercise ownership changes,
+          # and SYS_ADMIN keeps the mount boundary visible to its checks.
+          docker run --rm --cap-add=SYS_ADMIN \
+            --tmpfs /config --tmpfs /cache --tmpfs /media/nzbdav \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
+            --workdir /workspace \
+            alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce \
+            /bin/sh -euxc '
+              apk add --no-cache coreutils findutils util-linux
+              /workspace/jellyfin-stack/entrypoint.tests.sh
+            '
+
+      - name: Run Jellyfin final-image startup gate
+        shell: bash
+        timeout-minutes: 15
+        run: bash jellyfin-stack/image-startup.tests.sh
+
+      - name: Run Jellyfin plugin ABI x64 gate
+        shell: bash
+        run: tools/test-jellyfin-plugin-abi.sh x64
+
+      - name: Run full-stack deployment smoke regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tools/full-stack-deployment-smoke.tests.sh
+
+      - name: Run full-stack volume backup validator and round-trip gate
+        shell: bash
+        timeout-minutes: 15
+        env:
+          CI: true
+        run: |
+          set -Eeuo pipefail
+          cleanup() {
+            set +e
+            # The test suite has its own precise trap; this catches resources
+            # too if the outer timeout interrupts it on the disposable runner.
+            docker ps -aq --filter label=com.docker.compose.project | xargs -r docker rm -f
+            docker volume ls -q --filter label=com.docker.compose.project | xargs -r docker volume rm
+          }
+          trap cleanup EXIT
+          timeout 10m bash docs/support/full-stack-volume-backup.tests.sh
+
+      - name: Run browser onboarding smoke harness contract tests
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          # Focused checks protect the browser harness's redaction, cleanup,
+          # and no-key-copy contracts before the real browser exercise.
+          python3 tools/test-full-stack-onboarding-smoke.py
+
+      - name: Run real browser onboarding smoke before publish
+        shell: bash
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          # The harness allocates a unique Compose project and cleans its exact
+          # labeled containers, volumes, networks, and sanitized evidence.
+          # Keep evidence under runner temp so the failure-only upload can
+          # retain its redacted report without changing harness cleanup.
+          TMPDIR="$RUNNER_TEMP" python3 tools/full-stack-onboarding-smoke.py 2>&1 | tee "$RUNNER_TEMP/full-stack-onboarding-smoke.log"
+
+      - name: Upload browser onboarding smoke evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: full-stack-onboarding-smoke-evidence
+          path: |
+            ${{ runner.temp }}/nzbdav-onboarding-e2e-*/evidence.json
+            ${{ runner.temp }}/full-stack-onboarding-smoke.log
+          if-no-files-found: warn
+
+      - name: Run genuine full-stack deployment smoke before publish
+        shell: bash
+        timeout-minutes: 45
+        run: |
+          set -euo pipefail
+          # This is the publish gate: it builds the checked-out combined
+          # NZBDAV/Jellyfin images and exercises fresh five-service volumes,
+          # reduced capabilities, ownership, PID/health, writes, and restart
+          # persistence. The checked-in supervisor owns the smoke process
+          # session, gives its TERM cleanup trap time to run, and sweeps the
+          # exact session again after the smoke leader exits.
+          python3 tools/full-stack-deployment-supervisor.py \
+            --deadline 40m --grace 60s -- \
+            bash tools/full-stack-deployment-smoke.sh --real
+
+      - name: Clean build outputs and NuGet caches
+        shell: bash
+        run: |
+          set -euo pipefail
+          find backend backend.Tests jellyfin-plugin jellyfin-plugin.Tests -type d \( -name bin -o -name obj \) -prune -exec rm -rf {} +
+          dotnet nuget locals all --clear
+
+      - name: Restore all locked graphs before any no-restore command
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Every project is restored on this clean runner. In particular, do
+          # not rely on a stale backend.Tests/obj/project.assets.json or on a
+          # transitive restore performed by an earlier build.
+          dotnet restore backend/NzbWebDAV.csproj --locked-mode
+          dotnet restore backend.Tests/backend.Tests.csproj --locked-mode
+          dotnet restore jellyfin-plugin/Jellyfin.Plugin.Nzbdav/Jellyfin.Plugin.Nzbdav.csproj --locked-mode
+          dotnet restore jellyfin-plugin.Tests/jellyfin-plugin.Tests.csproj --locked-mode
+          grep -q 'net10.0/linux-musl-x64' backend/packages.lock.json
+          grep -q 'net10.0/linux-musl-arm64' backend/packages.lock.json
+
+      - name: Build and run all .NET tests without restore
+        run: |
+          dotnet build backend/NzbWebDAV.csproj --configuration Release --no-restore
+          dotnet test backend.Tests/backend.Tests.csproj --configuration Release --no-restore
+          dotnet build jellyfin-plugin/Jellyfin.Plugin.Nzbdav/Jellyfin.Plugin.Nzbdav.csproj --configuration Release --no-restore
+          dotnet test jellyfin-plugin.Tests/jellyfin-plugin.Tests.csproj --configuration Release --no-restore
+
+      - name: Audit vulnerable and deprecated packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          audit_dir=$(mktemp -d)
+          deprecated_dir=$(mktemp -d)
+          trap 'rm -rf "$audit_dir" "$deprecated_dir"' EXIT
+
+          # Run the canonical full parser suites. Do not replace these with an
+          # inline subset: they cover schema failures, bounds, and multi-file
+          # fail-closed behavior before real reports are accepted. In
+          # particular, the suite exercises the direct and transitive fixtures
+          # tools/tests/nuget-vulnerabilities-top-level.json and
+          # tools/tests/nuget-vulnerabilities-transitive.json.
+          bash tools/tests/check-nuget-vulnerabilities.tests.sh
+          bash tools/tests/check-nuget-deprecated.tests.sh
+
+          # The JSON reports are the source of truth for every top-level and
+          # transitive advisory. Pass each expected file explicitly so a
+          # missing report cannot disappear through a directory or glob.
+          dotnet list backend/NzbWebDAV.csproj package --vulnerable --include-transitive --format json >"$audit_dir/backend.json"
+          dotnet list backend.Tests/backend.Tests.csproj package --vulnerable --include-transitive --format json >"$audit_dir/backend-tests.json"
+          dotnet list jellyfin-plugin/Jellyfin.Plugin.Nzbdav/Jellyfin.Plugin.Nzbdav.csproj package --vulnerable --include-transitive --format json >"$audit_dir/plugin.json"
+          dotnet list jellyfin-plugin.Tests/jellyfin-plugin.Tests.csproj package --vulnerable --include-transitive --format json >"$audit_dir/plugin-tests.json"
+          python3 tools/check-nuget-vulnerabilities.py \
+            "$audit_dir/backend.json" \
+            "$audit_dir/backend-tests.json" \
+            "$audit_dir/plugin.json" \
+            "$audit_dir/plugin-tests.json"
+
+          dotnet list backend/NzbWebDAV.csproj package --deprecated --include-transitive --format json >"$deprecated_dir/backend.json"
+          dotnet list backend.Tests/backend.Tests.csproj package --deprecated --include-transitive --format json >"$deprecated_dir/backend-tests.json"
+          dotnet list jellyfin-plugin/Jellyfin.Plugin.Nzbdav/Jellyfin.Plugin.Nzbdav.csproj package --deprecated --include-transitive --format json >"$deprecated_dir/plugin.json"
+          dotnet list jellyfin-plugin.Tests/jellyfin-plugin.Tests.csproj package --deprecated --include-transitive --format json >"$deprecated_dir/plugin-tests.json"
+          python3 tools/check-nuget-deprecated.py \
+            "$deprecated_dir/backend.json" \
+            "$deprecated_dir/backend-tests.json" \
+            "$deprecated_dir/plugin.json" \
+            "$deprecated_dir/plugin-tests.json"
+
+  frontend-deployment-gates:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.15.0
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Run frontend tests, build, startup smoke, and zero-vulnerability audit
+        working-directory: frontend
+        run: |
+          npm ci
+          npm test -- --run
+          npm run build
+          npm run build:server
+          npm run test:server-startup
+          npm audit --omit=dev
+
+      - name: Build standalone frontend image and run HTTP/HTTPS image smoke
+        run: |
+          docker build --tag nzbdav-frontend-ci ./frontend
+          FRONTEND_IMAGE_SMOKE_IMAGE=nzbdav-frontend-ci node frontend/server-image-startup-smoke.mjs
+
   build-and-push:
     runs-on: ubuntu-latest
+    needs: [deployment-gates, frontend-deployment-gates]
 
     permissions:
       contents: read
@@ -16,16 +247,16 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -60,7 +291,7 @@ jobs:
           fi
 
       - name: Build and push Docker image (amd64 + arm64)
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
         with:
           context: .
           push: true

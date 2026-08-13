@@ -8,12 +8,13 @@ using System.Text.Json.Nodes;
 using NzbWebDAV.Clients.ProwlarrSetup;
 
 namespace NzbWebDAV.Tests.Clients.ProwlarrSetup;
+[Collection(nameof(ProwlarrSetupCollection))]
 
 public sealed class TransportStateRegressionTests
 {
     private static readonly ProwlarrSetupOptions OneIndexer = new(
         "http://sonarr", "sonarr-key", "http://radarr", "radarr-key",
-        [new ProwlarrNewznabIndexer("NZBDAV", "http://indexer/api", "indexer-key")]);
+        [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example/api", "indexer-key")]);
     private static readonly ProwlarrSetupOptions NoIndexers = new(
         "http://sonarr", "sonarr-key", "http://radarr", "radarr-key", []);
 
@@ -113,7 +114,7 @@ public sealed class TransportStateRegressionTests
             ["baseSettings.grabLimit"] = new string('x', 27_000),
             ["baseSettings.limitsUnit"] = new string('x', 27_000)
         };
-        var largeBaseUrl = "http://indexer/" + new string('b', 60_000);
+        var largeBaseUrl = "https://indexer.example/" + new string('b', 60_000);
         var largeApiKey = new string('i', 60_000);
         var options = new ProwlarrSetupOptions("http://sonarr", "sonarr-secret", "http://radarr", "radarr-secret",
             [new ProwlarrNewznabIndexer("NZBDAV", largeBaseUrl, largeApiKey, fields)]);
@@ -245,9 +246,9 @@ public sealed class TransportStateRegressionTests
     }
 
     [Theory]
-    [InlineData("http://xn--bcher-kva.example:80/root/", "http://bücher.example/root", true)]
-    [InlineData("http://bücher.example/root", "http://xn--bcher-kva.example/root?x=1", false)]
-    [InlineData("http://bücher.example/root/a", "http://bücher.example/root/b", false)]
+    [InlineData("https://xn--bcher-kva.example:443/root/", "https://bücher.example/root", true)]
+    [InlineData("https://bücher.example/root", "https://xn--bcher-kva.example/root?x=1", false)]
+    [InlineData("https://bücher.example/root/a", "https://bücher.example/root/b", false)]
     public async Task Existing_resource_uri_identity_distinguishes_query_and_path(string current, string wanted, bool same)
     {
         var handler = new ProwlarrSetupClientTests.ProwlarrHandler
@@ -317,7 +318,7 @@ public sealed class TransportStateRegressionTests
         Assert.Equal(1, handler.Count("POST", "/api/v1/indexer"));
     }
 
-    private static JsonElement RichIndexer(bool masked) => Json($"{{\"id\":10,\"name\":\"NZBDAV\",\"implementation\":\"Newznab\",\"implementationName\":\"Newznab\",\"configContract\":\"NewznabSettings\",\"appProfileId\":1,\"enable\":true,\"custom\":{{\"keep\":true}},\"fields\":[{{\"name\":\"baseUrl\",\"value\":\"http://indexer/api\"}},{{\"name\":\"apiPath\",\"value\":\"/api\"}},{{\"name\":\"apiKey\",\"value\":\"{(masked ? "********" : "indexer-key")}\"}},{{\"name\":\"additionalParameters\",\"value\":\"\"}},{{\"name\":\"vipExpiration\",\"value\":\"\"}},{{\"name\":\"baseSettings.queryLimit\",\"value\":0}},{{\"name\":\"baseSettings.grabLimit\",\"value\":0}},{{\"name\":\"baseSettings.limitsUnit\",\"value\":\"day\"}}]}}") ;
+    private static JsonElement RichIndexer(bool masked) => Json($"{{\"id\":10,\"name\":\"NZBDAV\",\"implementation\":\"Newznab\",\"implementationName\":\"Newznab\",\"configContract\":\"NewznabSettings\",\"appProfileId\":1,\"enable\":true,\"custom\":{{\"keep\":true}},\"fields\":[{{\"name\":\"baseUrl\",\"value\":\"https://indexer.example/api\"}},{{\"name\":\"apiPath\",\"value\":\"/api\"}},{{\"name\":\"apiKey\",\"value\":\"{(masked ? "********" : "indexer-key")}\"}},{{\"name\":\"additionalParameters\",\"value\":\"\"}},{{\"name\":\"vipExpiration\",\"value\":\"\"}},{{\"name\":\"baseSettings.queryLimit\",\"value\":0}},{{\"name\":\"baseSettings.grabLimit\",\"value\":0}},{{\"name\":\"baseSettings.limitsUnit\",\"value\":\"day\"}}]}}") ;
 
     private static JsonElement Json(string value) => JsonDocument.Parse(value).RootElement.Clone();
 
@@ -368,7 +369,7 @@ public sealed class TransportStateRegressionTests
             if (request.Method == HttpMethod.Get && request.RequestUri!.AbsolutePath.EndsWith("/indexer", StringComparison.OrdinalIgnoreCase) && ++_reads == 2)
             {
                 var item = JsonNode.Parse(_inner.Indexers[0].GetRawText())!.AsObject();
-                if (change == StateChange.BaseUrl) item["fields"]!.AsArray().Single(f => f!["name"]!.GetValue<string>() == "baseUrl")!["value"] = "http://external";
+                if (change == StateChange.BaseUrl) item["fields"]!.AsArray().Single(f => f!["name"]!.GetValue<string>() == "baseUrl")!["value"] = "https://external.example";
                 else { item["enable"] = false; item["newRichMetadata"] = new JsonObject { ["nested"] = new JsonObject { ["value"] = "kept" } }; item["fields"]!.AsArray().Add(new JsonObject { ["name"] = "externalField", ["value"] = "new-field" }); }
                 _inner.Indexers[0] = Json(item.ToJsonString());
             }

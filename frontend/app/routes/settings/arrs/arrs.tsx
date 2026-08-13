@@ -1,15 +1,20 @@
 import { Button, Form, Card, InputGroup, Spinner } from "react-bootstrap";
 import styles from "./arrs.module.css"
 import { type Dispatch, type SetStateAction, useState, useCallback, useEffect } from "react";
+import { csrfFetch } from "~/utils/csrf-fetch";
 
 type ArrsSettingsProps = {
     config: Record<string, string>
     setNewConfig: Dispatch<SetStateAction<Record<string, string>>>
+    clearSecrets?: ReadonlySet<string>
+    hasSecrets?: Record<string, boolean>
+    onSecretChange?: (key: "arr.instances", clear: boolean) => void
 };
 
 interface ConnectionDetails {
     Host: string;
     ApiKey: string;
+    HasApiKey?: boolean;
 }
 
 interface QueueRule {
@@ -86,7 +91,11 @@ const queueStatusMessages = [
     },
 ];
 
-export function ArrsSettings({ config, setNewConfig }: ArrsSettingsProps) {
+export function ArrsSettings({ config, setNewConfig, clearSecrets = new Set(), hasSecrets = {}, onSecretChange }: ArrsSettingsProps) {
+    const clearArrSecrets = (clear: boolean) => {
+        onSecretChange?.("arr.instances", clear);
+        if (clear) setNewConfig({ ...config, "arr.instances": config["arr.instances"] });
+    };
     const arrConfig = JSON.parse(config["arr.instances"]);
 
     const updateConfig = useCallback((newArrConfig: ArrConfig) => {
@@ -98,7 +107,7 @@ export function ArrsSettings({ config, setNewConfig }: ArrsSettingsProps) {
             ...arrConfig,
             RadarrInstances: [
                 ...arrConfig.RadarrInstances,
-                { Host: "", ApiKey: "" }
+                { Host: "", ApiKey: "", HasApiKey: false }
             ]
         });
     }, [arrConfig, updateConfig]);
@@ -126,7 +135,7 @@ export function ArrsSettings({ config, setNewConfig }: ArrsSettingsProps) {
             ...arrConfig,
             SonarrInstances: [
                 ...arrConfig.SonarrInstances,
-                { Host: "", ApiKey: "" }
+                { Host: "", ApiKey: "", HasApiKey: false }
             ]
         });
     }, [arrConfig, updateConfig]);
@@ -176,9 +185,16 @@ export function ArrsSettings({ config, setNewConfig }: ArrsSettingsProps) {
                 <div className={styles.sectionHeader}>
                     <div>Radarr Instances</div>
                     <Button variant="primary" size="sm" onClick={addRadarrInstance}>
+
                         Add
                     </Button>
                 </div>
+                {hasSecrets["arr.instances"] ? <Form.Check
+                    id="arr-api-key-clear"
+                    label="Clear saved Radarr/Sonarr API keys"
+                    checked={clearSecrets.has("arr.instances")}
+                    onChange={e => clearArrSecrets(e.target.checked)}
+                /> : null}
                 {arrConfig.RadarrInstances.length === 0 ? (
                     <p className={styles.alertMessage}>No Radarr instances configured. Click on the "Add" button to get started.</p>
                 ) : (
@@ -190,6 +206,7 @@ export function ArrsSettings({ config, setNewConfig }: ArrsSettingsProps) {
                             type="radarr"
                             onUpdate={updateRadarrInstance}
                             onRemove={removeRadarrInstance}
+                            onSecretChange={value => { if (value.trim()) onSecretChange?.("arr.instances", false); }}
                         />
                     )
                 )}
@@ -213,6 +230,7 @@ export function ArrsSettings({ config, setNewConfig }: ArrsSettingsProps) {
                             type="sonarr"
                             onUpdate={updateSonarrInstance}
                             onRemove={removeSonarrInstance}
+                            onSecretChange={value => { if (value.trim()) onSecretChange?.("arr.instances", false); }}
                         />
                     )
                 )}
@@ -255,9 +273,10 @@ interface InstanceFormProps {
     type: 'radarr' | 'sonarr';
     onUpdate: (index: number, field: keyof ConnectionDetails, value: string) => void;
     onRemove: (index: number) => void;
+    onSecretChange?: (value: string) => void;
 }
 
-function InstanceForm({ instance, index, type, onUpdate, onRemove }: InstanceFormProps) {
+function InstanceForm({ instance, index, type, onUpdate, onRemove, onSecretChange }: InstanceFormProps) {
     const [connectionState, setConnectionState] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
 
     useEffect(() => {
@@ -276,7 +295,7 @@ function InstanceForm({ instance, index, type, onUpdate, onRemove }: InstanceFor
             formData.append('host', host);
             formData.append('apiKey', apiKey);
 
-            const response = await fetch('/api/test-arr-connection', {
+            const response = await csrfFetch('/api/test-arr-connection', {
                 method: 'POST',
                 body: formData
             });
@@ -340,7 +359,10 @@ function InstanceForm({ instance, index, type, onUpdate, onRemove }: InstanceFor
                         type="password"
                         className={styles.input}
                         value={instance.ApiKey}
-                        onChange={e => onUpdate(index, 'ApiKey', e.target.value)} />
+                        onChange={e => {
+                            onUpdate(index, 'ApiKey', e.target.value);
+                            onSecretChange?.(e.target.value);
+                        }} />
                 </Form.Group>
             </Card.Body>
         </Card>
@@ -357,14 +379,14 @@ export function isArrsSettingsValid(newConfig: Record<string, string>) {
 
         // Validate all Radarr instances
         for (const instance of arrConfig.RadarrInstances || []) {
-            if (!isValidHost(instance.Host) || !isValidApiKey(instance.ApiKey)) {
+            if (!isValidHost(instance.Host) || !isValidApiKey(instance.ApiKey, instance.HasApiKey)) {
                 return false;
             }
         }
 
         // Validate all Sonarr instances
         for (const instance of arrConfig.SonarrInstances || []) {
-            if (!isValidHost(instance.Host) || !isValidApiKey(instance.ApiKey)) {
+            if (!isValidHost(instance.Host) || !isValidApiKey(instance.ApiKey, instance.HasApiKey)) {
                 return false;
             }
         }
@@ -385,6 +407,6 @@ function isValidHost(host: string): boolean {
     }
 }
 
-function isValidApiKey(apiKey: string): boolean {
-    return apiKey.trim().length > 0;
+function isValidApiKey(apiKey: string, hasApiKey?: boolean): boolean {
+    return apiKey.trim().length > 0 || hasApiKey === true;
 }

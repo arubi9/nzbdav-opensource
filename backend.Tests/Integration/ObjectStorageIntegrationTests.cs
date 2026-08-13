@@ -15,10 +15,10 @@ namespace backend.Tests.Integration;
 [Collection(nameof(ObjectStorageIntegrationCollection))]
 public sealed class ObjectStorageIntegrationTests
 {
-    [SkippableFact]
+    [Fact]
     public async Task EndToEnd_WriteAndRead()
     {
-        Skip.IfNot(DockerAvailable(), "Docker is required for this integration test.");
+        Assert.SkipUnless(DockerAvailable(), "Docker is required for this integration test.");
 
         await using var fixture = await MinioFixture.StartAsync();
 
@@ -37,10 +37,10 @@ public sealed class ObjectStorageIntegrationTests
         }
     }
 
-    [SkippableFact]
+    [Fact]
     public async Task L1MissL2Hit_PromotesToL1()
     {
-        Skip.IfNot(DockerAvailable(), "Docker is required for this integration test.");
+        Assert.SkipUnless(DockerAvailable(), "Docker is required for this integration test.");
 
         await using var fixture = await MinioFixture.StartAsync();
         await fixture.PutDirectAsync(
@@ -71,10 +71,10 @@ public sealed class ObjectStorageIntegrationTests
         Assert.Equal(1, liveCache.GetStats().SmallFileCount);
     }
 
-    [SkippableFact]
+    [Fact]
     public async Task L2Unreachable_FallsThroughToNntp()
     {
-        Skip.IfNot(DockerAvailable(), "Docker is required for this integration test.");
+        Assert.SkipUnless(DockerAvailable(), "Docker is required for this integration test.");
 
         await using var fixture = await MinioFixture.StartAsync();
         await fixture.Container.StopAsync();
@@ -99,10 +99,10 @@ public sealed class ObjectStorageIntegrationTests
         Assert.Equal(1, fakeNntp.DecodedBodyCallCount);
     }
 
-    [SkippableFact]
+    [Fact]
     public async Task BucketCreation_IsIdempotent()
     {
-        Skip.IfNot(DockerAvailable(), "Docker is required for this integration test.");
+        Assert.SkipUnless(DockerAvailable(), "Docker is required for this integration test.");
 
         await using var fixture = await MinioFixture.StartAsync();
 
@@ -110,10 +110,10 @@ public sealed class ObjectStorageIntegrationTests
         await fixture.Cache.EnsureBucketExistsAsync(CancellationToken.None);
     }
 
-    [SkippableFact]
+    [Fact]
     public async Task MetadataRoundTrip()
     {
-        Skip.IfNot(DockerAvailable(), "Docker is required for this integration test.");
+        Assert.SkipUnless(DockerAvailable(), "Docker is required for this integration test.");
 
         await using var fixture = await MinioFixture.StartAsync();
         var ownerId = Guid.NewGuid();

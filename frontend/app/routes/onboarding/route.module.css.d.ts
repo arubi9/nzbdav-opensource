@@ -1,8 +1,35 @@
 declare const styles: {
+  readonly "add-button": string;
+  readonly "action-form": string;
   readonly "alert": string;
+  readonly "checkbox-label": string;
   readonly "container": string;
+  readonly "entry-grid": string;
+  readonly "inner-form": string;
+  readonly "item-card": string;
+  readonly "item-card-detail": string;
+  readonly "item-card-header": string;
+  readonly "item-card-meta": string;
+  readonly "item-list": string;
   readonly "logo": string;
+  readonly "progress": string;
+  readonly "progress-step": string;
+  readonly "ready-list": string;
+  readonly "small-note": string;
+  readonly "state-complete": string;
+  readonly "state-failed": string;
+  readonly "state-pending": string;
+  readonly "state-running": string;
+  readonly "state-warning": string;
+  readonly "status": string;
+  readonly "status-complete": string;
+  readonly "status-failed": string;
+  readonly "status-pending": string;
+  readonly "status-running": string;
+  readonly "status-warning": string;
+  readonly "subtitle": string;
+  readonly "sub-alert": string;
   readonly "title": string;
+  readonly "wizard-card": string;
 };
 export = styles;
-

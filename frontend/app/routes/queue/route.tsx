@@ -10,9 +10,16 @@ import { useHistoryEvents, useQueueEvents } from "./controllers/events-controlle
 import { initializeQueueHistoryWebsocket } from "./controllers/websocket-controller";
 import { initializeUploadController } from "./controllers/nzb-upload-controller";
 import { useQueueDropzone } from "./controllers/dropzone-controller";
+import { isAuthenticated } from "~/auth/authentication.server";
+import { DEFAULT_NO_CACHE_HEADERS } from "~/onboarding/onboarding-request.server";
 
 const maxItems = 100;
 export async function loader({ request }: Route.LoaderArgs) {
+    // React Router single-fetch can call this loader without root.loader.
+    // Authenticate before constructing any backend request or response body.
+    if (!await isAuthenticated(request)) {
+        return new Response(null, { status: 401, headers: DEFAULT_NO_CACHE_HEADERS });
+    }
     const queuePromise = backendClient.getQueue(maxItems);
     const historyPromise = backendClient.getHistory(maxItems);
     const configPromise = backendClient.getConfig(["api.categories", "api.manual-category"])

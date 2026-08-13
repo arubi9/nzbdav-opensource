@@ -46,9 +46,40 @@ internal static class DavDatabaseContextOptionsFactory
             ? ConvertPostgresUrl(databaseUrl)
             : databaseUrl;
 
-        return UsesPgbouncer(databaseUrl, connectionString, isUriStyle)
+        return IsPgbouncerConnection(databaseUrl)
             ? ApplyPgbouncerCompatibilityFlags(connectionString)
             : connectionString;
+    }
+
+    /// <summary>
+    /// Returns whether a URL identifies a PgBouncer endpoint or a transaction
+    /// pool. Session-scoped migration locks are not safe through either kind
+    /// of pool because the next command is not guaranteed to use the same
+    /// PostgreSQL backend session.
+    /// </summary>
+    public static bool IsPgbouncerConnection(string databaseUrl)
+    {
+        // Pool mode is a PgBouncer setting rather than an Npgsql connection
+        // string keyword, so inspect it before parsing the rest of the string.
+        if (HasTransactionPoolMarker(databaseUrl))
+            return true;
+
+        var isUriStyle =
+            databaseUrl.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase) ||
+            databaseUrl.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase);
+
+        if (isUriStyle)
+        {
+            var uri = new Uri(databaseUrl);
+            return IsPgbouncerHost(uri.Host)
+                || uri.Port == 6432
+                || HasTransactionPoolMarker(uri.Query);
+        }
+
+        var builder = new NpgsqlConnectionStringBuilder(databaseUrl);
+        return IsPgbouncerHost(builder.Host ?? string.Empty)
+            || builder.Port == 6432
+            || HasTransactionPoolMarker(databaseUrl);
     }
 
     public static string ApplyPgbouncerCompatibilityFlags(string connectionString)
@@ -83,12 +114,16 @@ internal static class DavDatabaseContextOptionsFactory
         return $"Host={uri.Host};Port={uri.Port};Database={uri.AbsolutePath.TrimStart('/')};Username={username};Password={password};Pooling=true;MinPoolSize=2;MaxPoolSize=50";
     }
 
-    private static bool UsesPgbouncer(string databaseUrl, string connectionString, bool isUriStyle)
-    {
-        if (isUriStyle)
-            return new Uri(databaseUrl).Host.Contains("pgbouncer", StringComparison.OrdinalIgnoreCase);
+    private static bool IsPgbouncerHost(string host)
+        => host.Contains("pgbouncer", StringComparison.OrdinalIgnoreCase)
+            || host.Contains("transaction", StringComparison.OrdinalIgnoreCase);
 
-        var builder = new NpgsqlConnectionStringBuilder(connectionString);
-        return builder.Host.Contains("pgbouncer", StringComparison.OrdinalIgnoreCase);
+    private static bool HasTransactionPoolMarker(string value)
+    {
+        var normalized = value.Replace(" ", string.Empty, StringComparison.Ordinal)
+            .ToLowerInvariant();
+        return normalized.Contains("pool_mode=transaction", StringComparison.Ordinal)
+            || normalized.Contains("poolmode=transaction", StringComparison.Ordinal)
+            || normalized.Contains("pool-mode=transaction", StringComparison.Ordinal);
     }
 }

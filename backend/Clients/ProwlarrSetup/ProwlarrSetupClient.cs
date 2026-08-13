@@ -9,8 +9,9 @@ namespace NzbWebDAV.Clients.ProwlarrSetup;
 public sealed class ProwlarrSetupOptions
 {
     public ProwlarrSetupOptions(string sonarrUrl, string sonarrApiKey, string radarrUrl, string radarrApiKey,
-        IReadOnlyCollection<ProwlarrNewznabIndexer> indexers, string? prowlarrUrl = null, bool forceSecretUpdate = false)
-    { SonarrUrl = sonarrUrl; SonarrApiKey = sonarrApiKey; RadarrUrl = radarrUrl; RadarrApiKey = radarrApiKey; Indexers = indexers; ProwlarrUrl = prowlarrUrl; ForceSecretUpdate = forceSecretUpdate; }
+        IReadOnlyCollection<ProwlarrNewznabIndexer> indexers, string? prowlarrUrl = null, bool forceSecretUpdate = false,
+        Func<CancellationToken, Task>? assertMutationLeaseAsync = null)
+    { SonarrUrl = sonarrUrl; SonarrApiKey = sonarrApiKey; RadarrUrl = radarrUrl; RadarrApiKey = radarrApiKey; Indexers = indexers; ProwlarrUrl = prowlarrUrl; ForceSecretUpdate = forceSecretUpdate; AssertMutationLeaseAsync = assertMutationLeaseAsync; }
     public string SonarrUrl { get; }
     public string SonarrApiKey { get; }
     public string RadarrUrl { get; }
@@ -19,18 +20,20 @@ public sealed class ProwlarrSetupOptions
     public string? ProwlarrUrl { get; }
     /// <summary>A masked secret is retained on ordinary reconciliation. When true only the resource containing it is PUT.</summary>
     public bool ForceSecretUpdate { get; }
+    public Func<CancellationToken, Task>? AssertMutationLeaseAsync { get; }
     public override string ToString() => $"ProwlarrSetupOptions(Indexers={Indexers?.Count ?? 0})";
 }
 
 public sealed class ProwlarrNewznabIndexer
 {
-    public ProwlarrNewznabIndexer(string name, string baseUrl, string apiKey, IReadOnlyDictionary<string, object?>? fields = null, int? appProfileId = null)
-    { Name = name; BaseUrl = baseUrl; ApiKey = apiKey; Fields = fields; AppProfileId = appProfileId; }
+    public ProwlarrNewznabIndexer(string name, string baseUrl, string apiKey, IReadOnlyDictionary<string, object?>? fields = null, int? appProfileId = null, bool allowPrivateNetwork = false)
+    { Name = name; BaseUrl = baseUrl; ApiKey = apiKey; Fields = fields; AppProfileId = appProfileId; AllowPrivateNetwork = allowPrivateNetwork; }
     public string Name { get; }
     public string BaseUrl { get; }
     public string ApiKey { get; }
     public IReadOnlyDictionary<string, object?>? Fields { get; }
     public int? AppProfileId { get; }
+    public bool AllowPrivateNetwork { get; }
     public override string ToString() => $"ProwlarrNewznabIndexer(Name={Name}, Fields={Fields?.Count ?? 0})";
 }
 
@@ -69,7 +72,7 @@ public sealed class ProwlarrSetupClient : IDisposable
     private readonly TimeSpan _timeout;
     private readonly bool _ownsHttp;
 
-    public ProwlarrSetupClient(Uri prowlarrUrl, string apiKey, TimeSpan? timeout = null) : this(CreateSafeClient(), true, prowlarrUrl, apiKey, timeout) { }
+    public ProwlarrSetupClient(Uri prowlarrUrl, string apiKey, TimeSpan? timeout = null) : this(SetupHttpClientFactory.Create(), true, prowlarrUrl, apiKey, timeout) { }
     public ProwlarrSetupClient(string prowlarrUrl, string apiKey, TimeSpan? timeout = null) : this(new Uri(prowlarrUrl, UriKind.Absolute), apiKey, timeout) { }
     // Internal solely for deterministic loopback tests. Production has no handler seam.
     internal ProwlarrSetupClient(HttpMessageHandler handler, Uri prowlarrUrl, string apiKey, TimeSpan? timeout = null) : this(new HttpClient(handler, true), true, prowlarrUrl, apiKey, timeout) { }
@@ -85,20 +88,106 @@ public sealed class ProwlarrSetupClient : IDisposable
         _http = http; _ownsHttp = ownsHttp;
     }
 
-    public async Task<ProwlarrSetupResult> SetupAsync(ProwlarrSetupOptions options, CancellationToken cancellationToken = default)
+    /// <summary>Verifies the exact managed applications and requested indexers.</summary>
+    public async Task<bool> VerifyManagedResourcesAsync(
+        ProwlarrSetupOptions options,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(_timeout);
+        var token = timeout.Token;
+        var snapshot = Capture(options, token);
+        try
+        {
+            Validate(snapshot);
+            using var indexerSchemaDoc = await GetDocumentAsync("indexer/schema", token, cancellationToken).ConfigureAwait(false);
+            var indexerSchema = SelectSchema(indexerSchemaDoc.Document.RootElement, "Newznab", "NewznabSettings", "Generic Newznab", true, token);
+            var profile = snapshot.Indexers.Count == 0
+                ? 0
+                : await SelectProfileAsync(token, cancellationToken, snapshot.Indexers).ConfigureAwait(false);
+            using var applicationsSchemaDoc = await GetDocumentAsync("applications/schema", token, cancellationToken).ConfigureAwait(false);
+            var sonarrSchema = SelectSchema(applicationsSchemaDoc.Document.RootElement, "Sonarr", "SonarrSettings", null, false, token);
+            var radarrSchema = SelectSchema(applicationsSchemaDoc.Document.RootElement, "Radarr", "RadarrSettings", null, false, token);
+            using var applications = await GetDocumentAsync("applications", token, cancellationToken).ConfigureAwait(false);
+            using var indexers = await GetDocumentAsync("indexer", token, cancellationToken).ConfigureAwait(false);
+
+            foreach (var indexer in snapshot.Indexers)
+            {
+                var existing = FindResource(indexers.Document.RootElement, indexer.Name, "indexer", indexer, null, token);
+                if (existing is null)
+                    return false;
+                // A masked field cannot fingerprint the caller's supplied
+                // secret. Build the test payload with the exact input so a
+                // stale rotated key cannot be reported Ready merely because
+                // the upstream returned "********".
+                using var desired = BuildPayload(indexerSchema, existing, indexer, null, profile, true, token);
+                var indexerId = ResourceId(existing);
+                // A GET masks secrets and therefore cannot prove which
+                // credential is persisted. First compare the non-secret
+                // fingerprint, then ask Prowlarr to test this saved id via
+                // test-all. Never substitute the caller payload for this.
+                if (!Equivalent(existing, desired, indexerSchema, false)
+                    || !await TestPersistedResourceAsync("indexer", indexerId, token, cancellationToken).ConfigureAwait(false))
+                    return false;
+            }
+
+            var prowlarrUrl = snapshot.ProwlarrUrl ?? _baseUri.ToString();
+            var sonarr = new App("NZBDAV Sonarr", "Sonarr", snapshot.SonarrUrl, snapshot.SonarrApiKey, sonarrSchema, prowlarrUrl);
+            var radarr = new App("NZBDAV Radarr", "Radarr", snapshot.RadarrUrl, snapshot.RadarrApiKey, radarrSchema, prowlarrUrl);
+            foreach (var app in new[] { sonarr, radarr })
+            {
+                var existing = FindResource(applications.Document.RootElement, app.Name, "applications", null, app, token);
+                if (existing is null)
+                    return false;
+                using var desired = BuildPayload(app.Schema, existing, null, app, 0, true, token);
+                var applicationId = ResourceId(existing);
+                if (!Equivalent(existing, desired, app.Schema, false)
+                    || !await TestPersistedResourceAsync("applications", applicationId, token, cancellationToken).ConfigureAwait(false))
+                    return false;
+            }
+
+            return true;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return false;
+        }
+        catch (ProwlarrSetupTransportException)
+        {
+            return false;
+        }
+        catch (ProwlarrSetupHttpException)
+        {
+            return false;
+        }
+        catch (ProwlarrSetupProtocolException)
+        {
+            return false;
+        }
+        finally
+        {
+            snapshot.Clear();
+        }
+    }
+
+    public async Task<ProwlarrSetupResult> SetupAsync(
+        ProwlarrSetupOptions options,
+        CancellationToken cancellationToken = default,
+        Func<CancellationToken, Task>? assertMutationLeaseAsync = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(_timeout); // includes snapshotting and waiting for the process-wide gate.
-        try { return await SetupCoreAsync(options, timeout.Token, cancellationToken).ConfigureAwait(false); }
+        try { return await SetupCoreAsync(options, timeout.Token, cancellationToken, assertMutationLeaseAsync).ConfigureAwait(false); }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { throw new ProwlarrSetupTransportException(); }
     }
 
-    private async Task<ProwlarrSetupResult> SetupCoreAsync(ProwlarrSetupOptions source, CancellationToken token, CancellationToken callerToken)
+    private async Task<ProwlarrSetupResult> SetupCoreAsync(ProwlarrSetupOptions source, CancellationToken token, CancellationToken callerToken, Func<CancellationToken, Task>? assertMutationLeaseAsync)
     {
         callerToken.ThrowIfCancellationRequested();
         token.ThrowIfCancellationRequested();
-        var snapshot = Capture(source, token); // before any await: caller collections are not aliases.
+        var snapshot = Capture(source, token, assertMutationLeaseAsync); // before any await: caller collections are not aliases.
         try
         {
             Validate(snapshot);
@@ -118,7 +207,7 @@ public sealed class ProwlarrSetupClient : IDisposable
                     foreach (var indexer in snapshot.Indexers)
                     {
                         token.ThrowIfCancellationRequested();
-                        result.Add(await ReconcileAsync("indexer", indexer.Name, indexer, indexerSchema, profile, null, token, callerToken).ConfigureAwait(false));
+                        result.Add(await ReconcileAsync("indexer", indexer.Name, indexer, indexerSchema, profile, null, snapshot.AssertMutationLeaseAsync, token, callerToken).ConfigureAwait(false));
                     }
                 }
                 using var applicationSchemaDoc = await GetDocumentAsync("applications/schema", token, callerToken).ConfigureAwait(false);
@@ -133,7 +222,7 @@ public sealed class ProwlarrSetupClient : IDisposable
                 foreach (var app in applications)
                 {
                     token.ThrowIfCancellationRequested();
-                    result.Add(await ReconcileAsync("applications", app.Name, null, app.Schema, 0, app with { ProwlarrUrl = prowlarrUrl }, token, callerToken).ConfigureAwait(false));
+                    result.Add(await ReconcileAsync("applications", app.Name, null, app.Schema, 0, app with { ProwlarrUrl = prowlarrUrl }, snapshot.AssertMutationLeaseAsync, token, callerToken).ConfigureAwait(false));
                 }
                 return new ProwlarrSetupResult(result.Created, result.Updated, result.Unchanged);
             }
@@ -142,7 +231,7 @@ public sealed class ProwlarrSetupClient : IDisposable
         finally { snapshot.Clear(); }
     }
 
-    private async Task<Outcome> ReconcileAsync(string resource, string name, IndexerSnapshot? indexer, Schema schema, int profile, App? app, CancellationToken token, CancellationToken callerToken)
+    private async Task<Outcome> ReconcileAsync(string resource, string name, IndexerSnapshot? indexer, Schema schema, int profile, App? app, Func<CancellationToken, Task>? assertMutationLeaseAsync, CancellationToken token, CancellationToken callerToken)
     {
         using var collection = await GetDocumentAsync(resource, token, callerToken).ConfigureAwait(false);
         var existing = FindResource(collection.Document.RootElement, name, resource, indexer, app, token);
@@ -162,7 +251,7 @@ public sealed class ProwlarrSetupClient : IDisposable
             var id = existing is not null ? ResourceId(existing) : 0;
             try
             {
-                await SendJsonAsync(id == 0 ? HttpMethod.Post : HttpMethod.Put, id == 0 ? resource : $"{resource}/{id}", payload, token, callerToken).ConfigureAwait(false);
+                await SendJsonAsync(id == 0 ? HttpMethod.Post : HttpMethod.Put, id == 0 ? resource : $"{resource}/{id}", payload, token, callerToken, assertMutationLeaseAsync).ConfigureAwait(false);
                 return id == 0 ? Outcome.Created : Outcome.Updated;
             }
             catch (ProwlarrSetupHttpException ex) when (id == 0 && ex.StatusCode == HttpStatusCode.Conflict)
@@ -175,7 +264,7 @@ public sealed class ProwlarrSetupClient : IDisposable
                 try
                 {
                     if (Equivalent(winner, retry, schema, CurrentForceSecretUpdate)) return Outcome.Unchanged;
-                    await SendJsonAsync(HttpMethod.Put, $"{resource}/{ResourceId(winner)}", retry, token, callerToken).ConfigureAwait(false);
+                    await SendJsonAsync(HttpMethod.Put, $"{resource}/{ResourceId(winner)}", retry, token, callerToken, assertMutationLeaseAsync).ConfigureAwait(false);
                     return Outcome.Updated;
                 }
                 finally { retry.Dispose(); }
@@ -285,7 +374,15 @@ public sealed class ProwlarrSetupClient : IDisposable
         var old = Fields(existing.Element); var desired = Fields(wanted);
         foreach (var field in schema.Fields)
         {
-            if (!old.TryGetValue(field.Name, out var o) || !desired.TryGetValue(field.Name, out var d) || !o.HasValue) return false;
+            if (!old.TryGetValue(field.Name, out var o) || !desired.TryGetValue(field.Name, out var d) || !d.HasValue) return false;
+            // Prowlarr omits value for persisted default fields. That is only
+            // equivalent when the desired payload retains the pinned schema
+            // default; caller-supplied non-default values still fail closed.
+            if (!o.HasValue)
+            {
+                if (!JsonElement.DeepEquals(d.Value, field.Default)) return false;
+                continue;
+            }
             if (field.IsSecret && o.IsMasked && !force) continue;
             if (!JsonElement.DeepEquals(o.Value, d.Value)) return false;
         }
@@ -362,23 +459,75 @@ public sealed class ProwlarrSetupClient : IDisposable
         using var response = exchange.Response; if (response.StatusCode != HttpStatusCode.OK) throw new ProwlarrSetupHttpException(path, response.StatusCode);
         return await ReadDocumentAsync(response, path, token, callerToken).ConfigureAwait(false);
     }
-    private async Task SendJsonAsync(HttpMethod method, string path, OwnedPayload payload, CancellationToken token, CancellationToken callerToken)
+    private async Task SendJsonAsync(HttpMethod method, string path, OwnedPayload payload, CancellationToken token, CancellationToken callerToken, Func<CancellationToken, Task>? assertMutationLeaseAsync = null)
     {
-        using var exchange = await ExecuteAsync(method, path, payload, token, callerToken).ConfigureAwait(false);
+        using var exchange = await ExecuteAsync(method, path, payload, token, callerToken, assertMutationLeaseAsync).ConfigureAwait(false);
         using var response = exchange.Response;
         if (response.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.Created or HttpStatusCode.Accepted or HttpStatusCode.NoContent)) throw new ProwlarrSetupHttpException(path, response.StatusCode);
         if (response.StatusCode != HttpStatusCode.NoContent && response.Content.Headers.ContentLength is not 0) { using var body = await ReadDocumentAsync(response, path, token, callerToken).ConfigureAwait(false); }
     }
-    private async Task<Exchange> ExecuteAsync(HttpMethod method, string path, OwnedPayload? payload, CancellationToken token, CancellationToken callerToken)
+
+    /// <summary>
+    /// Tests the persisted resources, rather than testing a caller-supplied
+    /// copy of a resource. Prowlarr 2.5.2.5491 exposes this as the inherited
+    /// provider test-all endpoint; its result includes the persisted resource
+    /// id and validation outcome.
+    /// </summary>
+    private async Task<bool> TestPersistedResourceAsync(string resource, int id, CancellationToken token, CancellationToken callerToken)
+    {
+        // Prowlarr exposes persisted resource validation as POST, but testall is
+        // read-only. Do not invoke the mutation lease callback for this probe.
+        using var exchange = await ExecuteAsync(HttpMethod.Post, $"{resource}/testall", null, token, callerToken).ConfigureAwait(false);
+        using var response = exchange.Response;
+        if (response.StatusCode != HttpStatusCode.OK)
+            return false;
+
+        try
+        {
+            using var document = await ReadDocumentAsync(response, $"{resource}/testall", token, callerToken).ConfigureAwait(false);
+            if (document.Document.RootElement.ValueKind != JsonValueKind.Array)
+                return false;
+
+            foreach (var result in document.Document.RootElement.EnumerateArray())
+            {
+                token.ThrowIfCancellationRequested();
+                if (result.ValueKind != JsonValueKind.Object
+                    || !result.TryGetProperty("id", out var resultIdValue)
+                    || !resultIdValue.TryGetInt32(out var resultId)
+                    || resultId != id)
+                    continue;
+
+                // ProviderTestAllResult.IsValid is serialized by the pinned
+                // API as isValid. Treat a missing/non-boolean value as failure.
+                return result.TryGetProperty("isValid", out var valid)
+                    && valid.ValueKind == JsonValueKind.True;
+            }
+        }
+        catch (ProwlarrSetupProtocolException)
+        {
+            return false;
+        }
+
+        return false;
+    }
+
+    private async Task<Exchange> ExecuteAsync(HttpMethod method, string path, OwnedPayload? payload, CancellationToken token, CancellationToken callerToken, Func<CancellationToken, Task>? assertMutationLeaseAsync = null)
     {
         using var request = new HttpRequestMessage(method, Endpoint(path)); request.Headers.TryAddWithoutValidation(ApiKeyHeader, _apiKey);
         if (payload is not null) request.Content = new SecretJsonContent(payload);
+        var isMutation = assertMutationLeaseAsync is not null
+            && (method == HttpMethod.Post || method == HttpMethod.Put || method == HttpMethod.Delete);
+        if (isMutation)
+            await assertMutationLeaseAsync!(token).ConfigureAwait(false);
+
+        HttpResponseMessage? response = null;
         try
         {
-            var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
+            response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
             if ((int)response.StatusCode is >= 300 and < 400)
             {
                 response.Dispose();
+                response = null;
                 throw new ProwlarrSetupTransportException();
             }
             return new Exchange(response);
@@ -387,6 +536,24 @@ public sealed class ProwlarrSetupClient : IDisposable
         catch (OperationCanceledException) { throw new ProwlarrSetupTransportException(); }
         catch (ProwlarrSetupTransportException) { throw; }
         catch (HttpRequestException) { throw new ProwlarrSetupTransportException(); }
+        finally
+        {
+            if (isMutation)
+            {
+                try
+                {
+                    // The post-write assertion is required even for a
+                    // transport error or an acknowledgement lost after the
+                    // server committed the mutation.
+                    await assertMutationLeaseAsync!(CancellationToken.None).ConfigureAwait(false);
+                }
+                catch
+                {
+                    response?.Dispose();
+                    throw;
+                }
+            }
+        }
     }
     private static async Task<OwnedDocument> ReadDocumentAsync(HttpResponseMessage response, string path, CancellationToken token, CancellationToken callerToken)
     {
@@ -475,8 +642,6 @@ public sealed class ProwlarrSetupClient : IDisposable
         var root = path.Length > 1 && path[^1] == '/' ? path[..^1] : path;
         return root.StartsWith("/", StringComparison.Ordinal) ? root : "/" + root;
     }
-    private static HttpClient CreateSafeClient() => new(new HttpClientHandler { AllowAutoRedirect = false }, true);
-
     private static Uri CanonicalBase(Uri uri, string parameter)
     {
         if (!uri.IsAbsoluteUri || !uri.Scheme.Equals("http", StringComparison.OrdinalIgnoreCase) && !uri.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase) || !string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment) || !string.IsNullOrEmpty(uri.UserInfo)) throw new ArgumentException("Prowlarr URL must be an absolute HTTP URL without credentials, query strings, or fragments.", parameter);
@@ -498,7 +663,7 @@ public sealed class ProwlarrSetupClient : IDisposable
     private static bool Credential(string name) => name.Contains("apikey", StringComparison.OrdinalIgnoreCase) || name.Contains("password", StringComparison.OrdinalIgnoreCase) || name.Contains("secret", StringComparison.OrdinalIgnoreCase) || name.Contains("token", StringComparison.OrdinalIgnoreCase);
     private static JsonElement RequireArray(JsonElement root, string resource, CancellationToken token) { if (root.ValueKind != JsonValueKind.Array) throw new ProwlarrSetupProtocolException($"Prowlarr {resource} response is not an array."); return root; }
 
-    private static Snapshot Capture(ProwlarrSetupOptions source, CancellationToken token)
+    private static Snapshot Capture(ProwlarrSetupOptions source, CancellationToken token, Func<CancellationToken, Task>? assertMutationLeaseAsync = null)
     {
         ArgumentNullException.ThrowIfNull(source.Indexers);
 
@@ -550,9 +715,9 @@ public sealed class ProwlarrSetupClient : IDisposable
                     catch (NotSupportedException) { throw new ProwlarrSetupProtocolException("Prowlarr indexer contains an invalid field value."); }
                     if (!fields.TryAdd(key, value)) throw new ProwlarrSetupConflictException("Prowlarr indexer contains duplicate fields.");
                 }
-                list.Add(new IndexerSnapshot(input.Name, input.BaseUrl, input.ApiKey, fields, input.AppProfileId));
+                list.Add(new IndexerSnapshot(input.Name, input.BaseUrl, input.ApiKey, fields, input.AppProfileId, input.AllowPrivateNetwork));
             }
-            return new Snapshot(source.SonarrUrl, source.SonarrApiKey, source.RadarrUrl, source.RadarrApiKey, source.ProwlarrUrl, source.ForceSecretUpdate, list);
+            return new Snapshot(source.SonarrUrl, source.SonarrApiKey, source.RadarrUrl, source.RadarrApiKey, source.ProwlarrUrl, source.ForceSecretUpdate, assertMutationLeaseAsync ?? source.AssertMutationLeaseAsync, list);
         }
         catch { throw; }
     }
@@ -572,15 +737,18 @@ public sealed class ProwlarrSetupClient : IDisposable
         {
             if (string.IsNullOrWhiteSpace(i.Name) || i.Name.Length > MaxStringChars || string.IsNullOrWhiteSpace(i.ApiKey) || i.ApiKey.Length > MaxStringChars || !names.Add(i.Name.Trim())) throw new ProwlarrSetupConflictException("Requested Prowlarr indexer names must be unique.");
             Url(i.BaseUrl, "Newznab URL", true);
+            if (!NzbWebDAV.Clients.Newznab.NewznabUrlPolicy.IsAllowed(
+                    new Uri(i.BaseUrl, UriKind.Absolute), i.AllowPrivateNetwork))
+                throw new ArgumentException("Newznab URL does not satisfy the network policy.");
         }
     }
     private static void Url(string value, string description, bool allowQuery) { if (string.IsNullOrWhiteSpace(value) || value.Length > MaxStringChars || !Uri.TryCreate(value, UriKind.Absolute, out var uri) || (uri.Scheme is not ("http" or "https")) || (!allowQuery && !string.IsNullOrEmpty(uri.Query)) || !string.IsNullOrEmpty(uri.Fragment) || !string.IsNullOrEmpty(uri.UserInfo)) throw new ArgumentException($"{description} must be an absolute HTTP URL without credentials or fragments."); }
     public void Dispose() { if (_ownsHttp) _http.Dispose(); }
 
-    private sealed class Snapshot(string sonarrUrl, string sonarrKey, string radarrUrl, string radarrKey, string? prowlarrUrl, bool force, List<IndexerSnapshot> indexers)
-    { public string SonarrUrl { get; } = sonarrUrl; public string SonarrApiKey { get; private set; } = sonarrKey; public string RadarrUrl { get; } = radarrUrl; public string RadarrApiKey { get; private set; } = radarrKey; public string? ProwlarrUrl { get; } = prowlarrUrl; public bool Force { get; } = force; public List<IndexerSnapshot> Indexers { get; } = indexers; public void Clear() { SonarrApiKey = RadarrApiKey = string.Empty; foreach (var i in Indexers) i.Clear(); } }
-    private sealed class IndexerSnapshot(string name, string url, string key, Dictionary<string, ScalarValue> fields, int? profile)
-    { public string Name { get; } = name; public string BaseUrl { get; } = url; public string ApiKey { get; private set; } = key; public Dictionary<string, ScalarValue> Fields { get; } = fields; public int? AppProfileId { get; } = profile; public void Clear() { ApiKey = string.Empty; Fields.Clear(); } }
+    private sealed class Snapshot(string sonarrUrl, string sonarrKey, string radarrUrl, string radarrKey, string? prowlarrUrl, bool force, Func<CancellationToken, Task>? assertMutationLeaseAsync, List<IndexerSnapshot> indexers)
+    { public string SonarrUrl { get; } = sonarrUrl; public string SonarrApiKey { get; private set; } = sonarrKey; public string RadarrUrl { get; } = radarrUrl; public string RadarrApiKey { get; private set; } = radarrKey; public string? ProwlarrUrl { get; } = prowlarrUrl; public bool Force { get; } = force; public Func<CancellationToken, Task>? AssertMutationLeaseAsync { get; } = assertMutationLeaseAsync; public List<IndexerSnapshot> Indexers { get; } = indexers; public void Clear() { SonarrApiKey = RadarrApiKey = string.Empty; foreach (var i in Indexers) i.Clear(); } }
+    private sealed class IndexerSnapshot(string name, string url, string key, Dictionary<string, ScalarValue> fields, int? profile, bool allowPrivateNetwork)
+    { public string Name { get; } = name; public string BaseUrl { get; } = url; public string ApiKey { get; private set; } = key; public Dictionary<string, ScalarValue> Fields { get; } = fields; public int? AppProfileId { get; } = profile; public bool AllowPrivateNetwork { get; } = allowPrivateNetwork; public void Clear() { ApiKey = string.Empty; Fields.Clear(); } }
     private sealed record Schema(JsonElement Source, string Implementation, string ImplementationName, string Contract, List<SchemaField> Fields)
     { public IEnumerable<string> Names => Fields.Select(x => x.Name); }
     private sealed record SchemaField(string Name, JsonElement Source, JsonElement Default, bool IsSecret);

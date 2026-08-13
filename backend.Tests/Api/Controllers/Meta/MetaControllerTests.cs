@@ -74,6 +74,11 @@ public sealed class MetaControllerTests
             {
                 ConfigName = "api.key",
                 ConfigValue = "unit-test-api-key"
+            },
+            new ConfigItem
+            {
+                ConfigName = "api.strm-key",
+                ConfigValue = "unit-test-api-key"
             }
         ]);
 
@@ -150,4 +155,4 @@ public sealed class MetaControllerTests
 }
 
 [CollectionDefinition("Meta controller tests", DisableParallelization = true)]
-public sealed class MetaControllerTestsCollectionDefinition;
+public sealed class MetaControllerTestsCollectionDefinition : ICollectionFixture<backend.Tests.Config.ProcessEnvironmentFixture>;

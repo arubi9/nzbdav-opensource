@@ -9,13 +9,22 @@ type SabnzbdSettingsProps = {
     config: Record<string, string>
     setNewConfig: Dispatch<SetStateAction<Record<string, string>>>
     appVersion: string,
+    hasSecrets?: Record<string, boolean>,
+    clearSecrets?: ReadonlySet<string>,
+    onSecretChange?: (key: "api.key", clear: boolean) => void,
 };
 
-export function SabnzbdSettings({ config, setNewConfig, appVersion }: SabnzbdSettingsProps) {
+export function SabnzbdSettings({ config, setNewConfig, appVersion, hasSecrets = {}, clearSecrets = new Set(), onSecretChange }: SabnzbdSettingsProps) {
 
     const onRefreshApiKey = useCallback(() => {
-        setNewConfig({ ...config, "api.key": generateNewApiKey() })
-    }, [setNewConfig, config]);
+        setNewConfig({ ...config, "api.key": generateNewApiKey() });
+        onSecretChange?.("api.key", false);
+    }, [setNewConfig, config, onSecretChange]);
+
+    const onClearApiKey = useCallback((clear: boolean) => {
+        onSecretChange?.("api.key", clear);
+        if (clear) setNewConfig({ ...config, "api.key": "" });
+    }, [setNewConfig, config, onSecretChange]);
 
     const ensureArticleExistanceSetting =
         useEnsureArticleExistanceSetting(config, setNewConfig);
@@ -29,12 +38,19 @@ export function SabnzbdSettings({ config, setNewConfig, appVersion }: SabnzbdSet
                         type="text"
                         id="api-key-input"
                         aria-describedby="api-key-help"
+                        placeholder={hasSecrets["api.key"] ? "Configured — refresh to replace" : undefined}
                         value={config["api.key"]}
                         readOnly />
                     <Button variant="primary" onClick={onRefreshApiKey}>
                         Refresh
                     </Button>
                 </InputGroup>
+                {hasSecrets["api.key"] ? <Form.Check
+                    id="api-key-clear"
+                    label="Clear saved API key"
+                    checked={clearSecrets.has("api.key")}
+                    onChange={e => onClearApiKey(e.target.checked)}
+                /> : null}
                 <Form.Text id="api-key-help" muted>
                     Use this API key when configuring your download client in Radarr or Sonarr.
                 </Form.Text>

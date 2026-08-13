@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "parameters": "--vulnerable --include-transitive",
+  "projects": [
+    {
+      "path": "C:/src/clean-net10/clean-net10.csproj"
+    }
+  ]
+}

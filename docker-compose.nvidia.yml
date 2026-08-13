@@ -1,0 +1,7 @@
+# Optional GPU acceleration. Apply with:
+# docker compose -f docker-compose.full-stack.yml -f docker-compose.nvidia.yml up -d
+services:
+  jellyfin:
+    gpus: all
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility

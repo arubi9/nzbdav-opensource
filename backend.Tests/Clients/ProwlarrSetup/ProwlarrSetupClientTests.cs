@@ -7,6 +7,7 @@ using System.Text.Json.Nodes;
 using NzbWebDAV.Clients.ProwlarrSetup;
 
 namespace NzbWebDAV.Tests.Clients.ProwlarrSetup;
+[Collection(nameof(ProwlarrSetupCollection))]
 
 public sealed class ProwlarrSetupClientTests
 {
@@ -20,10 +21,52 @@ public sealed class ProwlarrSetupClientTests
     }
 
     [Fact]
+    public async Task Mutation_lease_is_fenced_before_and_after_each_prowlarr_write()
+    {
+        var events = new List<string>();
+        var handler = new ProwlarrHandler { ExpectedApiKey = "key", OrderedEvents = events };
+        using var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
+        var options = new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r",
+            [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example", "i")]);
+        Task FenceAsync(CancellationToken _)
+        {
+            events.Add("fence");
+            return Task.CompletedTask;
+        }
+
+        await client.SetupAsync(options, default, FenceAsync);
+
+        var writes = events.Where(value => value.StartsWith("write:", StringComparison.Ordinal)).ToArray();
+        Assert.Equal(3, writes.Length);
+        var expected = writes.SelectMany(write => new[] { "fence", write, "fence" });
+        Assert.Equal(expected, events);
+    }
+
+    [Fact]
+    public async Task Lease_takeover_before_a_prowlarr_write_stops_later_writes()
+    {
+        var calls = 0;
+        var events = new List<string>();
+        var handler = new ProwlarrHandler { ExpectedApiKey = "key", OrderedEvents = events };
+        using var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
+        var options = new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r",
+            [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example", "i")]);
+        Task FenceAsync(CancellationToken _)
+        {
+            if (Interlocked.Increment(ref calls) == 3)
+                throw new InvalidOperationException("lease taken over");
+            return Task.CompletedTask;
+        }
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => client.SetupAsync(options, default, FenceAsync));
+        Assert.Single(handler.OrderedEvents ?? [], value => value.StartsWith("write:", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Desired_indexer_count_is_bounded_before_network_io()
     {
         var handler = new ProwlarrHandler(); using var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
-        var indexers = Enumerable.Range(0, 101).Select(i => new ProwlarrNewznabIndexer($"Indexer{i}", "http://indexer", "key")).ToArray();
+        var indexers = Enumerable.Range(0, 101).Select(i => new ProwlarrNewznabIndexer($"Indexer{i}", "https://indexer.example", "key")).ToArray();
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => client.SetupAsync(new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r", indexers)));
         Assert.Empty(handler.RequestUris);
     }
@@ -42,7 +85,7 @@ public sealed class ProwlarrSetupClientTests
     {
         var fields = new DeceptiveFields(65);
         var handler = new ProwlarrHandler(); using var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
-        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => client.SetupAsync(new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r", [new ProwlarrNewznabIndexer("one", "http://indexer", "i", fields)])));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => client.SetupAsync(new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r", [new ProwlarrNewznabIndexer("one", "https://indexer.example", "i", fields)])));
         Assert.Equal(65, fields.Enumerated);
         Assert.Empty(handler.RequestUris);
     }
@@ -53,7 +96,7 @@ public sealed class ProwlarrSetupClientTests
         var value = new string('x', 60_000);
         var fields = Enumerable.Range(0, 20).ToDictionary(i => $"field{i}", _ => (object?)value);
         var handler = new ProwlarrHandler(); using var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
-        await Assert.ThrowsAsync<ProwlarrSetupProtocolException>(() => client.SetupAsync(new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r", [new ProwlarrNewznabIndexer("one", "http://indexer", "i", fields)])));
+        await Assert.ThrowsAsync<ProwlarrSetupProtocolException>(() => client.SetupAsync(new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r", [new ProwlarrNewznabIndexer("one", "https://indexer.example", "i", fields)])));
         Assert.Empty(handler.RequestUris);
     }
 
@@ -61,10 +104,180 @@ public sealed class ProwlarrSetupClientTests
     public async Task Force_secret_update_puts_existing_managed_resources_once()
     {
         var handler = new ProwlarrHandler { ExpectedApiKey = "key" }; using var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
-        var options = new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r", [new ProwlarrNewznabIndexer("one", "http://indexer", "i")]);
+        var options = new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r", [new ProwlarrNewznabIndexer("one", "https://indexer.example", "i")]);
         await client.SetupAsync(options);
-        await client.SetupAsync(new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r", [new ProwlarrNewznabIndexer("one", "http://indexer", "i")], forceSecretUpdate: true));
+        await client.SetupAsync(new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r", [new ProwlarrNewznabIndexer("one", "https://indexer.example", "i")], forceSecretUpdate: true));
         Assert.Equal(3, handler.Count("PUT", "/api/v1/indexer/10") + handler.Count("PUT", "/api/v1/applications/11") + handler.Count("PUT", "/api/v1/applications/12"));
+    }
+
+    [Fact]
+    public async Task Forced_rotation_writes_supplied_indexer_and_discovered_arr_keys_instead_of_masked_values()
+    {
+        var handler = new ProwlarrHandler { ExpectedApiKey = "key" };
+        using var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
+        var first = new ProwlarrSetupOptions("http://sonarr", "sonarr-old", "http://radarr", "radarr-old",
+            [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example", "indexer-old")]);
+        await client.SetupAsync(first);
+
+        await client.SetupAsync(new ProwlarrSetupOptions("http://sonarr", "sonarr-rotated", "http://radarr", "radarr-rotated",
+            [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example", "indexer-rotated")], forceSecretUpdate: true));
+
+        Assert.Equal("indexer-rotated", Field(handler.Indexers.Single(x => x.GetProperty("name").GetString() == "NZBDAV"), "apiKey").GetString());
+        Assert.Equal("sonarr-rotated", Field(handler.Applications.Single(x => x.GetProperty("name").GetString() == "NZBDAV Sonarr"), "apiKey").GetString());
+        Assert.Equal("radarr-rotated", Field(handler.Applications.Single(x => x.GetProperty("name").GetString() == "NZBDAV Radarr"), "apiKey").GetString());
+        Assert.Equal(3, handler.Count("PUT", "/api/v1/indexer/10") + handler.Count("PUT", "/api/v1/applications/11") + handler.Count("PUT", "/api/v1/applications/12"));
+    }
+
+    [Fact]
+    public async Task Pinned_full_indexer_catalog_verifies_the_exact_generic_newznab_schema()
+    {
+        var handler = new ProwlarrHandler
+        {
+            ExpectedApiKey = "key",
+            IndexerSchema = Encoding.UTF8.GetString(ReadGzipFixture("indexer-schema.json.gz")),
+        };
+        using var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
+        var options = new ProwlarrSetupOptions(
+            "http://sonarr", "sonarr-key",
+            "http://radarr", "radarr-key",
+            [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example", "indexer-key")]);
+
+        await client.SetupAsync(options);
+
+        Assert.True(await client.VerifyManagedResourcesAsync(options));
+        Assert.Equal(1, handler.Count("POST", "/api/v1/indexer/testall"));
+        Assert.Equal(2, handler.Count("POST", "/api/v1/applications/testall"));
+    }
+
+    [Fact]
+    public async Task Persisted_defaultless_indexer_fields_do_not_make_valid_resources_unready()
+    {
+        var handler = new ProwlarrHandler { ExpectedApiKey = "key" };
+        using var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
+        var options = new ProwlarrSetupOptions(
+            "http://sonarr", "sonarr-key",
+            "http://radarr", "radarr-key",
+            [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example", "indexer-key")]);
+        await client.SetupAsync(options);
+
+        handler.Indexers = handler.Indexers.Select(indexer =>
+        {
+            var persisted = JsonNode.Parse(indexer.GetRawText())!.AsObject();
+            if (string.Equals(persisted["name"]?.GetValue<string>(), "NZBDAV", StringComparison.Ordinal))
+            {
+                foreach (var field in persisted["fields"]!.AsArray().OfType<JsonObject>()
+                             .Where(field => field["name"]?.GetValue<string>() is "additionalParameters"
+                                 or "baseSettings.queryLimit" or "baseSettings.grabLimit"))
+                    field.Remove("value");
+            }
+            return Json(persisted.ToJsonString());
+        }).ToList();
+
+        Assert.True(await client.VerifyManagedResourcesAsync(options));
+        Assert.Equal(1, handler.Count("POST", "/api/v1/indexer/testall"));
+        Assert.Equal(2, handler.Count("POST", "/api/v1/applications/testall"));
+    }
+
+    [Fact]
+    public async Task Verify_managed_resource_tests_do_not_invoke_mutation_fence()
+    {
+        var events = new List<string>();
+        var handler = new ProwlarrHandler { ExpectedApiKey = "key", OrderedTestEvents = events };
+        using var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
+        var options = new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r",
+            [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example", "i")]);
+        await client.SetupAsync(options);
+
+        Task FenceAsync(CancellationToken _)
+        {
+            events.Add("fence");
+            return Task.CompletedTask;
+        }
+
+        var fenced = new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r",
+            options.Indexers, assertMutationLeaseAsync: FenceAsync);
+        Assert.True(await client.VerifyManagedResourcesAsync(fenced));
+        Assert.Equal(
+            new[]
+            {
+                "post:indexer/testall",
+                "post:applications/testall",
+                "post:applications/testall",
+            },
+            events);
+
+        events.Clear();
+        handler.ManagedResourceTestStatus = HttpStatusCode.BadGateway;
+        Assert.False(await client.VerifyManagedResourcesAsync(fenced));
+        Assert.Equal(new[] { "post:indexer/testall" }, events);
+    }
+
+    [Fact]
+    public async Task Verify_read_only_tests_ignore_mutation_fence_takeover()
+    {
+        var events = new List<string>();
+        var handler = new ProwlarrHandler { ExpectedApiKey = "key", OrderedTestEvents = events };
+        using var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
+        var options = new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r",
+            [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example", "i")]);
+        await client.SetupAsync(options);
+        var calls = 0;
+        Task FenceAsync(CancellationToken _)
+        {
+            if (Interlocked.Increment(ref calls) == 2)
+                throw new InvalidOperationException("lease taken over");
+            return Task.CompletedTask;
+        }
+
+        var fenced = new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r",
+            options.Indexers, assertMutationLeaseAsync: FenceAsync);
+        Assert.True(await client.VerifyManagedResourcesAsync(fenced));
+        Assert.Equal(0, calls);
+        Assert.Equal(1, events.Count(value => value == "post:indexer/testall"));
+        Assert.Equal(2, events.Count(value => value == "post:applications/testall"));
+    }
+
+    [Fact]
+    public async Task Failed_bounded_resource_tests_never_report_prowlarr_ready()
+    {
+        var handler = new ProwlarrHandler { ExpectedApiKey = "key" };
+        using var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
+        var options = new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r",
+            [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example", "i")]);
+        await client.SetupAsync(options);
+        handler.ManagedResourceTestStatus = HttpStatusCode.BadGateway;
+
+        Assert.False(await client.VerifyManagedResourcesAsync(options));
+        Assert.True(handler.Count("POST", "/api/v1/indexer/testall") >= 1);
+    }
+
+    [Fact]
+    public async Task Failed_persisted_application_test_never_reports_sonarr_or_radarr_ready()
+    {
+        var handler = new ProwlarrHandler { ExpectedApiKey = "key" };
+        using var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
+        var options = new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r", []);
+        await client.SetupAsync(options);
+        handler.ManagedResourceTestStatus = HttpStatusCode.BadGateway;
+
+        Assert.False(await client.VerifyManagedResourcesAsync(options));
+        Assert.True(handler.Count("POST", "/api/v1/applications/testall") >= 1);
+    }
+
+    [Fact]
+    public async Task Retained_stale_secret_is_not_ready_when_persisted_test_fails()
+    {
+        var handler = new ProwlarrHandler { ExpectedApiKey = "key" };
+        using var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
+        var original = new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r",
+            [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example", "old-indexer-key")]);
+        await client.SetupAsync(original);
+        handler.ManagedResourceTestStatus = HttpStatusCode.BadGateway;
+
+        var rotated = new ProwlarrSetupOptions("http://sonarr", "rotated-s", "http://radarr", "rotated-r",
+            [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example", "rotated-indexer-key")]);
+        Assert.False(await client.VerifyManagedResourcesAsync(rotated));
+        Assert.Contains(handler.RequestUris, uri => uri.AbsolutePath == "/api/v1/indexer/testall");
     }
 
     [Fact]
@@ -75,7 +288,7 @@ public sealed class ProwlarrSetupClientTests
         var client = new ProwlarrSetupClient(handler, new Uri("http://prowlarr:9696"), "prowlarr-secret");
         var options = new ProwlarrSetupOptions(
             "http://192.168.1.20:8989", "sonarr-secret", "http://10.0.0.7:7878", "radarr-secret",
-            [new ProwlarrNewznabIndexer("NZBDAV", "http://indexer.example/api", "indexer-secret")]);
+            [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example/api", "indexer-secret")]);
 
         await client.SetupAsync(options);
         await client.SetupAsync(options);
@@ -117,8 +330,8 @@ public sealed class ProwlarrSetupClientTests
         using var httpClient = new HttpClient(handler);
         var client = new ProwlarrSetupClient(handler, new Uri("http://prowlarr:9696"), "key");
         var options = new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r",
-            [new ProwlarrNewznabIndexer("NZBDAV", "http://one", "i"),
-             new ProwlarrNewznabIndexer("nZbDaV", "http://two", "j")]);
+            [new ProwlarrNewznabIndexer("NZBDAV", "https://one.example", "i"),
+             new ProwlarrNewznabIndexer("nZbDaV", "https://two.example", "j")]);
 
         await Assert.ThrowsAsync<ProwlarrSetupConflictException>(() => client.SetupAsync(options));
         Assert.DoesNotContain(handler.RequestUris, uri => uri.AbsolutePath.Contains("/indexer") &&
@@ -132,13 +345,13 @@ public sealed class ProwlarrSetupClientTests
     {
         var handler = new ProwlarrHandler
         {
-            Indexers = [Json("{\"id\":10,\"name\":\"NZBDAV\",\"implementation\":\"Newznab\",\"fields\":[{\"name\":\"baseUrl\",\"value\":\"http://other\"}]}" )]
+            Indexers = [Json("{\"id\":10,\"name\":\"NZBDAV\",\"implementation\":\"Newznab\",\"fields\":[{\"name\":\"baseUrl\",\"value\":\"https://other.example\"}]}" )]
         };
         using var httpClient = new HttpClient(handler);
         handler.ExpectedApiKey = "key";
         var client = new ProwlarrSetupClient(handler, new Uri("http://prowlarr:9696"), "key");
         var options = new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r",
-            [new ProwlarrNewznabIndexer("NZBDAV", "http://wanted", "i")]);
+            [new ProwlarrNewznabIndexer("NZBDAV", "https://wanted.example", "i")]);
 
         await Assert.ThrowsAsync<ProwlarrSetupConflictException>(() => client.SetupAsync(options));
         Assert.Equal(0, handler.Count("PUT", "/api/v1/indexer/10"));
@@ -157,7 +370,7 @@ public sealed class ProwlarrSetupClientTests
         var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
 
         await client.SetupAsync(new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r",
-            [new ProwlarrNewznabIndexer("NZBDAV", "http://indexer", "i")]));
+            [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example", "i")]));
 
         var body = JsonNode.Parse(handler.RequestBodies.First())!.AsObject();
         Assert.Equal(8, body["fields"]!.AsArray().Count);
@@ -172,7 +385,7 @@ public sealed class ProwlarrSetupClientTests
         var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
 
         await client.SetupAsync(new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r",
-            [new ProwlarrNewznabIndexer("NZBDAV", "http://indexer", "i")]));
+            [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example", "i")]));
 
         Assert.Equal(1, handler.Count("POST", "/api/v1/indexer"));
     }
@@ -190,7 +403,7 @@ public sealed class ProwlarrSetupClientTests
         using var httpClient = new HttpClient(handler);
         var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
         var options = new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r",
-            [new ProwlarrNewznabIndexer("NZBDAV", "http://indexer", "i")]);
+            [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example", "i")]);
 
         if (overLimit)
             await Assert.ThrowsAsync<ProwlarrSetupProtocolException>(() => client.SetupAsync(options));
@@ -220,7 +433,7 @@ public sealed class ProwlarrSetupClientTests
         var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
 
         await client.SetupAsync(new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r",
-            [new ProwlarrNewznabIndexer("NZBDAV", "http://indexer", "i")]));
+            [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example", "i")]));
 
         var body = JsonNode.Parse(handler.RequestBodies.First())!.AsObject();
         Assert.DoesNotContain(body["fields"]!.AsArray(), field => field!["name"]!.GetValue<string>() == "queryAuth");
@@ -241,7 +454,7 @@ public sealed class ProwlarrSetupClientTests
         using var httpClient = new HttpClient(handler);
         var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
         var options = new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r",
-            [new ProwlarrNewznabIndexer("NZBDAV", "http://indexer", "i")]);
+            [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example", "i")]);
 
         if (overLimit)
             await Assert.ThrowsAsync<ProwlarrSetupProtocolException>(() => client.SetupAsync(options));
@@ -260,13 +473,13 @@ public sealed class ProwlarrSetupClientTests
         using var httpClient = new HttpClient(handler);
         var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
         await client.SetupAsync(new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r",
-            [new ProwlarrNewznabIndexer("NZBDAV", "http://indexer", "i")]));
+            [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example", "i")]));
         Assert.Equal(4, JsonNode.Parse(handler.RequestBodies.First())!["appProfileId"]!.GetValue<int>());
 
         handler.ApplicationProfiles = "[{\"id\":1,\"name\":\"Standard\"},{\"id\":2,\"name\":\"standard\"}]";
         await Assert.ThrowsAsync<ProwlarrSetupProtocolException>(() => client.SetupAsync(
             new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r",
-                [new ProwlarrNewznabIndexer("Second", "http://other", "j")] )));
+                [new ProwlarrNewznabIndexer("Second", "https://other.example", "j")] )));
     }
 
     [Fact]
@@ -278,7 +491,7 @@ public sealed class ProwlarrSetupClientTests
 
         await Assert.ThrowsAsync<ProwlarrSetupProtocolException>(() => client.SetupAsync(new ProwlarrSetupOptions(
             "http://sonarr", "s", "http://radarr", "r",
-            [new ProwlarrNewznabIndexer("NZBDAV", "http://indexer", "i")] )));
+            [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example", "i")] )));
         Assert.Equal(0, handler.Count("POST", "/api/v1/indexer"));
     }
 
@@ -295,7 +508,7 @@ public sealed class ProwlarrSetupClientTests
         var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
 
         await client.SetupAsync(new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r",
-            [new ProwlarrNewznabIndexer("NZBDAV", "http://indexer", "i")]));
+            [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example", "i")]));
 
         Assert.Equal(8, handler.Indexers.Single(item => item.GetProperty("name").GetString() == "FileList").GetProperty("id").GetInt32());
         Assert.Equal(7, handler.Applications.Single(item => item.GetProperty("name").GetString() == "FileList").GetProperty("id").GetInt32());
@@ -333,8 +546,8 @@ public sealed class ProwlarrSetupClientTests
         var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
 
         await client.SetupAsync(new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r",
-            [new ProwlarrNewznabIndexer("One", "http://one", "one-key"),
-             new ProwlarrNewznabIndexer("Two", "http://two", "two-key")]));
+            [new ProwlarrNewznabIndexer("One", "https://one.example", "one-key"),
+             new ProwlarrNewznabIndexer("Two", "https://two.example", "two-key")]));
 
         Assert.Equal(2, handler.Count("POST", "/api/v1/indexer"));
         Assert.Equal(new[] { "One", "Two" }, handler.RequestBodies.Take(2)
@@ -348,7 +561,7 @@ public sealed class ProwlarrSetupClientTests
         using var httpClient = new HttpClient(handler);
         var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
         var options = new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r",
-            [new ProwlarrNewznabIndexer("NZBDAV", "http://indexer", "i")]);
+            [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example", "i")]);
 
         await Assert.ThrowsAsync<ProwlarrSetupHttpException>(() => client.SetupAsync(options));
         await client.SetupAsync(options);
@@ -364,9 +577,9 @@ public sealed class ProwlarrSetupClientTests
         using var httpClient = new HttpClient(handler);
         var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
         var options = new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r",
-            [new ProwlarrNewznabIndexer("One", "http://one", "one-key"),
-             new ProwlarrNewznabIndexer("Two", "http://two", "two-key"),
-             new ProwlarrNewznabIndexer("Three", "http://three", "three-key")]);
+            [new ProwlarrNewznabIndexer("One", "https://one.example", "one-key"),
+             new ProwlarrNewznabIndexer("Two", "https://two.example", "two-key"),
+             new ProwlarrNewznabIndexer("Three", "https://three.example", "three-key")]);
 
         await Assert.ThrowsAsync<ProwlarrSetupHttpException>(() => client.SetupAsync(options));
         await client.SetupAsync(options);
@@ -407,7 +620,7 @@ public sealed class ProwlarrSetupClientTests
         };
         using var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
         await client.SetupAsync(new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r",
-            [new ProwlarrNewznabIndexer("NZBDAV", "http://indexer/api", "i")]));
+            [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example/api", "i")]));
 
         var payload = JsonNode.Parse(handler.RequestBodies.First())!.AsObject();
         var fields = payload["fields"]!.AsArray().Select(x => x!["name"]!.GetValue<string>()).ToArray();
@@ -422,13 +635,13 @@ public sealed class ProwlarrSetupClientTests
         var handler = new ProwlarrHandler
         {
             ExpectedApiKey = "key",
-            Indexers = [Json("{\"id\":10,\"name\":\"NZBDAV\",\"implementation\":\"Newznab\",\"implementationName\":\"Newznab\",\"configContract\":\"NewznabSettings\",\"appProfileId\":1,\"enable\":true,\"custom\":{\"keep\":true},\"fields\":[{\"name\":\"baseUrl\",\"value\":\"http://indexer/api\"},{\"name\":\"apiPath\",\"value\":\"/api\"},{\"name\":\"apiKey\",\"value\":\"real-indexer-secret\"},{\"name\":\"additionalParameters\",\"value\":\"\"},{\"name\":\"vipExpiration\",\"value\":\"\"},{\"name\":\"baseSettings.queryLimit\",\"value\":0},{\"name\":\"baseSettings.grabLimit\",\"value\":0},{\"name\":\"baseSettings.limitsUnit\",\"value\":\"day\"},{\"name\":\"vendorField\",\"value\":{\"keep\":true}}]}" )],
+            Indexers = [Json("{\"id\":10,\"name\":\"NZBDAV\",\"implementation\":\"Newznab\",\"implementationName\":\"Newznab\",\"configContract\":\"NewznabSettings\",\"appProfileId\":1,\"enable\":true,\"custom\":{\"keep\":true},\"fields\":[{\"name\":\"baseUrl\",\"value\":\"https://indexer.example/api\"},{\"name\":\"apiPath\",\"value\":\"/api\"},{\"name\":\"apiKey\",\"value\":\"real-indexer-secret\"},{\"name\":\"additionalParameters\",\"value\":\"\"},{\"name\":\"vipExpiration\",\"value\":\"\"},{\"name\":\"baseSettings.queryLimit\",\"value\":0},{\"name\":\"baseSettings.grabLimit\",\"value\":0},{\"name\":\"baseSettings.limitsUnit\",\"value\":\"day\"},{\"name\":\"vendorField\",\"value\":{\"keep\":true}}]}" )],
             Applications = [
                 Json("{\"id\":11,\"name\":\"NZBDAV Sonarr\",\"implementation\":\"Sonarr\",\"implementationName\":\"Sonarr\",\"configContract\":\"SonarrSettings\",\"syncLevel\":\"fullSync\",\"custom\":\"sonarr\",\"fields\":[{\"name\":\"prowlarrUrl\",\"value\":\"http://prowlarr:9696\"},{\"name\":\"baseUrl\",\"value\":\"http://sonarr\"},{\"name\":\"apiKey\",\"value\":\"real-sonarr-secret\"}]}"),
                 Json("{\"id\":12,\"name\":\"NZBDAV Radarr\",\"implementation\":\"Radarr\",\"implementationName\":\"Radarr\",\"configContract\":\"RadarrSettings\",\"syncLevel\":\"fullSync\",\"custom\":\"radarr\",\"fields\":[{\"name\":\"prowlarrUrl\",\"value\":\"http://prowlarr:9696\"},{\"name\":\"baseUrl\",\"value\":\"http://radarr\"},{\"name\":\"apiKey\",\"value\":\"real-radarr-secret\"}]}" )]
         };
         using var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
-        var options = new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r", [new ProwlarrNewznabIndexer("NZBDAV", "http://indexer/api", "i")]);
+        var options = new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r", [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example/api", "i")]);
         var first = await client.SetupAsync(options);
         var before = handler.ResourcesJson();
         var writes = handler.WriteCount;
@@ -448,11 +661,11 @@ public sealed class ProwlarrSetupClientTests
         var handler = new ProwlarrHandler
         {
             ExpectedApiKey = "key",
-            Indexers = [Json("{\"id\":10,\"name\":\"NZBDAV\",\"implementation\":\"Newznab\",\"implementationName\":\"Newznab\",\"configContract\":\"NewznabSettings\",\"appProfileId\":1,\"enable\":true,\"fields\":[{\"name\":\"baseUrl\",\"value\":\"http://indexer\"},{\"name\":\"apiPath\",\"value\":\"/api\"},{\"name\":\"apiKey\",\"value\":\"i\"},{\"name\":\"additionalParameters\",\"value\":\"\"},{\"name\":\"vipExpiration\",\"value\":\"\"},{\"name\":\"baseSettings.queryLimit\",\"value\":0},{\"name\":\"baseSettings.grabLimit\",\"value\":0},{\"name\":\"baseSettings.limitsUnit\",\"value\":\"day\"}]}" )],
+            Indexers = [Json("{\"id\":10,\"name\":\"NZBDAV\",\"implementation\":\"Newznab\",\"implementationName\":\"Newznab\",\"configContract\":\"NewznabSettings\",\"appProfileId\":1,\"enable\":true,\"fields\":[{\"name\":\"baseUrl\",\"value\":\"https://indexer.example\"},{\"name\":\"apiPath\",\"value\":\"/api\"},{\"name\":\"apiKey\",\"value\":\"i\"},{\"name\":\"additionalParameters\",\"value\":\"\"},{\"name\":\"vipExpiration\",\"value\":\"\"},{\"name\":\"baseSettings.queryLimit\",\"value\":0},{\"name\":\"baseSettings.grabLimit\",\"value\":0},{\"name\":\"baseSettings.limitsUnit\",\"value\":\"day\"}]}" )],
             ChangeIndexerOnFinalRead = true
         };
         using var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
-        var result = await client.SetupAsync(new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r", [new ProwlarrNewznabIndexer("NZBDAV", "http://indexer", "i")]));
+        var result = await client.SetupAsync(new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r", [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example", "i")]));
         Assert.Equal(1, result.Unchanged);
         Assert.Equal(0, handler.Count("PUT", "/api/v1/indexer/10"));
         Assert.Contains("external", handler.ResourcesJson());
@@ -463,7 +676,7 @@ public sealed class ProwlarrSetupClientTests
     {
         var handler = new ProwlarrHandler { ExpectedApiKey = "key" };
         using var client = new ProwlarrSetupClient(handler, "http://Prowlarr:9696/Prowlarr/", "key");
-        var indexerUrl = "http://Indexer:80/Api?QueryCase=MiXeD";
+        var indexerUrl = "https://Indexer:443/Api?QueryCase=MiXeD";
         var sonarrUrl = "http://Sonarr:80/Api?QueryCase=MiXeD";
         await client.SetupAsync(new ProwlarrSetupOptions(sonarrUrl, "s", "http://Radarr:80/Api?QueryCase=MiXeD", "r", [new ProwlarrNewznabIndexer("NZBDAV", indexerUrl, "i")], "HTTP://prowlarr:9696/Prowlarr/"));
 
@@ -480,7 +693,7 @@ public sealed class ProwlarrSetupClientTests
     {
         var handler = new ProwlarrHandler { ExpectedApiKey = "key", CreateBeforeNextIndexerPost = true };
         using var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
-        var result = await client.SetupAsync(new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r", [new ProwlarrNewznabIndexer("NZBDAV", "http://indexer", "i")]));
+        var result = await client.SetupAsync(new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r", [new ProwlarrNewznabIndexer("NZBDAV", "https://indexer.example", "i")]));
         Assert.Equal(1, result.Unchanged);
         Assert.Equal(1, handler.Count("POST", "/api/v1/indexer"));
         Assert.Equal(0, handler.Count("PUT", "/api/v1/indexer/10"));
@@ -493,8 +706,17 @@ public sealed class ProwlarrSetupClientTests
         for (var i = 0; i < 40; i++) value = new Dictionary<string, object?> { ["nested"] = value };
         var handler = new ProwlarrHandler { ExpectedApiKey = "key" };
         using var client = new ProwlarrSetupClient(handler, "http://prowlarr:9696", "key");
-        await Assert.ThrowsAsync<ProwlarrSetupProtocolException>(() => client.SetupAsync(new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r", [new ProwlarrNewznabIndexer("one", "http://indexer", "i", new Dictionary<string, object?> { ["additionalParameters"] = value })])));
+        await Assert.ThrowsAsync<ProwlarrSetupProtocolException>(() => client.SetupAsync(new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r", [new ProwlarrNewznabIndexer("one", "https://indexer.example", "i", new Dictionary<string, object?> { ["additionalParameters"] = value })])));
         Assert.Empty(handler.RequestUris);
+    }
+
+    [Fact]
+    public async Task Persisted_resource_verification_has_a_bounded_timeout()
+    {
+        using var client = new ProwlarrSetupClient(new DelayedProwlarrHandler(), "http://prowlarr:9696", "key", TimeSpan.FromMilliseconds(25));
+        var options = new ProwlarrSetupOptions("http://sonarr", "s", "http://radarr", "r", []);
+
+        Assert.False(await client.VerifyManagedResourcesAsync(options));
     }
 
     private static byte[] ReadFixture(string name)
@@ -539,6 +761,10 @@ public sealed class ProwlarrSetupClientTests
         Visit(element);
         return count;
     }
+
+    private static JsonElement Field(JsonElement resource, string name) => resource.GetProperty("fields").EnumerateArray()
+        .Single(field => field.GetProperty("name").GetString()!.Equals(name, StringComparison.OrdinalIgnoreCase))
+        .GetProperty("value");
 
     private static string RepresentativePinnedIndexerSchema()
     {
@@ -611,12 +837,21 @@ public sealed class ProwlarrSetupClientTests
 
     private static JsonElement Json(string json) => JsonDocument.Parse(json).RootElement.Clone();
 
+    private sealed class DelayedProwlarrHandler : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return new HttpResponseMessage(HttpStatusCode.OK);
+        }
+    }
+
     private sealed class DeceptiveIndexerCollection(int count) : IReadOnlyCollection<ProwlarrNewznabIndexer>
     {
         public int Count => throw new InvalidOperationException("Count must not be trusted");
         public IEnumerator<ProwlarrNewznabIndexer> GetEnumerator()
         {
-            for (var i = 0; i < count; i++) yield return new ProwlarrNewznabIndexer($"Indexer{i}", "http://indexer", "key");
+            for (var i = 0; i < count; i++) yield return new ProwlarrNewznabIndexer($"Indexer{i}", "https://indexer.example", "key");
         }
         System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
     }
@@ -658,6 +893,9 @@ public sealed class ProwlarrSetupClientTests
         public bool ChangeIndexerOnFinalRead { get; set; }
         public bool CreateBeforeNextIndexerPost { get; set; }
         public bool ExternalCreateChangesApiKey { get; set; }
+        public HttpStatusCode ManagedResourceTestStatus { get; set; } = HttpStatusCode.OK;
+        public List<string>? OrderedEvents { get; init; }
+        public List<string>? OrderedTestEvents { get; init; }
         public int WriteCount { get; private set; }
         private int _indexerReadCount;
         private int _indexerPostCount;
@@ -672,6 +910,10 @@ public sealed class ProwlarrSetupClientTests
             var path = request.RequestUri!.AbsolutePath;
             _requests.Add((request.Method.Method, path));
             if (request.Content is not null) RequestBodies.Add(request.Content.ReadAsStringAsync(cancellationToken).Result);
+            if (request.Method == HttpMethod.Put
+                || request.Method == HttpMethod.Post && (path.EndsWith("/indexer", StringComparison.OrdinalIgnoreCase)
+                    || path.EndsWith("/applications", StringComparison.OrdinalIgnoreCase)))
+                OrderedEvents?.Add("write:" + path);
             // Pinned contract fixture: Prowlarr v2.5.2.5491, API /api/v1.
             if (request.Method == HttpMethod.Get && path.EndsWith("/indexer/schema"))
                 return Reply(IndexerSchema);
@@ -694,6 +936,21 @@ public sealed class ProwlarrSetupClientTests
             }
             if (request.Method == HttpMethod.Get && path.EndsWith("/applications", StringComparison.OrdinalIgnoreCase)) return Reply(Mask(Applications));
             if (request.Method == HttpMethod.Post && path.EndsWith("/indexer", StringComparison.OrdinalIgnoreCase)) { WriteCount++; var indexer = JsonNode.Parse(RequestBodies[^1])!.AsObject(); if (CreateBeforeNextIndexerPost) { CreateBeforeNextIndexerPost = false; if (ExternalCreateChangesApiKey) indexer["enable"] = false; indexer["id"] = 10 + _indexerPostCount++; Indexers.Add(Json(indexer.ToJsonString())); return Reply("{}", HttpStatusCode.Conflict); } if (Indexers.Any(x => string.Equals(x.GetProperty("name").GetString(), indexer["name"]!.GetValue<string>(), StringComparison.OrdinalIgnoreCase))) return Reply("{}", HttpStatusCode.Conflict); indexer["id"] = 10 + _indexerPostCount++; Indexers.Add(Json(indexer.ToJsonString())); if (FailFirstIndexerPostAfterPersist || _indexerPostCount == FailIndexerPostNumberAfterPersist) { FailFirstIndexerPostAfterPersist = false; FailIndexerPostNumberAfterPersist = null; return Reply("{}", HttpStatusCode.InternalServerError); } return Reply("{\"id\":10}", HttpStatusCode.Created); }
+            if (request.Method == HttpMethod.Post && (path.EndsWith("/indexer/testall", StringComparison.OrdinalIgnoreCase)
+                || path.EndsWith("/applications/testall", StringComparison.OrdinalIgnoreCase)))
+            {
+                OrderedTestEvents?.Add("post:" + path[(path.LastIndexOf("/api/v1/", StringComparison.Ordinal) + 8)..]);
+                if (ManagedResourceTestStatus != HttpStatusCode.OK)
+                    return Reply("{}", ManagedResourceTestStatus);
+                var resources = path.Contains("/indexer/", StringComparison.OrdinalIgnoreCase) ? Indexers : Applications;
+                var results = new JsonArray(resources.Select(resource => new JsonObject
+                {
+                    ["id"] = resource.GetProperty("id").GetInt32(),
+                    ["isValid"] = true,
+                    ["validationFailures"] = new JsonArray(),
+                }).ToArray());
+                return Reply(results.ToJsonString());
+            }
             if (request.Method == HttpMethod.Post && path.EndsWith("/applications", StringComparison.OrdinalIgnoreCase)) { WriteCount++; var app = JsonNode.Parse(RequestBodies[^1])!.AsObject(); if (Applications.Any(x => string.Equals(x.GetProperty("name").GetString(), app["name"]!.GetValue<string>(), StringComparison.OrdinalIgnoreCase))) return Reply("{}", HttpStatusCode.Conflict); app["id"] = 11 + Applications.Count; Applications.Add(Json(app.ToJsonString())); return Reply("{\"id\":11}", HttpStatusCode.Created); }
             if (request.Method == HttpMethod.Put) { WriteCount++; var body = JsonNode.Parse(RequestBodies[^1])!.AsObject(); var target = path.Contains("/api/v1/indexer/", StringComparison.OrdinalIgnoreCase) ? Indexers : Applications; var id = int.Parse(path[(path.LastIndexOf('/') + 1)..]); var at = target.FindIndex(x => x.GetProperty("id").GetInt32() == id); if (at >= 0) target[at] = Json(body.ToJsonString()); return Reply("{}", PutStatus); }
             return Reply("{}", HttpStatusCode.OK);

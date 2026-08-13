@@ -8,6 +8,8 @@ import { lookup as getMimeType } from 'mime-types';
 import { getDownloadKey } from "~/auth/downloads.server";
 import { Loading } from "../_index/components/loading/loading";
 import { formatFileSize } from "~/utils/file-size";
+import { isAuthenticated } from "~/auth/authentication.server";
+import { DEFAULT_NO_CACHE_HEADERS } from "~/onboarding/onboarding-request.server";
 
 export type ExplorePageData = {
     parentDirectories: string[],
@@ -21,6 +23,11 @@ export type ExploreFile = DirectoryItem & {
 
 
 export async function loader({ request }: Route.LoaderArgs) {
+    // Single-fetch requests bypass the root loader, so protect this sensitive
+    // directory listing at its own boundary.
+    if (!await isAuthenticated(request)) {
+        return new Response(null, { status: 401, headers: DEFAULT_NO_CACHE_HEADERS });
+    }
     // if path ends in trailing slash, remove it
     if (request.url.endsWith('/')) return redirect(request.url.slice(0, -1));
 

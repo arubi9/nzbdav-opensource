@@ -1,0 +1,226 @@
+# Fresh NZBDAV media stack. LAN ports: NZBDAV 3000, Jellyfin 8096,
+# Sonarr 8989, Radarr 7878, and Prowlarr 9696.
+# Set PUID/PGID to the same host account (1000 is the default).
+name: nzbdav-full-stack
+
+services:
+  nzbdav:
+    image: nzbdav:0.6.4-full-stack
+    # PID 1 is a deliberately tiny root supervisor: it must initialize named
+    # volumes, then su-exec the two application processes. Its children are
+    # non-root; these are the only capabilities needed during that bootstrap.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
+      - KILL
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NZBDAV_VERSION: 0.6.4
+    environment:
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      TZ: "${TZ:-UTC}"
+      CONFIG_PATH: /config/data
+      # Optional one-shot rotation input. The entrypoint removes a blank
+      # value before the root-only bootstrap secret process is sourced.
+      NZBDAV_MASTER_KEY: "${NZBDAV_MASTER_KEY:-}"
+      FRONTEND_PUID: "${FRONTEND_PUID:-1001}"
+      BACKEND_URL: http://localhost:8080
+      # The container listener is fixed; NZBDAV_PORT controls host publication.
+      PORT: "3000"
+      BIND_ADDRESS: "${BIND_ADDRESS:-127.0.0.1}"
+      # Host publication and the container listener are separate. Never bind
+      # the frontend to the host's LAN address inside the container.
+      FRONTEND_LISTEN_ADDRESS: "0.0.0.0"
+      NZBDAV_FULL_STACK: "true"
+      # Unset public browser helpers are computed from host URL + PORT, while setup remains internal.
+      PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:-}"
+      SECURE_COOKIES: "${SECURE_COOKIES:-false}"
+      NZBDAV_INSECURE_DEV_COOKIES: "${NZBDAV_INSECURE_DEV_COOKIES:-false}"
+      JELLYFIN_PUBLIC_URL: "${JELLYFIN_PUBLIC_URL:-}"
+      JELLYFIN_PUBLIC_PORT: "${JELLYFIN_PUBLIC_PORT:-${JELLYFIN_PORT:-8096}}"
+      # Arr and the Jellyfin plugin use the backend listener directly; the
+      # browser-facing frontend remains published on port 3000.
+      SETUP_NZBDAV_URL: http://nzbdav:8080
+      SETUP_JELLYFIN_URL: http://jellyfin:8096
+      SETUP_SONARR_URL: http://sonarr:8989
+      SETUP_RADARR_URL: http://radarr:7878
+      SETUP_PROWLARR_URL: http://prowlarr:9696
+    # Fresh installs bind to loopback. Explicitly opt into LAN/VPN exposure
+    # with BIND_ADDRESS and acknowledge insecure browser cookies when needed.
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${NZBDAV_PORT:-3000}:3000"
+    volumes:
+      - nzbdav_config:/config
+      - nzbdav_media:/media/nzbdav
+      # One physical volume is shared by both Arr categories. The category
+      # directories remain distinct setup/root-folder paths within it.
+      - completed_downloads:/data/completed-downloads
+      # These are whole Servarr config directories and stay read-only to NZBDAV.
+      - sonarr_config:/bootstrap/sonarr:ro
+      - radarr_config:/bootstrap/radarr:ro
+      - prowlarr_config:/bootstrap/prowlarr:ro
+    networks:
+      - full_stack
+    depends_on:
+      sonarr:
+        condition: service_healthy
+      radarr:
+        condition: service_healthy
+      prowlarr:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/ >/dev/null && curl -fsS http://127.0.0.1:8080/health >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+
+  jellyfin:
+    image: nzbdav-jellyfin:10.11.8
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
+    build:
+      context: .
+      dockerfile: jellyfin-stack/Dockerfile
+    environment:
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      TZ: "${TZ:-UTC}"
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${JELLYFIN_PORT:-8096}:8096"
+    volumes:
+      - jellyfin_config:/config
+      - jellyfin_cache:/cache
+      # Jellyfin owns this writable plugin-output library.
+      - nzbdav_media:/media/nzbdav
+    networks:
+      - full_stack
+    depends_on:
+      nzbdav:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8096/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  sonarr:
+    image: linuxserver/sonarr:4.0.19.2979-ls321@sha256:373159ba768e23a3a1c497d9f2b936addf8fd5b1fdce7dd6a14080ac928bfda0
+    # LinuxServer documents NET_RAW reduction for these images.
+    cap_drop:
+      - NET_RAW
+    environment:
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      TZ: "${TZ:-UTC}"
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${SONARR_PORT:-8989}:8989"
+    volumes:
+      - sonarr_config:/config
+      # Keep the category root identical to NZBDAV and ArrSetup's root path.
+      - completed_downloads:/data/completed-downloads
+    # LinuxServer initializes /config but not an additional shared volume.
+    # Seed the exact category directory before handing PID 1 to s6.
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        mkdir -p /data/completed-downloads/tv
+        chown "$${PUID}:$${PGID}" /data/completed-downloads/tv
+        exec /init
+    networks:
+      - full_stack
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8989/ping || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  radarr:
+    image: linuxserver/radarr:6.3.0.10514-ls313@sha256:a45b5ab0f850f39edb4cc9c95bbd967b52ddc3d4574a4dfb45561177db6c88f4
+    # LinuxServer documents NET_RAW reduction for these images.
+    cap_drop:
+      - NET_RAW
+    environment:
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      TZ: "${TZ:-UTC}"
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${RADARR_PORT:-7878}:7878"
+    volumes:
+      - radarr_config:/config
+      # Keep the category root identical to NZBDAV and ArrSetup's root path.
+      - completed_downloads:/data/completed-downloads
+    # LinuxServer initializes /config but not an additional shared volume.
+    # Seed the exact category directory before handing PID 1 to s6.
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        mkdir -p /data/completed-downloads/movies
+        chown "$${PUID}:$${PGID}" /data/completed-downloads/movies
+        exec /init
+    networks:
+      - full_stack
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:7878/ping || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  prowlarr:
+    image: linuxserver/prowlarr:2.5.2.5491-ls156@sha256:1295cff29d10b486c0d8324d1559a552140a5932bf8b3d87e398654414f63f92
+    # LinuxServer documents NET_RAW reduction for these images.
+    cap_drop:
+      - NET_RAW
+    environment:
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      TZ: "${TZ:-UTC}"
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${PROWLARR_PORT:-9696}:9696"
+    volumes:
+      - prowlarr_config:/config
+    networks:
+      - full_stack
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9696/ping || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+networks:
+  full_stack:
+    driver: bridge
+
+volumes:
+  nzbdav_config:
+  nzbdav_media:
+  completed_downloads:
+  jellyfin_config:
+  jellyfin_cache:
+  sonarr_config:
+  radarr_config:
+  prowlarr_config:

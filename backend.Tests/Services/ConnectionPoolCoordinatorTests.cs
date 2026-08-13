@@ -18,10 +18,10 @@ public sealed class ConnectionPoolCoordinatorTests : IClassFixture<PostgresHeade
         _fixture = fixture;
     }
 
-    [SkippableFact]
+    [Fact]
     public async Task RebalanceAllOnce_CreatesClaimAndAppliesShare()
     {
-        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
+        Assert.SkipUnless(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         using var environment = new backend.Tests.Config.TemporaryEnvironment(("DATABASE_URL", _fixture.ConnectionString));
@@ -58,10 +58,10 @@ public sealed class ConnectionPoolCoordinatorTests : IClassFixture<PostgresHeade
         Assert.Equal(8, appliedClaims[0]);
     }
 
-    [SkippableFact]
+    [Fact]
     public async Task RebalanceAllOnce_DoesNotOversubscribe_WhenMoreNodesThanSlots()
     {
-        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
+        Assert.SkipUnless(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         using var environment = new backend.Tests.Config.TemporaryEnvironment(("DATABASE_URL", _fixture.ConnectionString));

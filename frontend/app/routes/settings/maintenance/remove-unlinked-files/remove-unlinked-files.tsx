@@ -2,6 +2,7 @@ import { Alert, Button, Form } from "react-bootstrap";
 import styles from "./remove-unlinked-files.module.css"
 import { useCallback, useEffect, useState } from "react";
 import { receiveMessage } from "~/utils/websocket-util";
+import { csrfFetch } from "~/utils/csrf-fetch";
 
 const cleanupTaskTopic = { 'ctp': 'state' };
 
@@ -42,13 +43,13 @@ export function RemoveUnlinkedFiles({ savedConfig }: RemoveUnlinkedFilesProps) {
     // events
     const onRun = useCallback(async () => {
         setIsFetching(true);
-        await fetch("/api/remove-unlinked-files");
+        await csrfFetch("/api/remove-unlinked-files", { method: "POST" });
         setIsFetching(false);
     }, [setIsFetching]);
 
     const onDryRun = useCallback(async (event: any) => {
         setIsFetching(true);
-        await fetch("/api/remove-unlinked-files/dry-run");
+        await csrfFetch("/api/remove-unlinked-files/dry-run", { method: "POST" });
         setIsFetching(false);
     }, [setIsFetching]);
 

@@ -1,11 +1,9 @@
+using System.Data.Common;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Infrastructure;
-using Microsoft.EntityFrameworkCore.Storage;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Utils;
-using Serilog;
 
 namespace NzbWebDAV.Services;
 
@@ -16,148 +14,230 @@ public static class DatabaseInitialization
         CancellationToken cancellationToken,
         string? targetMigration = null)
     {
-        var isPostgres = !string.IsNullOrEmpty(EnvironmentUtil.GetDatabaseUrl());
-        if (!isPostgres)
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (databaseContext.Database.IsNpgsql())
         {
-            await databaseContext.Database
-                .MigrateAsync(targetMigration, cancellationToken)
+            await using var migrationContext = CreatePostgresMigrationContext();
+            ValidateTargetMigration(migrationContext, targetMigration);
+            await MigratePostgresAsync(migrationContext, targetMigration, cancellationToken)
                 .ConfigureAwait(false);
-            return;
         }
-
-        // Keep explicit target-migration behavior unchanged. The fresh-Postgres
-        // bootstrap below is for the normal startup path that targets the latest
-        // schema state.
-        if (!string.IsNullOrEmpty(targetMigration))
+        else if (databaseContext.Database.IsSqlite())
         {
-            await BootstrapMigrationHistoryIfNeededAsync(databaseContext, cancellationToken).ConfigureAwait(false);
-            await databaseContext.Database
-                .MigrateAsync(targetMigration, cancellationToken)
+            ValidateTargetMigration(databaseContext, targetMigration);
+            var isEmptyDatabase = await ValidateDatabaseStateAsync(databaseContext, cancellationToken)
                 .ConfigureAwait(false);
-            await SeedPostgresBootstrapDataAsync(databaseContext, cancellationToken).ConfigureAwait(false);
-            return;
+            if (!(isEmptyDatabase && IsZeroTarget(targetMigration)))
+            {
+                await databaseContext.Database
+                    .MigrateAsync(targetMigration, cancellationToken)
+                    .ConfigureAwait(false);
+            }
         }
-
-        var state = await InspectPostgresStateAsync(databaseContext, cancellationToken).ConfigureAwait(false);
-        if (state.IsFreshDatabase)
+        else
         {
-            Log.Information("Bootstrapping fresh PostgreSQL database from current EF model");
-            var databaseCreator = databaseContext.Database.GetService<IRelationalDatabaseCreator>();
-            await databaseCreator.CreateTablesAsync().ConfigureAwait(false);
-            await StampMigrationHistoryAsync(databaseContext, cancellationToken).ConfigureAwait(false);
-            await SeedPostgresBootstrapDataAsync(databaseContext, cancellationToken).ConfigureAwait(false);
-            return;
+            throw new InvalidOperationException(
+                $"Unsupported database provider '{databaseContext.Database.ProviderName}'.");
         }
 
-        if (state.HasApplicationTables && !state.HasMigrationHistoryEntries)
+        // An explicit target is a schema operation only. In particular, target
+        // 0 must leave a fresh database empty and an old target must not query or
+        // write rows using the current model. Normal startup (null target)
+        // migrates to the latest schema and then performs idempotent bootstrap.
+        if (targetMigration is null)
         {
-            await StampMigrationHistoryAsync(databaseContext, cancellationToken).ConfigureAwait(false);
-            await SeedPostgresBootstrapDataAsync(databaseContext, cancellationToken).ConfigureAwait(false);
-            return;
+            await SeedBootstrapDataAsync(databaseContext, cancellationToken)
+                .ConfigureAwait(false);
+        }
+    }
+
+    private static PostgresDavMigrationContext CreatePostgresMigrationContext()
+    {
+        // DATABASE_URL may intentionally point at a transaction-pooled
+        // PgBouncer endpoint for operational queries. Migration locking needs a
+        // direct endpoint, supplied through MIGRATION_DATABASE_URL when the
+        // operational URL is pooled.
+        var databaseUrl = EnvironmentUtil.GetMigrationDatabaseUrl()
+            ?? EnvironmentUtil.GetDatabaseUrl();
+        if (string.IsNullOrWhiteSpace(databaseUrl))
+            throw new InvalidOperationException("PostgreSQL migration context requires DATABASE_URL or MIGRATION_DATABASE_URL.");
+
+        if (DavDatabaseContextOptionsFactory.IsPgbouncerConnection(databaseUrl))
+        {
+            throw new InvalidOperationException(
+                "PostgreSQL migrations require a direct PostgreSQL endpoint. Set MIGRATION_DATABASE_URL to the direct database endpoint; PgBouncer and transaction-pool endpoints are not supported for migrations.");
         }
 
-        await databaseContext.Database
-            .MigrateAsync(cancellationToken: cancellationToken)
+        var options = DavDatabaseContextOptionsFactory
+            .CreatePostgresOptions<PostgresDavMigrationContext>(databaseUrl);
+        return new PostgresDavMigrationContext(options);
+    }
+
+    private static void ValidateTargetMigration(DbContext context, string? targetMigration)
+    {
+        if (string.IsNullOrWhiteSpace(targetMigration)
+            || string.Equals(targetMigration, "0", StringComparison.Ordinal))
+            return;
+
+        if (!context.Database.GetMigrations().Contains(targetMigration, StringComparer.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Unknown database migration '{targetMigration}'. Use a migration ID returned by the provider migration chain.");
+        }
+    }
+
+    private static async Task MigratePostgresAsync(
+        PostgresDavMigrationContext migrationContext,
+        string? targetMigration,
+        CancellationToken cancellationToken)
+    {
+        // Keep this connection open for the complete lock -> preflight -> EF
+        // migration sequence. A session advisory lock is only useful when every
+        // command runs on this one direct Npgsql session.
+        await migrationContext.Database.OpenConnectionAsync(cancellationToken)
             .ConfigureAwait(false);
-        await SeedPostgresBootstrapDataAsync(databaseContext, cancellationToken).ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// Legacy Postgres databases were created with EnsureCreatedAsync which does
-    /// not create __EFMigrationsHistory.  Without the history table MigrateAsync
-    /// tries to re-apply every migration and fails on the first CREATE TABLE.
-    /// This method detects that case and seeds the history so that MigrateAsync
-    /// only applies genuinely new migrations.
-    /// </summary>
-    private static async Task BootstrapMigrationHistoryIfNeededAsync(
-        DavDatabaseContext databaseContext,
-        CancellationToken cancellationToken)
-    {
-        var state = await InspectPostgresStateAsync(databaseContext, cancellationToken).ConfigureAwait(false);
-        if (!state.HasApplicationTables || state.HasMigrationHistoryEntries)
-            return;
-
-        Log.Information("Bootstrapping __EFMigrationsHistory for legacy Postgres database");
-        await StampMigrationHistoryAsync(databaseContext, cancellationToken).ConfigureAwait(false);
-    }
-
-    private static async Task<PostgresDatabaseState> InspectPostgresStateAsync(
-        DavDatabaseContext databaseContext,
-        CancellationToken cancellationToken)
-    {
-        var conn = databaseContext.Database.GetDbConnection();
-        if (conn.State != System.Data.ConnectionState.Open)
-            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
-
-        await using var cmd = conn.CreateCommand();
-
-        cmd.CommandText = """
-            SELECT EXISTS(
-                SELECT 1
-                FROM information_schema.tables
-                WHERE table_schema = 'public'
-                  AND table_name = '__EFMigrationsHistory'
-            )
-            """;
-        var historyTableExists = (bool)(await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
-
-        var hasMigrationHistoryEntries = false;
-        if (historyTableExists)
+        var lockAcquired = false;
+        try
         {
-            cmd.CommandText = """SELECT COUNT(*) FROM "__EFMigrationsHistory" """;
-            hasMigrationHistoryEntries = (long)(await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))! > 0;
+            await migrationContext.Database
+                .ExecuteSqlRawAsync(
+                    "SELECT pg_advisory_lock(hashtextextended('nzbdav-migrations', 0));",
+                    cancellationToken)
+                .ConfigureAwait(false);
+            lockAcquired = true;
+
+            var isEmptyDatabase = await ValidateDatabaseStateAsync(migrationContext, cancellationToken)
+                .ConfigureAwait(false);
+            if (!(isEmptyDatabase && IsZeroTarget(targetMigration)))
+            {
+                await migrationContext.Database
+                    .MigrateAsync(targetMigration, cancellationToken)
+                    .ConfigureAwait(false);
+            }
         }
+        finally
+        {
+            if (lockAcquired)
+            {
+                // Unlock with a non-cancelable token so cancellation cannot leave
+                // the direct session holding the migration lock. Do not replace a
+                // migration failure with an unlock failure (the connection is
+                // closed immediately afterwards in either case).
+                try
+                {
+                    await migrationContext.Database
+                        .ExecuteSqlRawAsync(
+                            "SELECT pg_advisory_unlock(hashtextextended('nzbdav-migrations', 0));",
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                }
+                catch
+                {
+                    // The session may already be broken after a failed or
+                    // canceled migration; disposing it releases the lock.
+                }
+            }
 
-        cmd.CommandText = """
-            SELECT EXISTS(
-                SELECT 1
-                FROM information_schema.tables
-                WHERE table_schema = 'public'
-                  AND table_name IN ('DavItems', 'ConfigItems')
-            )
-            """;
-        var hasApplicationTables = (bool)(await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
-
-        return new PostgresDatabaseState(
-            historyTableExists,
-            hasMigrationHistoryEntries,
-            hasApplicationTables);
+            try
+            {
+                await migrationContext.Database.CloseConnectionAsync()
+                    .ConfigureAwait(false);
+            }
+            catch
+            {
+                // Disposal below still releases a broken Npgsql connection.
+            }
+        }
     }
 
-    private static async Task StampMigrationHistoryAsync(
-        DavDatabaseContext databaseContext,
+    private static bool IsZeroTarget(string? targetMigration)
+        => string.Equals(targetMigration, "0", StringComparison.Ordinal);
+
+    private static async Task<bool> ValidateDatabaseStateAsync(
+        DbContext context,
         CancellationToken cancellationToken)
     {
-        var conn = databaseContext.Database.GetDbConnection();
-        if (conn.State != System.Data.ConnectionState.Open)
-            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+        var connection = context.Database.GetDbConnection();
+        var openedHere = connection.State != System.Data.ConnectionState.Open;
+        if (openedHere)
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
 
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            CREATE TABLE IF NOT EXISTS "__EFMigrationsHistory" (
-                "MigrationId" VARCHAR(150) NOT NULL,
-                "ProductVersion" VARCHAR(32) NOT NULL,
-                CONSTRAINT "PK___EFMigrationsHistory" PRIMARY KEY ("MigrationId")
-            )
-            """;
-        await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-
-        var allMigrations = databaseContext.Database.GetMigrations().ToList();
-        var productVersion = databaseContext.Model.FindAnnotation("ProductVersion")?.Value?.ToString() ?? "10.0.4";
-        foreach (var migrationId in allMigrations)
+        try
         {
-            cmd.CommandText = $"""
-                INSERT INTO "__EFMigrationsHistory" ("MigrationId", "ProductVersion")
-                VALUES ('{migrationId}', '{productVersion}')
-                ON CONFLICT DO NOTHING
-                """;
-            await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
+            var hasHistoryTable = await TableExistsAsync(
+                connection,
+                context.Database.IsNpgsql(),
+                "__EFMigrationsHistory",
+                cancellationToken).ConfigureAwait(false);
+            if (hasHistoryTable && await HasHistoryRowsAsync(connection, cancellationToken).ConfigureAwait(false))
+                return false;
 
-        Log.Information("Bootstrapped {Count} migration entries into __EFMigrationsHistory", allMigrations.Count);
+            var applicationTables = await GetApplicationTablesAsync(
+                connection,
+                context.Database.IsNpgsql(),
+                cancellationToken).ConfigureAwait(false);
+            if (applicationTables.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    "Database contains existing application tables but no EF migration history. Automatic migration of existing installs without migration history is unsupported; restore the migration history or use a fresh database.");
+            }
+
+            return !hasHistoryTable;
+        }
+        finally
+        {
+            if (openedHere)
+                await connection.CloseAsync().ConfigureAwait(false);
+        }
     }
 
-    private static async Task SeedPostgresBootstrapDataAsync(
+    private static async Task<bool> HasHistoryRowsAsync(
+        DbConnection connection,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM \"__EFMigrationsHistory\";";
+        return Convert.ToInt64(
+            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false)) > 0;
+    }
+
+    private static async Task<HashSet<string>> GetApplicationTablesAsync(
+        DbConnection connection,
+        bool isPostgres,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = isPostgres
+            ? "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' AND table_name <> '__EFMigrationsHistory';"
+            : "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name <> '__EFMigrationsHistory';";
+
+        var tables = new HashSet<string>(StringComparer.Ordinal);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            tables.Add(reader.GetString(0));
+        return tables;
+    }
+
+    private static async Task<bool> TableExistsAsync(
+        DbConnection connection,
+        bool isPostgres,
+        string tableName,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = isPostgres
+            ? "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = @tableName);"
+            : "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = @tableName);";
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = "tableName";
+        parameter.Value = tableName;
+        command.Parameters.Add(parameter);
+        return Convert.ToBoolean(
+            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false));
+    }
+
+    private static async Task SeedBootstrapDataAsync(
         DavDatabaseContext databaseContext,
         CancellationToken cancellationToken)
     {
@@ -192,7 +272,24 @@ public static class DatabaseInitialization
             return;
 
         databaseContext.Items.AddRange(missingRoots);
-        await databaseContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await databaseContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (DbUpdateException) when (missingRoots.Count > 0)
+        {
+            // Another node may have completed this idempotent bootstrap between
+            // the read and insert. The unique keys make the result durable; do
+            // not hide unrelated migration/database failures.
+            databaseContext.ChangeTracker.Clear();
+            var nowExisting = await databaseContext.Items
+                .Where(x => requiredRoots.Select(root => root.Id).Contains(x.Id))
+                .Select(x => x.Id)
+                .ToListAsync(cancellationToken)
+                .ConfigureAwait(false);
+            if (requiredRoots.Any(root => !nowExisting.Contains(root.Id)))
+                throw;
+        }
     }
 
     private static async Task EnsureConfigKeysAsync(
@@ -223,7 +320,22 @@ public static class DatabaseInitialization
             });
         }
 
-        await databaseContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await databaseContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (DbUpdateException) when (databaseContext.ChangeTracker.Entries<ConfigItem>().Any())
+        {
+            databaseContext.ChangeTracker.Clear();
+            var missingKeys = await databaseContext.ConfigItems
+                .Where(x => x.ConfigName == "api.key" || x.ConfigName == "api.strm-key")
+                .Select(x => x.ConfigName)
+                .ToListAsync(cancellationToken)
+                .ConfigureAwait(false);
+            if (!missingKeys.Contains("api.key", StringComparer.Ordinal)
+                || !missingKeys.Contains("api.strm-key", StringComparer.Ordinal))
+                throw;
+        }
     }
 
     private static DavItem CreateRootItem(
@@ -244,13 +356,5 @@ public static class DatabaseInitialization
             Type = type,
             Path = path
         };
-    }
-
-    private readonly record struct PostgresDatabaseState(
-        bool HistoryTableExists,
-        bool HasMigrationHistoryEntries,
-        bool HasApplicationTables)
-    {
-        public bool IsFreshDatabase => !HasApplicationTables && !HasMigrationHistoryEntries;
     }
 }

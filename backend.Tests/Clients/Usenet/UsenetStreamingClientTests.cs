@@ -38,14 +38,7 @@ public sealed class UsenetStreamingClientTests
         using var client = new UsenetStreamingClient(configManager, websocketManager, liveCache);
         var initialStats = client.PoolStats;
 
-        configManager.UpdateValues(
-        [
-            new ConfigItem
-            {
-                ConfigName = "usenet.providers",
-                ConfigValue = JsonSerializer.Serialize(CreateProviderConfig(maxConnections: 5))
-            }
-        ]);
+        ApplyProviders(configManager, CreateProviderConfig(maxConnections: 5));
 
         Assert.NotNull(client.PoolStats);
         Assert.NotSame(initialStats, client.PoolStats);
@@ -78,14 +71,7 @@ public sealed class UsenetStreamingClientTests
 
         using var client = new UsenetStreamingClient(configManager, websocketManager, liveCache, usePerNodeLeasing: true);
 
-        configManager.UpdateValues(
-        [
-            new ConfigItem
-            {
-                ConfigName = "usenet.providers",
-                ConfigValue = JsonSerializer.Serialize(CreateProviderConfig(maxConnections: 5))
-            }
-        ]);
+        ApplyProviders(configManager, CreateProviderConfig(maxConnections: 5));
 
         Assert.NotNull(client.PoolStats);
         Assert.Equal(0, client.PoolStats!.MaxPooled);
@@ -96,7 +82,13 @@ public sealed class UsenetStreamingClientTests
     private static ConfigManager CreateConfigManager(UsenetProviderConfig providerConfig)
     {
         var configManager = new ConfigManager();
-        configManager.UpdateValues(
+        ApplyProviders(configManager, providerConfig);
+        return configManager;
+    }
+
+    private static void ApplyProviders(ConfigManager configManager, UsenetProviderConfig providerConfig)
+    {
+        configManager.ApplySetupValues(
         [
             new ConfigItem
             {
@@ -104,7 +96,6 @@ public sealed class UsenetStreamingClientTests
                 ConfigValue = JsonSerializer.Serialize(providerConfig)
             }
         ]);
-        return configManager;
     }
 
     private static UsenetProviderConfig CreateProviderConfig(int maxConnections)

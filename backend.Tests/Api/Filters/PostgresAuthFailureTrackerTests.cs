@@ -15,10 +15,10 @@ public sealed class PostgresAuthFailureTrackerTests : IClassFixture<PostgresHead
         _fixture = fixture;
     }
 
-    [SkippableFact]
+    [Fact]
     public async Task RecordFailure_UsesSharedPostgresCounter()
     {
-        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
+        Assert.SkipUnless(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         using var environment = new backend.Tests.Config.TemporaryEnvironment(("DATABASE_URL", _fixture.ConnectionString));
@@ -30,10 +30,10 @@ public sealed class PostgresAuthFailureTrackerTests : IClassFixture<PostgresHead
         Assert.True(await tracker.IsBlockedAsync("203.0.113.5"));
     }
 
-    [SkippableFact]
+    [Fact]
     public async Task IsBlockedAsync_RefreshesAfterNegativeCacheExpires()
     {
-        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
+        Assert.SkipUnless(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         using var environment = new backend.Tests.Config.TemporaryEnvironment(("DATABASE_URL", _fixture.ConnectionString));
@@ -71,10 +71,10 @@ public sealed class PostgresAuthFailureTrackerTests : IClassFixture<PostgresHead
         Assert.False(await tracker.IsBlockedAsync("203.0.113.9"));
     }
 
-    [SkippableFact]
+    [Fact]
     public async Task SweepOnce_RemovesExpiredRows_ButKeepsFreshRows()
     {
-        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
+        Assert.SkipUnless(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         using var environment = new backend.Tests.Config.TemporaryEnvironment(("DATABASE_URL", _fixture.ConnectionString));
