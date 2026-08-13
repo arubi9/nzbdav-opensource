@@ -46,11 +46,11 @@ public sealed class NewznabCapabilityClient
 
         try
         {
-            var approvedAddress = await ResolveApprovedAddressAsync(credential, token).ConfigureAwait(false);
-            if (approvedAddress is null)
+            var approvedAddresses = await ResolveApprovedAddressesAsync(credential, token).ConfigureAwait(false);
+            if (approvedAddresses is null)
                 return new NewznabCapabilityResult(credential.DisplayName, NewznabCapabilityStatus.UnsafeNetworkAddress);
 
-            using var client = CreatePinnedClient(credential.BaseUrl, approvedAddress);
+            using var client = CreatePinnedClient(credential.BaseUrl, approvedAddresses);
             using var response = await client.GetAsync(
                 BuildCapabilityUri(credential.BaseUrl),
                 HttpCompletionOption.ResponseHeadersRead,
@@ -80,6 +80,10 @@ public sealed class NewznabCapabilityClient
         {
             return new NewznabCapabilityResult(credential.DisplayName, NewznabCapabilityStatus.Unreachable);
         }
+        catch (SocketException)
+        {
+            return new NewznabCapabilityResult(credential.DisplayName, NewznabCapabilityStatus.Unreachable);
+        }
         catch (IOException)
         {
             return new NewznabCapabilityResult(credential.DisplayName, NewznabCapabilityStatus.Unreachable);
@@ -104,7 +108,7 @@ public sealed class NewznabCapabilityClient
         return results;
     }
 
-    private async Task<IPAddress?> ResolveApprovedAddressAsync(
+    private async Task<IPAddress[]?> ResolveApprovedAddressesAsync(
         NewznabIndexerCredential credential,
         CancellationToken cancellationToken)
     {
@@ -129,11 +133,13 @@ public sealed class NewznabCapabilityClient
             return null;
 
         // Validate every answer to prevent hiding a private/restricted answer
-        // behind a public first answer, then pin exactly one approved answer.
-        return addresses[0];
+        // behind a public first answer, then pin the approved answers. All of
+        // them are pinned rather than just the first because a host with no
+        // routable IPv6 must still reach an A record behind an AAAA answer.
+        return addresses;
     }
 
-    private static HttpClient CreatePinnedClient(Uri endpoint, IPAddress approvedAddress)
+    private static HttpClient CreatePinnedClient(Uri endpoint, IPAddress[] approvedAddresses)
     {
         var handler = new SocketsHttpHandler
         {
@@ -146,20 +152,30 @@ public sealed class NewznabCapabilityClient
                 if (!string.Equals(context.DnsEndPoint.Host, endpoint.Host, StringComparison.OrdinalIgnoreCase))
                     throw new HttpRequestException("The approved Newznab endpoint host changed.");
 
-                var socket = new Socket(approvedAddress.AddressFamily, SocketType.Stream, ProtocolType.Tcp)
+                Exception? lastFailure = null;
+                foreach (var approvedAddress in approvedAddresses)
                 {
-                    NoDelay = true
-                };
-                try
-                {
-                    await socket.ConnectAsync(new IPEndPoint(approvedAddress, context.DnsEndPoint.Port), cancellationToken).ConfigureAwait(false);
-                    return new NetworkStream(socket, ownsSocket: true);
+                    var socket = new Socket(approvedAddress.AddressFamily, SocketType.Stream, ProtocolType.Tcp)
+                    {
+                        NoDelay = true
+                    };
+                    try
+                    {
+                        await socket.ConnectAsync(new IPEndPoint(approvedAddress, context.DnsEndPoint.Port), cancellationToken).ConfigureAwait(false);
+                        return new NetworkStream(socket, ownsSocket: true);
+                    }
+                    catch (Exception exception) when (exception is SocketException or IOException)
+                    {
+                        socket.Dispose();
+                        lastFailure = exception;
+                    }
+                    catch
+                    {
+                        socket.Dispose();
+                        throw;
+                    }
                 }
-                catch
-                {
-                    socket.Dispose();
-                    throw;
-                }
+                throw lastFailure ?? new HttpRequestException("The approved Newznab endpoint had no reachable address.");
             }
         };
         return new HttpClient(handler, disposeHandler: true) { Timeout = Timeout.InfiniteTimeSpan };
