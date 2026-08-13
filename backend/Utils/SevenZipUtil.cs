@@ -1,6 +1,7 @@
 ﻿using NzbWebDAV.Extensions;
 using NzbWebDAV.Models;
 using NzbWebDAV.Streams;
+using SharpCompress.Archives;
 using SharpCompress.Archives.SevenZip;
 using SharpCompress.Common;
 using SharpCompress.Readers;
@@ -22,7 +23,7 @@ public static class SevenZipUtil
 
     public static List<SevenZipEntry> GetSevenZipEntries(Stream stream, string? password = null)
     {
-        using var archive = SevenZipArchive.Open(stream, new ReaderOptions() { Password = password });
+        using var archive = (SevenZipArchive)ArchiveFactory.OpenArchive(stream, new ReaderOptions() { Password = password });
         return archive.Entries
             .Where(x => !x.IsDirectory)
             .Select((entry, index) => new SevenZipEntry(entry, archive, index, password))
