@@ -202,12 +202,80 @@ public sealed class NzbdavApiClientPagingTests
         Assert.Equal(new[] { true, false }, conditional);
     }
 
-    private static NzbdavApiClient CreateClient(HttpMessageHandler handler)
-        => new(new PluginConfiguration
+    /// <summary>
+    /// The cap bounds the assembled tree, not one page, so a walk that stays under it
+    /// per response must still be rejected once the total passes the configured value.
+    /// </summary>
+    [Fact]
+    public async Task EnforcesTheConfiguredItemCapAcrossTheWholeWalk()
+    {
+        var error = await Assert.ThrowsAsync<HttpRequestException>(
+            () => CreateClient(ThreeSinglePageItems(), maxManifestItems: 2)
+                .GetManifestAsync(null, CancellationToken.None));
+
+        Assert.Contains("too many items", error.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A cap of zero would reject every manifest, so it is treated as unset rather than
+    /// as an operator asking for a library of nothing.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public async Task FallsBackToTheDefaultCapWhenTheConfiguredValueIsNotPositive(int configured)
+    {
+        var (manifest, _) = await CreateClient(ThreeSinglePageItems(), maxManifestItems: configured)
+            .GetManifestAsync(null, CancellationToken.None);
+
+        Assert.NotNull(manifest);
+        Assert.Equal(3, manifest!.ItemCount);
+    }
+
+    /// <summary>A raised cap admits a walk the default would also have admitted.</summary>
+    [Fact]
+    public async Task AcceptsAWalkThatFitsWithinTheConfiguredCap()
+    {
+        var (manifest, _) = await CreateClient(ThreeSinglePageItems(), maxManifestItems: 3)
+            .GetManifestAsync(null, CancellationToken.None);
+
+        Assert.NotNull(manifest);
+        Assert.Equal(3, manifest!.ItemCount);
+    }
+
+    /// <summary>
+    /// An operator who never touches the setting keeps the cap the client shipped with.
+    /// </summary>
+    [Fact]
+    public async Task LeavingTheCapUnconfiguredKeepsTheShippedDefault()
+    {
+        Assert.Equal(250000, new PluginConfiguration().MaxManifestItems);
+
+        var (manifest, _) = await CreateClient(ThreeSinglePageItems())
+            .GetManifestAsync(null, CancellationToken.None);
+
+        Assert.NotNull(manifest);
+        Assert.Equal(3, manifest!.ItemCount);
+    }
+
+    private static TestHttpMessageHandler ThreeSinglePageItems()
+        => new((request, _) => TestHttpMessageHandler.Json(CursorOf(request) switch
+        {
+            null => Page("v1", "Y3Vyc29yLTE=", (1, "/content/a.mkv")),
+            "Y3Vyc29yLTE=" => Page("v1", "Y3Vyc29yLTI=", (2, "/content/b.mkv")),
+            _ => Page("v1", null, (3, "/content/c.mkv"))
+        }));
+
+    private static NzbdavApiClient CreateClient(HttpMessageHandler handler, int? maxManifestItems = null)
+    {
+        var config = new PluginConfiguration
         {
             NzbdavBaseUrl = "https://nzbdav.example",
             TimeoutSeconds = 5
-        }, handler);
+        };
+        if (maxManifestItems is not null) config.MaxManifestItems = maxManifestItems.Value;
+        return new NzbdavApiClient(config, handler);
+    }
 
     private static string? CursorOf(HttpRequestMessage request)
     {
