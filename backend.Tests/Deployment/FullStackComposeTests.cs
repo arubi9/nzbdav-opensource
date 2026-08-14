@@ -55,6 +55,25 @@ public sealed class FullStackComposeTests
         Assert.True(nofile.GetProperty("hard").GetInt32() >= 65536);
     }
 
+    // The L1 cache size was previously only reachable by hand-editing a row in
+    // the runtime database, so a rebuilt stack silently reverted to the 10 GB
+    // application default. Passing it through compose keeps the deployed cache
+    // size reproducible from the committed .env.
+    [Fact]
+    public void NzbdavPassesTheCacheSizeThroughFromTheEnvironment()
+    {
+        using var compose = ComposeConfig(ComposePath);
+        var environment = compose.RootElement
+            .GetProperty("services")
+            .GetProperty("nzbdav")
+            .GetProperty("environment");
+
+        Assert.True(
+            environment.TryGetProperty("NZBDAV_CACHE_MAX_SIZE_GB", out var cacheSize),
+            "compose must pass NZBDAV_CACHE_MAX_SIZE_GB so .env controls the cache size");
+        Assert.True(int.TryParse(cacheSize.GetString(), out var gigabytes) && gigabytes > 0);
+    }
+
     [Fact]
     public void NvidiaOverride_AddsGpuOnlyToJellyfin()
     {

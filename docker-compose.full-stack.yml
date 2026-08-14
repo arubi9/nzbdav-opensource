@@ -38,6 +38,10 @@ services:
       PGID: "${PGID:-1000}"
       TZ: "${TZ:-UTC}"
       CONFIG_PATH: /config/data
+      # L1 segment cache size. This env var wins over the shared DB config so
+      # each node can size its own disk. Left at the application default here;
+      # set it in .env for deployments with room for a larger cache.
+      NZBDAV_CACHE_MAX_SIZE_GB: "${NZBDAV_CACHE_MAX_SIZE_GB:-10}"
       # Optional one-shot rotation input. The entrypoint removes a blank
       # value before the root-only bootstrap secret process is sourced.
       NZBDAV_MASTER_KEY: "${NZBDAV_MASTER_KEY:-}"
