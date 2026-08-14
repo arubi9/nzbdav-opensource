@@ -46,4 +46,5 @@ docker exec $N wget -qO- --header="x-api-key: $K" http://localhost:8080/metrics 
     | grep -vE 'HELP|TYPE'
 
 echo "== yEnc header integrity (0 means every sidecar parsed) =="
-docker logs --tail 400 $N 2>&1 | grep -icE 'malformed|pre-fix|falling back to NNTP'
+# grep exits 1 when it finds nothing, which here is the success case.
+docker logs --tail 400 $N 2>&1 | grep -icE 'malformed|pre-fix|falling back to NNTP' || true
