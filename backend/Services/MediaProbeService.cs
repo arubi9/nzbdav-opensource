@@ -507,6 +507,11 @@ public class MediaProbeService : BackgroundService
         var probeFilePath = Path.Combine(_liveSegmentCache.CacheDirectory, $"probe-{videoFile.Id:N}.json");
         await File.WriteAllTextAsync(probeFilePath, probeResult, ct).ConfigureAwait(false);
 
+        // The manifest reports HasProbeData by probing the filesystem, so this write
+        // changes the manifest without touching the database. Nothing else would
+        // invalidate a client's cached view of it.
+        ManifestVersion.Bump();
+
         Log.Debug("Pre-probed {Name} — mediainfo cached", videoFile.Name);
     }
 

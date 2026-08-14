@@ -91,6 +91,8 @@ public sealed class ContentIndexSnapshotInterceptor : SaveChangesInterceptor
         if (!PendingSnapshots.TryGetValue(dbContext, out _)) return;
         PendingSnapshots.Remove(dbContext);
         SnapshotWriter.MarkDirty();
+        // Same signal, second consumer: the manifest needs to know the tree moved.
+        ManifestVersion.Bump();
     }
 
     private static void ClearPendingSnapshot(DbContext? dbContext)
