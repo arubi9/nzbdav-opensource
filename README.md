@@ -24,6 +24,10 @@ To cache far more than local disk holds, see the optional
 **[L2 segment cache](docs/l2-cache.md)**, which can be backed by a mounted
 disk, a NAS over NFS, or S3.
 
+Wondering whether a Raspberry Pi or mini-PC is enough? See
+**[deploying on small hardware](docs/small-hardware.md)** for measured
+sizing and what not to run there.
+
 ## Standalone NZBDAV
 
 See the **[standalone setup guide](docs/setup-guide.md)** for a persistent
