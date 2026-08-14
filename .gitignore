@@ -29,3 +29,7 @@ nuget
 # PlaybackInfo dump scratchpad from debugging.
 /pb.json
 /.pi/
+
+# Local operator credentials - never commit
+.env.local
+config-servers.txt
