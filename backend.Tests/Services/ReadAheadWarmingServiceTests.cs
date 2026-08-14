@@ -55,6 +55,63 @@ public sealed class ReadAheadWarmingServiceTests
             $"Expected concurrent warming to finish well under the {8 * 200}ms sequential cost, took {elapsed.TotalMilliseconds:F0}ms.");
     }
 
+    // The prefetch budget belongs to the shared NNTP connection pool, so it must
+    // be global. When it was applied per session, N concurrent viewers demanded N
+    // times the configured concurrency, overran the downloader's pending-queue
+    // guard, and made *other* viewers' live reads throw mid-playback.
+    [Fact]
+    public async Task ReadAheadConcurrencyIsSharedAcrossSessionsNotPerSession()
+    {
+        const int budget = 4;
+        const int sessions = 5;
+        const int segmentsPerSession = 8;
+
+        await using var cacheScope = new TempCacheScope();
+        var configManager = new ConfigManager();
+        configManager.UpdateValues(
+        [
+            new ConfigItem { ConfigName = "cache.read-ahead-enable", ConfigValue = "true" },
+            new ConfigItem { ConfigName = "cache.read-ahead-segments", ConfigValue = segmentsPerSession.ToString() },
+            new ConfigItem { ConfigName = "cache.read-ahead-concurrency", ConfigValue = budget.ToString() }
+        ]);
+
+        using var liveCache = new LiveSegmentCache(cacheScope.Path);
+        using var fakeNntpClient = new FakeNntpClient
+        {
+            BodyFetchDelay = TimeSpan.FromMilliseconds(60)
+        };
+
+        var allSegments = new List<string[]>();
+        for (var s = 0; s < sessions; s++)
+        {
+            var ids = new string[segmentsPerSession];
+            for (var i = 0; i < segmentsPerSession; i++)
+            {
+                ids[i] = $"s{s}-segment-{i}";
+                fakeNntpClient.AddSegment(ids[i], Encoding.ASCII.GetBytes($"{s}:{i}"), partOffset: i);
+            }
+
+            allSegments.Add(ids);
+        }
+
+        using var cachingClient = new LiveSegmentCachingNntpClient(fakeNntpClient, liveCache);
+        using var warmingService = new ReadAheadWarmingService(cachingClient, liveCache, configManager);
+        using var cts = new CancellationTokenSource();
+
+        foreach (var ids in allSegments)
+        {
+            var sessionId = warmingService.CreateSession(ids, cts.Token);
+            warmingService.UpdatePosition(sessionId, 0);
+        }
+
+        await WaitForConditionAsync(() => allSegments.All(ids => ids.All(liveCache.HasBody)));
+
+        Assert.True(
+            fakeNntpClient.PeakConcurrentBodyFetches <= budget,
+            $"Read-ahead concurrency must be a global budget of {budget}, but {sessions} sessions " +
+            $"drove {fakeNntpClient.PeakConcurrentBodyFetches} simultaneous fetches.");
+    }
+
     [Fact]
     public async Task UpdatePositionWarmsFromLatestPosition()
     {

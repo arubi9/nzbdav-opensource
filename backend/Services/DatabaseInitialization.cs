@@ -47,8 +47,60 @@ public static class DatabaseInitialization
         // migrates to the latest schema and then performs idempotent bootstrap.
         if (targetMigration is null)
         {
+            if (databaseContext.Database.IsSqlite())
+            {
+                await EnableSqliteWriteAheadLoggingAsync(databaseContext, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
             await SeedBootstrapDataAsync(databaseContext, cancellationToken)
                 .ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Switches SQLite to write-ahead logging.
+    ///
+    /// The default journal_mode=DELETE takes a database-wide exclusive lock for
+    /// every write, which blocks concurrent readers: the health check's item
+    /// count, the plugin manifest query, and every in-flight stream's metadata
+    /// lookup all stall behind ingest. WAL lets readers run during writes.
+    ///
+    /// This runs here rather than in a connection interceptor because
+    /// journal_mode is persisted in the database header, so it only needs to be
+    /// set once - and because setting it is itself a write, which fails while EF
+    /// is still probing whether the database file exists.
+    /// </summary>
+    private static async Task EnableSqliteWriteAheadLoggingAsync(
+        DavDatabaseContext databaseContext,
+        CancellationToken cancellationToken)
+    {
+        var connection = databaseContext.Database.GetDbConnection();
+        var openedHere = connection.State != System.Data.ConnectionState.Open;
+        if (openedHere)
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA journal_mode = WAL;";
+            var mode = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
+
+            // An in-memory database cannot use WAL, and that is fine. Anything
+            // else silently staying on DELETE is a performance cliff worth
+            // surfacing rather than swallowing.
+            if (!string.Equals(mode, "wal", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(mode, "memory", StringComparison.OrdinalIgnoreCase))
+            {
+                Serilog.Log.Warning(
+                    "SQLite journal_mode is {Mode}, not WAL. Writes will block concurrent readers.",
+                    mode ?? "unknown");
+            }
+        }
+        finally
+        {
+            if (openedHere)
+                await connection.CloseAsync().ConfigureAwait(false);
         }
     }
 

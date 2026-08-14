@@ -18,6 +18,12 @@ public class ReadAheadWarmingService : IDisposable
     private readonly ConfigManager _configManager;
     private readonly ConcurrentDictionary<string, WarmingSession> _sessions = new();
 
+    // Prefetch concurrency is a property of the shared NNTP connection pool, not
+    // of any one viewer. Sizing it per session meant N viewers demanded N times
+    // the budget, which blew past the downloader's pending-queue guard and made
+    // other viewers' live reads throw. One budget, shared by every session.
+    private readonly Lazy<SemaphoreSlim> _globalWarmBudget;
+
     public int ActiveSessionCount => _sessions.Count;
 
     public ReadAheadWarmingService(
@@ -37,6 +43,9 @@ public class ReadAheadWarmingService : IDisposable
         _usenetClient = usenetClient;
         _liveSegmentCache = liveSegmentCache;
         _configManager = configManager;
+        _globalWarmBudget = new Lazy<SemaphoreSlim>(
+            () => new SemaphoreSlim(_configManager.GetReadAheadConcurrency()),
+            LazyThreadSafetyMode.ExecutionAndPublication);
     }
 
     public string CreateSession(string[] segmentIds, CancellationToken ct)
@@ -149,6 +158,18 @@ public class ReadAheadWarmingService : IDisposable
                             if (_liveSegmentCache.HasBody(segmentId))
                                 return;
 
+                            // Cheap local checks happen above so cache hits never
+                            // consume a slot; only real NNTP work is budgeted.
+                            var budget = _globalWarmBudget.Value;
+                            try
+                            {
+                                await budget.WaitAsync(innerCt).ConfigureAwait(false);
+                            }
+                            catch (OperationCanceledException)
+                            {
+                                return;
+                            }
+
                             try
                             {
                                 using var ctx = SegmentFetchContext.Set(SegmentCategory.VideoSegment);
@@ -174,6 +195,10 @@ public class ReadAheadWarmingService : IDisposable
                             {
                                 Interlocked.Increment(ref warmFailures);
                                 Log.Debug($"Read-ahead warming failed for segment: {e.Message}");
+                            }
+                            finally
+                            {
+                                budget.Release();
                             }
                         }).ConfigureAwait(false);
                 }
@@ -210,6 +235,10 @@ public class ReadAheadWarmingService : IDisposable
             StopSession(sessionId);
 
         _sessions.Clear();
+
+        if (_globalWarmBudget.IsValueCreated)
+            _globalWarmBudget.Value.Dispose();
+
         GC.SuppressFinalize(this);
     }
 

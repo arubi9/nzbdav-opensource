@@ -957,6 +957,24 @@ public class ConfigManager
         return Math.Max(4, GetMaxDownloadConnections() * 3 / 4);
     }
 
+    /// <summary>
+    /// How many download requests may queue behind the connection budget before
+    /// the downloader sheds load. This has to scale with concurrent viewers,
+    /// not just with the connection count: every playback session keeps up to
+    /// `usenet.article-buffer-size` segment fetches in flight, so a small
+    /// multiple of the connection budget starts throwing mid-playback at only a
+    /// handful of simultaneous streams. Queued waiters are cheap (one
+    /// TaskCompletionSource each), so this can be generous.
+    /// </summary>
+    public int GetMaxPendingDownloads()
+    {
+        var configured = StringUtil.EmptyToNull(GetConfigValue("usenet.max-pending-downloads"));
+        if (configured != null)
+            return Math.Max(1, int.Parse(configured));
+
+        return Math.Max(256, GetMaxDownloadConnections() * 16);
+    }
+
     public int GetArticleBufferSize()
     {
         return int.Parse(
