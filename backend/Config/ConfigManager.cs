@@ -930,10 +930,31 @@ public class ConfigManager
 
     public int GetMaxDownloadConnections()
     {
+        // Default to the connection budget the operator actually declared for
+        // their providers. This used to be clamped to 15, which silently threw
+        // away most of a large provider allowance and left the pool idle on
+        // fast uplinks. The pool is already sized to TotalPooledConnections, so
+        // this only stops the downloader from under-using it.
         return int.Parse(
             StringUtil.EmptyToNull(GetConfigValue("usenet.max-download-connections"))
-            ?? Math.Min(GetUsenetProviderConfig().TotalPooledConnections, 15).ToString()
+            ?? GetUsenetProviderConfig().TotalPooledConnections.ToString()
         );
+    }
+
+    /// <summary>
+    /// How many read-ahead segments to warm concurrently. Warming used to be
+    /// strictly sequential, which pinned the prefetcher to a single NNTP
+    /// connection and capped streaming throughput far below the available
+    /// uplink. Defaults to most of the download budget while leaving headroom
+    /// so live reads are never starved by prefetch.
+    /// </summary>
+    public int GetReadAheadConcurrency()
+    {
+        var configured = StringUtil.EmptyToNull(GetConfigValue("cache.read-ahead-concurrency"));
+        if (configured != null)
+            return Math.Max(1, int.Parse(configured));
+
+        return Math.Max(4, GetMaxDownloadConnections() * 3 / 4);
     }
 
     public int GetArticleBufferSize()
