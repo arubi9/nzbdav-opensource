@@ -14,7 +14,7 @@ namespace NzbWebDAV.Clients.Usenet.Caching;
 public sealed class ObjectStorageSegmentCache : IDisposable
 {
     // See LiveSegmentCache.YencHeaderJsonOptions for the why — kept in sync.
-    private static readonly JsonSerializerOptions YencHeaderJsonOptions = new()
+    internal static readonly JsonSerializerOptions YencHeaderJsonOptions = new()
     {
         IncludeFields = true
     };
@@ -31,7 +31,15 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         Func<string, CancellationToken, Task<ReadResult?>> TryReadAsync,
         Func<WriteRequest, CancellationToken, Task> WriteAsync,
         Func<Guid, CancellationToken, Task>? DeleteByOwnerAsync,
-        bool StartWriter);
+        bool StartWriter,
+        long QueueMaxBytes = DefaultQueueMaxBytes);
+
+    /// <summary>
+    /// The queue holds each pending body in memory, so an item count alone is
+    /// the wrong bound: 16384 queued video segments is ~11.7 GB. Whichever
+    /// limit is reached first sheds the write.
+    /// </summary>
+    private const long DefaultQueueMaxBytes = 512L * 1024 * 1024;
 
     private readonly Func<CancellationToken, Task> _ensureBucketExistsAsync;
     private readonly Func<string, CancellationToken, Task<ReadResult?>> _tryReadAsync;
@@ -41,6 +49,8 @@ public sealed class ObjectStorageSegmentCache : IDisposable
     private readonly SemaphoreSlim _queueSignal = new(0);
     private readonly ConcurrentQueue<WriteRequest> _writeQueue = new();
     private readonly int _queueCapacity;
+    private readonly long _queueMaxBytes;
+    private long _queueBytes;
     private readonly int _writerParallelism;
     private readonly TimeSpan _readTimeout;
     private readonly TimeSpan _writeTimeout;
@@ -66,6 +76,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
     public long L2ReadTimeouts => Interlocked.Read(ref _l2ReadTimeouts);
     public long LastWriteUnixtime => Interlocked.Read(ref _lastWriteUnixtime);
     public int QueueDepth => _queueCount;
+    public long QueueBytes => Interlocked.Read(ref _queueBytes);
     public int WriterParallelism => _writerParallelism;
     public string BucketName { get; }
     public string StorageClass => _storageClass;
@@ -87,7 +98,8 @@ public sealed class ObjectStorageSegmentCache : IDisposable
             binding.ReadTimeout,
             binding.WriteTimeout,
             binding.WriterParallelism,
-            binding.StorageClass)
+            binding.StorageClass,
+            binding.QueueMaxBytes)
     {
     }
 
@@ -102,9 +114,11 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         TimeSpan? readTimeout = null,
         TimeSpan? writeTimeout = null,
         int writerParallelism = 4,
-        string storageClass = "STANDARD")
+        string storageClass = "STANDARD",
+        long queueMaxBytes = DefaultQueueMaxBytes)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(queueCapacity);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(queueMaxBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(writerParallelism);
         if (writerParallelism > 32)
             throw new ArgumentOutOfRangeException(nameof(writerParallelism), "Must be 1-32");
@@ -114,6 +128,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         BucketName = bucketName;
         _storageClass = storageClass;
         _queueCapacity = queueCapacity;
+        _queueMaxBytes = queueMaxBytes;
         _writerParallelism = writerParallelism;
         _readTimeout = readTimeout ?? TimeSpan.FromSeconds(30);
         _writeTimeout = writeTimeout ?? TimeSpan.FromSeconds(60);
@@ -220,6 +235,20 @@ public sealed class ObjectStorageSegmentCache : IDisposable
             return;
         }
 
+        // Byte bound: the item count says nothing about memory when bodies are
+        // ~700 KB video segments rather than small files.
+        if (Interlocked.Add(ref _queueBytes, body.Length) > _queueMaxBytes)
+        {
+            Interlocked.Add(ref _queueBytes, -body.Length);
+            Interlocked.Decrement(ref _queueCount);
+            Interlocked.Increment(ref _l2WritesDropped);
+            Log.Debug(
+                "L2 write queue is holding {Bytes} bytes - dropping write for segment {SegmentId}.",
+                _queueMaxBytes,
+                segmentId);
+            return;
+        }
+
         _writeQueue.Enqueue(new WriteRequest(segmentId, body, category, ownerNzbId, yencHeaders));
         _queueSignal.Release();
     }
@@ -286,6 +315,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
             }
 
             Interlocked.Decrement(ref _queueCount);
+            Interlocked.Add(ref _queueBytes, -request.Body.Length);
             await ProcessOneWriteAsync(request).ConfigureAwait(false);
 
             if (_shutdownRequested && _writeQueue.IsEmpty)
@@ -343,6 +373,28 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         var secretKey = configManager.GetL2SecretKey();
 
         var storageClass = configManager.GetL2StorageClass();
+
+        // A mounted filesystem wins over S3 when both are configured: the HTTP
+        // round trip buys nothing once the bytes are directly readable, and the
+        // sidecar keeps yEnc headers durable across restarts (S3 gateways that
+        // front a filesystem generally do not).
+        var filesystemPath = configManager.GetL2Path();
+        if (!string.IsNullOrWhiteSpace(filesystemPath))
+        {
+            Log.Information("L2 cache is using the filesystem backend rooted at {Path}.", filesystemPath);
+            return new ConfigBinding(
+                bucketName,
+                configManager.GetL2WriteQueueCapacity(),
+                configManager.GetL2WriterParallelism(),
+                configManager.GetL2ReadTimeout(),
+                configManager.GetL2WriteTimeout(),
+                storageClass,
+                FilesystemSegmentStore.CreateEnsureRootDelegate(filesystemPath),
+                FilesystemSegmentStore.CreateReadDelegate(filesystemPath),
+                FilesystemSegmentStore.CreateWriteDelegate(filesystemPath, storageClass),
+                FilesystemSegmentStore.CreateDeleteByOwnerDelegate(filesystemPath),
+                true);
+        }
 
         if (string.IsNullOrWhiteSpace(endpoint) ||
             string.IsNullOrWhiteSpace(accessKey) ||
@@ -496,7 +548,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         };
     }
 
-    private static IReadOnlyDictionary<string, string> NormalizeMetadata(IReadOnlyDictionary<string, string> metadata)
+    internal static IReadOnlyDictionary<string, string> NormalizeMetadata(IReadOnlyDictionary<string, string> metadata)
     {
         var normalized = new Dictionary<string, string>(metadata, StringComparer.OrdinalIgnoreCase);
 

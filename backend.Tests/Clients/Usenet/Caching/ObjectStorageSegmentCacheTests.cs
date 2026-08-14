@@ -440,4 +440,77 @@ public sealed class ObjectStorageSegmentCacheTests
             PartOffset = 0
         };
     }
+
+    /// <summary>
+    /// The queue holds every pending body in memory. Bounding it by item count
+    /// alone is safe for small files but not for ~700 KB video segments: the
+    /// 16384-item default would admit ~11.7 GB on an 8 GB host before shedding.
+    /// </summary>
+    [Fact]
+    public async Task WriteQueueShedsOnBytesBeforeItemCount()
+    {
+        var releaseWriter = new TaskCompletionSource();
+        var accepted = 0;
+
+        using var cache = new ObjectStorageSegmentCache(
+            bucketName: "bucket",
+            queueCapacity: 16384,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
+            tryReadAsync: (_, _) => Task.FromResult<ObjectStorageSegmentCache.ReadResult?>(null),
+            writeAsync: async (_, _) =>
+            {
+                Interlocked.Increment(ref accepted);
+                await releaseWriter.Task;
+            },
+            queueMaxBytes: 4 * 1024 * 1024);
+
+        // Far fewer than queueCapacity, but well past the byte budget.
+        var segment = new byte[1024 * 1024];
+        for (var i = 0; i < 64; i++)
+            cache.EnqueueWrite($"segment-{i}", segment, SegmentCategory.VideoSegment, null, CreateHeader("bench.mkv"));
+
+        Assert.True(cache.L2WritesDropped > 0, "expected byte-based shedding");
+        Assert.True(
+            cache.QueueBytes <= 4 * 1024 * 1024,
+            $"queue held {cache.QueueBytes} bytes, above the 4 MB budget");
+        Assert.True(cache.QueueDepth < 64);
+
+        releaseWriter.SetResult();
+    }
+
+    /// <summary>
+    /// Drained bytes must be returned to the budget, otherwise the queue
+    /// permanently sheds every write after the first burst.
+    /// </summary>
+    [Fact]
+    public async Task DrainingTheQueueReleasesTheByteBudget()
+    {
+        var written = 0;
+        using var cache = new ObjectStorageSegmentCache(
+            bucketName: "bucket",
+            queueCapacity: 16384,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
+            tryReadAsync: (_, _) => Task.FromResult<ObjectStorageSegmentCache.ReadResult?>(null),
+            writeAsync: (_, _) =>
+            {
+                Interlocked.Increment(ref written);
+                return Task.CompletedTask;
+            },
+            queueMaxBytes: 4 * 1024 * 1024);
+
+        var segment = new byte[1024 * 1024];
+        for (var round = 0; round < 8; round++)
+        {
+            for (var i = 0; i < 2; i++)
+                cache.EnqueueWrite($"r{round}-s{i}", segment, SegmentCategory.VideoSegment, null, CreateHeader("bench.mkv"));
+
+            var deadline = DateTime.UtcNow.AddSeconds(5);
+            while (cache.QueueDepth > 0 && DateTime.UtcNow < deadline)
+                await Task.Delay(10);
+        }
+
+        Assert.Equal(16, written);
+        Assert.Equal(0, cache.L2WritesDropped);
+        Assert.Equal(0, cache.QueueBytes);
+    }
 }
