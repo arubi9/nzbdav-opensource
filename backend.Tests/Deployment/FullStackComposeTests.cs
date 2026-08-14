@@ -55,6 +55,58 @@ public sealed class FullStackComposeTests
         Assert.True(nofile.GetProperty("hard").GetInt32() >= 65536);
     }
 
+    // The L2 tier is a host-managed mount, so it is wired as a bind mount rather
+    // than a named volume. Both halves must stay in place: without the mount the
+    // path resolves to container-local disk, and without the env var the backend
+    // silently stays off.
+    [Fact]
+    public void NzbdavBindsTheL2CacheMountAndItsPathTogether()
+    {
+        using var compose = ComposeConfig(ComposePath);
+        var nzbdav = compose.RootElement.GetProperty("services").GetProperty("nzbdav");
+
+        // `docker compose config` normalizes volumes to long form, so each entry
+        // is an object with source/target rather than a "src:dst" string.
+        var l2Mounts = nzbdav.GetProperty("volumes")
+            .EnumerateArray()
+            .Select(v => v.ValueKind == JsonValueKind.String
+                ? v.GetString() ?? string.Empty
+                : v.TryGetProperty("target", out var target) ? target.GetString() ?? string.Empty : string.Empty)
+            .Where(v => v == "/l2" || v.EndsWith(":/l2", StringComparison.Ordinal))
+            .ToArray();
+
+        Assert.True(
+            l2Mounts.Length == 1,
+            $"expected exactly one /l2 mount, found {l2Mounts.Length}");
+        Assert.True(
+            nzbdav.GetProperty("environment").TryGetProperty("NZBDAV_L2_PATH", out _),
+            "NZBDAV_L2_PATH must be declared, otherwise the mount is inert");
+    }
+
+    // Artwork lives on the NAS so 100k-item image libraries do not fill the local
+    // disk; jellyfin.db stays on /config because SQLite WAL does not work over
+    // NFS. The bind must exist even while unused: Jellyfin's metadata path is
+    // operator-set, and pointing it at a path that is not a mount would silently
+    // write artwork back onto the local disk.
+    [Fact]
+    public void JellyfinBindsTheArtworkMount()
+    {
+        using var compose = ComposeConfig(ComposePath);
+        var jellyfin = compose.RootElement.GetProperty("services").GetProperty("jellyfin");
+
+        var artworkMounts = jellyfin.GetProperty("volumes")
+            .EnumerateArray()
+            .Select(v => v.ValueKind == JsonValueKind.String
+                ? v.GetString() ?? string.Empty
+                : v.TryGetProperty("target", out var target) ? target.GetString() ?? string.Empty : string.Empty)
+            .Where(v => v == "/metadata" || v.EndsWith(":/metadata", StringComparison.Ordinal))
+            .ToArray();
+
+        Assert.True(
+            artworkMounts.Length == 1,
+            $"expected exactly one /metadata mount, found {artworkMounts.Length}");
+    }
+
     // The L1 cache size was previously only reachable by hand-editing a row in
     // the runtime database, so a rebuilt stack silently reverted to the 10 GB
     // application default. Passing it through compose keeps the deployed cache
