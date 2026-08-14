@@ -2875,6 +2875,66 @@ public sealed class NzbdavLibrarySyncTaskTests
     }
 
     [Fact]
+    public void PartitionSkipsAnUnrepresentableReleaseAndItsDescendantsButKeepsTheRest()
+    {
+        var goodDir = new ManifestItem
+        {
+            Id = Guid.NewGuid(),
+            Name = "Good Movie",
+            Path = "/content/movies/Good Movie",
+            Type = "directory"
+        };
+        var goodFile = new ManifestItem
+        {
+            Id = Guid.NewGuid(),
+            ParentId = goodDir.Id,
+            Name = "Good.Movie.mkv",
+            Path = "/content/movies/Good Movie/Good.Movie.mkv",
+            Type = "nzb_file"
+        };
+        // Real-world offender: release directory name ends with a period,
+        // which Windows/SMB filesystems cannot represent.
+        var badDir = new ManifestItem
+        {
+            Id = Guid.NewGuid(),
+            Name = "Bad.Release.BLURAY-UNTOUCHED.",
+            Path = "/content/movies/Bad.Release.BLURAY-UNTOUCHED.",
+            Type = "directory"
+        };
+        var badDescendant = new ManifestItem
+        {
+            Id = Guid.NewGuid(),
+            ParentId = badDir.Id,
+            Name = "movie.mkv",
+            Path = "/content/movies/Bad.Release.BLURAY-UNTOUCHED./movie.mkv",
+            Type = "nzb_file"
+        };
+
+        var (representable, skipped) = NzbdavLibrarySyncTask.PartitionRepresentableManifestItems(
+            [goodDir, goodFile, badDir, badDescendant]);
+
+        Assert.Equal([goodDir, goodFile], representable);
+        Assert.Equal(
+            [badDir.Path, badDescendant.Path],
+            skipped);
+    }
+
+    [Fact]
+    public void PartitionKeepsAFullyRepresentableManifestIntact()
+    {
+        var items = new[]
+        {
+            new ManifestItem { Id = Guid.NewGuid(), Name = "movies", Path = "/content/movies", Type = "directory" },
+            new ManifestItem { Id = Guid.NewGuid(), Name = "a.mkv", Path = "/content/movies/a.mkv", Type = "nzb_file" }
+        };
+
+        var (representable, skipped) = NzbdavLibrarySyncTask.PartitionRepresentableManifestItems(items);
+
+        Assert.Equal(items, representable);
+        Assert.Empty(skipped);
+    }
+
+    [Fact]
     public async Task ScheduledOperationUsesSnapshotCapturedBeforeManifestAwait()
     {
         var firstRoot = CreateTestLibrary();

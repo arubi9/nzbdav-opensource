@@ -233,15 +233,30 @@ public class NzbdavLibrarySyncTask : IScheduledTask
             return;
         }
 
+        // A single release with a name the local filesystem cannot represent
+        // (e.g. a directory ending in '.') must not abort the whole sync: skip
+        // it and its descendants, and sync everything else. Descendants are
+        // excluded automatically because they carry the bad segment in their
+        // own path. Namespace collisions still abort below — those indicate
+        // manifest corruption, not one bad release name.
+        var (representableItems, skippedPaths) = PartitionRepresentableManifestItems(manifest.Items);
+        if (skippedPaths.Length > 0)
+        {
+            _logger.LogWarning(
+                "Skipping {Count} manifest item(s) whose names the filesystem cannot represent (e.g. {Examples}); the rest of the library will sync.",
+                skippedPaths.Length,
+                string.Join(", ", skippedPaths.OrderBy(p => p.Length).Take(3)));
+        }
+
         string[] expectedRelativePaths;
         var anyFailures = false;
         try
         {
-            var allItems = manifest.Items.ToDictionary(i => i.Id);
-            expectedRelativePaths = BuildExpectedStrmRelativePaths(manifest.Items, allItems);
+            var allItems = representableItems.ToDictionary(i => i.Id);
+            expectedRelativePaths = BuildExpectedStrmRelativePaths(representableItems, allItems);
 
             // Find all video files
-            var videoFiles = manifest.Items
+            var videoFiles = representableItems
                 .Where(i => i.Type is "nzb_file" or "rar_file" or "multipart_file")
                 .Where(i => IsVideoFile(i.Name))
                 .ToArray();
@@ -1636,6 +1651,27 @@ public class NzbdavLibrarySyncTask : IScheduledTask
         : IOException(message, inner)
     {
         public bool CommitOccurred { get; } = commitOccurred;
+    }
+
+    internal static (ManifestItem[] Representable, string[] SkippedPaths) PartitionRepresentableManifestItems(
+        ManifestItem[] items)
+    {
+        var representable = new List<ManifestItem>(items.Length);
+        var skipped = new List<string>();
+        foreach (var item in items)
+        {
+            try
+            {
+                ValidateManifestPathInternal(item.Path, isManifestPath: true);
+                representable.Add(item);
+            }
+            catch (ArgumentException)
+            {
+                skipped.Add(item.Path);
+            }
+        }
+
+        return (representable.ToArray(), skipped.ToArray());
     }
 
     private static string[] BuildExpectedStrmRelativePaths(
