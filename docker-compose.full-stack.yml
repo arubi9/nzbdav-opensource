@@ -130,6 +130,10 @@ services:
       - jellyfin_cache:/cache
       # Jellyfin owns this writable plugin-output library.
       - nzbdav_media:/media/nzbdav
+      # Artwork/metadata images on the NAS. Only used once the operator points
+      # Jellyfin's metadata path at /metadata; until then it is an empty bind.
+      # jellyfin.db must stay on /config: SQLite WAL does not work over NFS.
+      - "${NZBDAV_ARTWORK_HOST_PATH:-/mnt/nas-artwork}:/metadata"
     networks:
       - full_stack
     depends_on:

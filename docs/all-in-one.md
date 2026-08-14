@@ -193,6 +193,12 @@ volumes.
   unchanged. It is deliberately excluded from backups: it is a cache and is
   fully reconstructible from Usenet. It is disabled unless `NZBDAV_L2_PATH` is
   set. See [L2 segment cache](l2-cache.md).
+- Jellyfin's artwork can live on the same NAS: the Jellyfin service binds
+  `${NZBDAV_ARTWORK_HOST_PATH:-/mnt/nas-artwork}` at `/metadata`, and becomes
+  active only when the operator sets Jellyfin's metadata path (Dashboard →
+  General) to `/metadata`. Artwork is plain image files, safe over NFS and
+  regenerable from metadata providers, so it is also excluded from backups.
+  `jellyfin.db` must stay on `/config`: SQLite WAL does not work over NFS.
 
 Do not put provider passwords, indexer keys, generated secrets, or a master key
 in Git, a public Compose file, shell history, or bug reports. Do not enable
