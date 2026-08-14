@@ -64,9 +64,14 @@ provider budget; their coordination tables and behavior are not compatible.
 
 Postgres holds cluster coordination, heartbeats, leases, queue state, and
 shared metadata-cache state. Each node retains active NNTP sessions, local
-connection-pool sizing, and its local live segment cache. A shared L2 object
-cache and shared metadata cache are multi-node features only; they are not part
-of the all-in-one deployment.
+connection-pool sizing, and its local live segment cache. The shared metadata
+cache is a multi-node feature and is not part of the all-in-one deployment.
+
+The L2 segment cache is **not** multi-node-only. It is optional in any
+topology, and a single-node or all-in-one deployment can back it with a
+mounted disk or NAS. In a multi-node topology an L2 store shared by every node
+lets one node's fetch serve the others. See [L2 segment cache](l2-cache.md)
+for backends, capacity behavior, and verification.
 
 Back up Postgres and every node's local configuration according to the chosen
 orchestration platform. Test restores and preserve the NZBDAV encryption key.

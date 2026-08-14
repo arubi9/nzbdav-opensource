@@ -188,6 +188,11 @@ volumes.
 - The generated master, API, and session secrets persist in
   `nzbdav_config`. Losing the master key or its volume makes encrypted settings
   unrecoverable; restore both from the same recovery set.
+- The optional L2 segment cache at `/l2` is a **bind mount, not a named
+  volume**, so the eight-volume count and the eight backup archives above are
+  unchanged. It is deliberately excluded from backups: it is a cache and is
+  fully reconstructible from Usenet. It is disabled unless `NZBDAV_L2_PATH` is
+  set. See [L2 segment cache](l2-cache.md).
 
 Do not put provider passwords, indexer keys, generated secrets, or a master key
 in Git, a public Compose file, shell history, or bug reports. Do not enable
