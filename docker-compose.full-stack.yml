@@ -42,6 +42,10 @@ services:
       # each node can size its own disk. Left at the application default here;
       # set it in .env for deployments with room for a larger cache.
       NZBDAV_CACHE_MAX_SIZE_GB: "${NZBDAV_CACHE_MAX_SIZE_GB:-10}"
+      # Filesystem-backed L2 tier. Empty disables it, so the bind mount below
+      # is inert on hosts without the NAS attached. Set both this and
+      # NZBDAV_L2_HOST_PATH in .env to turn L2 on.
+      NZBDAV_L2_PATH: "${NZBDAV_L2_PATH:-}"
       # Optional one-shot rotation input. The entrypoint removes a blank
       # value before the root-only bootstrap secret process is sourced.
       NZBDAV_MASTER_KEY: "${NZBDAV_MASTER_KEY:-}"
@@ -81,6 +85,11 @@ services:
       - sonarr_config:/bootstrap/sonarr:ro
       - radarr_config:/bootstrap/radarr:ro
       - prowlarr_config:/bootstrap/prowlarr:ro
+      # Deep cache tier. A bind mount rather than a named volume because the
+      # backing store is host-managed (an NFS mount), and NZBDAV must be able
+      # to detect when that mount is absent rather than silently filling the
+      # host disk.
+      - "${NZBDAV_L2_HOST_PATH:-/mnt/nas-l2}:/l2"
     networks:
       - full_stack
     depends_on:
