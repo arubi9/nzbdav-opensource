@@ -142,6 +142,9 @@ public class DavDatabaseContext : DbContext
             e.HasIndex(i => new { i.ParentId, i.Name })
                 .IsUnique();
 
+            // keyset pagination over Path: ManifestController and ContentIndexSnapshotStore.
+            e.HasIndex(i => i.Path);
+
             e.HasIndex(i => new { i.IdPrefix, i.Type });
 
             e.HasIndex(i => new { i.Type, i.NextHealthCheck, i.ReleaseDate, i.Id });

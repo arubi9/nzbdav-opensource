@@ -15,7 +15,8 @@ public sealed class DavDatabaseContextMigrationTests
     private const string HistoricalCutoff = "20260419000000_FixYencLayoutColumnTypes";
     private const string SetupGrantsMigration = "20260809120000_AddSetupGrants";
     private const string SetupMutationFenceMigration = "20260809130000_AddSetupMutationFenceAndCompletion";
-    private const string LatestMigration = "20260809140000_AddSetupRunLease";
+    private const string SetupRunLeaseMigration = "20260809140000_AddSetupRunLease";
+    private const string LatestMigration = "20260810120000_AddDavItemPathIndex";
 
     private static readonly string[] ExpectedMigrationIds =
     [
@@ -49,6 +50,7 @@ public sealed class DavDatabaseContextMigrationTests
         HistoricalCutoff,
         SetupGrantsMigration,
         SetupMutationFenceMigration,
+        SetupRunLeaseMigration,
         LatestMigration,
     ];
 
@@ -124,7 +126,7 @@ public sealed class DavDatabaseContextMigrationTests
 
             await DatabaseInitialization.InitializeAsync(dbContext, CancellationToken.None, SetupMutationFenceMigration);
             Assert.False(await TableExistsAsync(dbContext, "setup_run_leases"));
-            await AssertMigrationHistoryAsync(dbContext, ExpectedMigrationIds.Take(ExpectedMigrationIds.Length - 1));
+            await AssertMigrationHistoryAsync(dbContext, ExpectedMigrationIds.Take(ExpectedMigrationIds.Length - 2));
 
             await DatabaseInitialization.InitializeAsync(dbContext, CancellationToken.None);
             await AssertMigrationHistoryAsync(dbContext, ExpectedMigrationIds);
@@ -177,6 +179,7 @@ public sealed class DavDatabaseContextMigrationTests
             await DatabaseInitialization.InitializeAsync(dbContext, CancellationToken.None, LatestMigration);
 
             Assert.True(await TableExistsAsync(dbContext, "setup_run_leases"));
+            Assert.True(await IndexExistsAsync(dbContext, "IX_DavItems_Path"));
             // Remove rows seeded by historical migrations, then repeat the
             // explicit target. The current bootstrap must not recreate them.
             await dbContext.Database.ExecuteSqlRawAsync(
@@ -261,6 +264,9 @@ public sealed class DavDatabaseContextMigrationTests
             Assert.Contains(
                 "IX_setup_grants_expires_at_utc",
                 await IndexNamesAsync(dbContext, "setup_grants"));
+            // Non-unique keyset index used by manifest paging and the content-index snapshot writer.
+            Assert.Contains("IX_DavItems_Path", await IndexNamesAsync(dbContext, "DavItems"));
+            Assert.True(await IndexExistsAsync(dbContext, "IX_DavItems_Path"));
             Assert.Equal(1L, await ScalarAsync(dbContext, "SELECT COUNT(*) FROM setup_mutation_fence WHERE id = 1 AND epoch = 0;"));
             Assert.Equal(
                 1L,
@@ -299,7 +305,8 @@ public sealed class DavDatabaseContextMigrationTests
             Assert.Equal("survives", await ScalarAsync(dbContext, "SELECT ConfigValue FROM ConfigItems WHERE ConfigName = 'migration-sentinel';"));
 
             await dbContext.Database.MigrateAsync(SetupMutationFenceMigration);
-            await AssertMigrationHistoryAsync(dbContext, ExpectedMigrationIds.Take(ExpectedMigrationIds.Length - 1));
+            await AssertMigrationHistoryAsync(dbContext, ExpectedMigrationIds.Take(ExpectedMigrationIds.Length - 2));
+            Assert.False(await IndexExistsAsync(dbContext, "IX_DavItems_Path"));
             Assert.True(await TableExistsAsync(dbContext, "setup_grants"));
             Assert.True(await TableExistsAsync(dbContext, "setup_mutation_fence"));
             Assert.True(await TableExistsAsync(dbContext, "setup_completion_operations"));
@@ -309,7 +316,7 @@ public sealed class DavDatabaseContextMigrationTests
             Assert.True(await TableExistsAsync(dbContext, "setup_grants"));
             Assert.False(await TableExistsAsync(dbContext, "setup_mutation_fence"));
             Assert.False(await TableExistsAsync(dbContext, "setup_completion_operations"));
-            await AssertMigrationHistoryAsync(dbContext, ExpectedMigrationIds.Take(ExpectedMigrationIds.Length - 2));
+            await AssertMigrationHistoryAsync(dbContext, ExpectedMigrationIds.Take(ExpectedMigrationIds.Length - 3));
 
             await dbContext.Database.MigrateAsync(HistoricalCutoff);
             Assert.False(await TableExistsAsync(dbContext, "setup_grants"));
@@ -348,7 +355,7 @@ public sealed class DavDatabaseContextMigrationTests
             var downgradeScript = migrator.GenerateScript(LatestMigration, HistoricalCutoff);
             AssertMigrationScriptOrder(
                 downgradeScript,
-                new[] { LatestMigration, SetupMutationFenceMigration, SetupGrantsMigration });
+                new[] { LatestMigration, SetupRunLeaseMigration, SetupMutationFenceMigration, SetupGrantsMigration });
 
             var scriptOptions = DavDatabaseContextOptionsFactory.CreateSqliteOptions<DavDatabaseContext>(
                 scriptDatabasePath,
@@ -492,6 +499,25 @@ public sealed class DavDatabaseContextMigrationTests
         while (await reader.ReadAsync())
             columns.Add(reader.GetString(1));
         return columns;
+    }
+
+    private static async Task<bool> IndexExistsAsync(DavDatabaseContext dbContext, string indexName)
+    {
+        await using var command = dbContext.Database.GetDbConnection().CreateCommand();
+        if (command.Connection!.State != ConnectionState.Open)
+            await command.Connection.OpenAsync();
+
+        command.CommandText = @"
+            SELECT COUNT(*)
+            FROM sqlite_master
+            WHERE type = 'index' AND name = @indexName;";
+
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = "indexName";
+        parameter.Value = indexName;
+        command.Parameters.Add(parameter);
+
+        return Convert.ToInt32(await command.ExecuteScalarAsync()) > 0;
     }
 
     private static async Task<IReadOnlyList<string>> IndexNamesAsync(DavDatabaseContext dbContext, string tableName)

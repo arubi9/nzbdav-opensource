@@ -100,7 +100,7 @@ public sealed class DavDatabaseContextPostgresTests : IClassFixture<PostgresHead
         var expected = migrationContext.Database.GetMigrations().ToArray();
         var actual = await migrationContext.Database.GetAppliedMigrationsAsync();
 
-        Assert.Equal(31, expected.Length);
+        Assert.Equal(32, expected.Length);
         Assert.Equal(expected, actual);
         Assert.Equal(5, await databaseContext.Items.CountAsync(x =>
             x.Id == DavItem.Root.Id
@@ -157,7 +157,7 @@ public sealed class DavDatabaseContextPostgresTests : IClassFixture<PostgresHead
         await Task.WhenAll(first, second);
 
         await using var verifyContext = CreateMigrationContext();
-        Assert.Equal(31, (await verifyContext.Database.GetAppliedMigrationsAsync()).Count());
+        Assert.Equal(32, (await verifyContext.Database.GetAppliedMigrationsAsync()).Count());
         await using var databaseContext = new DavDatabaseContext();
         Assert.Equal(1, await databaseContext.Items.CountAsync(x => x.Id == DavItem.Root.Id));
         Assert.Equal(1, await databaseContext.ConfigItems.CountAsync(x => x.ConfigName == "api.key"));
@@ -182,7 +182,7 @@ public sealed class DavDatabaseContextPostgresTests : IClassFixture<PostgresHead
 
         await DatabaseInitialization.InitializeAsync(databaseContext, CancellationToken.None);
         await using var latestContext = CreateMigrationContext();
-        Assert.Equal(31, (await latestContext.Database.GetAppliedMigrationsAsync()).Count());
+        Assert.Equal(32, (await latestContext.Database.GetAppliedMigrationsAsync()).Count());
     }
 
     [Fact]

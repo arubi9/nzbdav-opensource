@@ -176,6 +176,8 @@ namespace NzbWebDAV.Database.Migrations
                     b.HasIndex("ParentId", "Name")
                         .IsUnique();
 
+                    b.HasIndex("Path");
+
                     b.HasIndex("Type", "NextHealthCheck", "ReleaseDate", "Id");
 
                     b.ToTable("DavItems", (string)null);
