@@ -36,6 +36,25 @@ public sealed class FullStackComposeTests
             Assert.Equal(["NET_RAW"], service.Value.GetProperty("cap_drop").EnumerateArray().Select(x => x.GetString())));
     }
 
+    // Descriptors scale with (concurrent streams x article buffer) because every
+    // buffered segment is an open file in the L1 cache. Docker's 1024 default was
+    // exhausted by ~20 concurrent 4K streams, which surfaced as reads aborting
+    // mid-response with "No file descriptors available" - a truncated file to the
+    // client, since the response had already started.
+    [Fact]
+    public void NzbdavRaisesTheFileDescriptorLimitForConcurrentStreaming()
+    {
+        using var compose = ComposeConfig(ComposePath);
+        var nofile = compose.RootElement
+            .GetProperty("services")
+            .GetProperty("nzbdav")
+            .GetProperty("ulimits")
+            .GetProperty("nofile");
+
+        Assert.True(nofile.GetProperty("soft").GetInt32() >= 65536);
+        Assert.True(nofile.GetProperty("hard").GetInt32() >= 65536);
+    }
+
     [Fact]
     public void NvidiaOverride_AddsGpuOnlyToJellyfin()
     {

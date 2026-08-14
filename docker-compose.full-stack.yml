@@ -23,6 +23,16 @@ services:
       dockerfile: Dockerfile
       args:
         NZBDAV_VERSION: 0.6.4
+    # Each buffered segment of each in-flight stream is an open file in the L1
+    # cache, so descriptors scale with (concurrent streams x article buffer)
+    # plus the NNTP connection pool. Docker's 1024 default is exhausted by ~20
+    # concurrent 4K streams, and the failure is ugly: reads abort mid-stream
+    # with "No file descriptors available" after the response has already
+    # started, so the client just sees a truncated file.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     environment:
       PUID: "${PUID:-1000}"
       PGID: "${PGID:-1000}"
