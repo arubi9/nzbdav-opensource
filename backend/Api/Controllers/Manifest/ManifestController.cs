@@ -64,10 +64,15 @@ public class ManifestController(DavDatabaseClient dbClient, LiveSegmentCache liv
                 return InvalidManifest("Manifest cursor is malformed.");
         }
 
-        // Paging keys on Path alone. Path is already required to be unique -- the
-        // duplicate check below rejects the manifest outright otherwise -- so it is a
-        // complete sort key, and unlike Id it orders identically in .NET, SQLite and
-        // Postgres. Guid ordering does not agree across those three.
+        // Paging keys on Path alone, which is only a complete sort key because paths are
+        // unique: DavItem has a unique index on (ParentId, Name) and a path is its
+        // parent's path plus its name. Duplicate paths therefore require the Path column
+        // to already disagree with the parent tree, and the duplicate check below still
+        // rejects that outright whenever both copies land on one page.
+        //
+        // Id is deliberately not part of the key. Guid ordering differs between .NET,
+        // SQLite and Postgres, so a composite cursor would need a tuple comparison that
+        // EF cannot reliably translate for every provider.
         var hasCursor = afterPath.Length > 0;
 
         // Do not materialize entities or an unbounded query. The projection is
