@@ -14,7 +14,13 @@ public sealed class NzbdavApiClient
         PooledConnectionLifetime = TimeSpan.FromMinutes(5)
     }) { Timeout = Timeout.InfiniteTimeSpan };
 
-    private const int MaxManifestItems = 50_000;
+    // Bounds the assembled tree rather than a single response. Paging means the
+    // server no longer caps what a library may contain, so this is the remaining
+    // guard against an unbounded read; at roughly 200 bytes per item it is about
+    // 50 MB, which a Jellyfin host can absorb.
+    private const int MaxManifestItems = 250_000;
+
+    private const int MaxManifestWalkRestarts = 3;
     private const int MaxManifestContentLength = 8 * 1024 * 1024;
     private const int MaxManifestJsonDepth = 64;
     private const int MaxManifestStringBytes = 8 * 1024 * 1024;
@@ -134,9 +140,87 @@ public sealed class NzbdavApiClient
         }
     }
 
+    /// <summary>
+    /// Retrieves the whole /content tree, following pages when the server serves them.
+    /// Callers receive one assembled manifest either way.
+    /// </summary>
     public async Task<(ManifestResponse? Manifest, string? ETag)> GetManifestAsync(string? ifNoneMatch, CancellationToken ct)
     {
-        var request = CreateRequest(HttpMethod.Get, $"{BaseUrl}/api/manifest");
+        // A tree that changes mid-walk yields a torn view, so the walk restarts. Content
+        // is added continuously during a large import, so a couple of restarts are
+        // expected; an endless supply of them is a signal to give up and let the next
+        // scheduled sync try, rather than to keep hammering the server.
+        for (var attempt = 0; ; attempt++)
+        {
+            var walk = await TryWalkManifestAsync(ifNoneMatch, ct).ConfigureAwait(false);
+            if (!walk.Torn) return (walk.Manifest, walk.ETag);
+            if (attempt >= MaxManifestWalkRestarts)
+                throw new HttpRequestException("Manifest changed on the server during every paged read attempt.");
+        }
+    }
+
+    private async Task<(ManifestResponse? Manifest, string? ETag, bool Torn)> TryWalkManifestAsync(
+        string? ifNoneMatch, CancellationToken ct)
+    {
+        var items = new List<ManifestItem>();
+        var seenCursors = new HashSet<string>(StringComparer.Ordinal);
+        string? cursor = null;
+        string? firstETag = null;
+        string? version = null;
+        var versionKnown = false;
+
+        while (true)
+        {
+            // Only the first page is revalidated; the server refuses If-None-Match on
+            // later pages precisely because a 304 there would mean nothing useful.
+            var (page, etag, notModified) = await GetManifestPageAsync(
+                cursor is null ? ifNoneMatch : null, cursor, ct).ConfigureAwait(false);
+
+            if (notModified) return (null, etag, false);
+            firstETag ??= etag;
+
+            if (!versionKnown)
+            {
+                version = page.Version;
+                versionKnown = true;
+            }
+            else if (!string.Equals(version, page.Version, StringComparison.Ordinal))
+            {
+                return (null, null, true);
+            }
+
+            items.AddRange(page.Items);
+            if (items.Count > _maxManifestItems)
+                throw new HttpRequestException("Manifest response contains too many items.");
+
+            cursor = page.NextCursor;
+            if (string.IsNullOrEmpty(cursor)) break;
+
+            // A cursor that repeats would loop forever and grow items without bound.
+            if (!seenCursors.Add(cursor))
+                throw new HttpRequestException("Manifest paging did not advance.");
+        }
+
+        // Uniqueness has to be judged across the assembled set, not per page: two pages
+        // could each be internally consistent and still collide with each other.
+        var manifest = new ManifestResponse
+        {
+            ItemCount = items.Count,
+            Items = items.ToArray()
+        };
+        ValidateManifest(manifest);
+        return (manifest, firstETag, false);
+    }
+
+    private async Task<(ManifestResponse Page, string? ETag, bool NotModified)> GetManifestPageAsync(
+        string? ifNoneMatch, string? after, CancellationToken ct)
+    {
+        // paged=true is an opt-in the server requires before it will paginate, so that
+        // it never hands a truncated tree to a plugin that cannot follow cursors.
+        var url = $"{BaseUrl}/api/manifest?paged=true";
+        if (!string.IsNullOrEmpty(after)) url += $"&after={Uri.EscapeDataString(after)}";
+
+        var request = CreateRequest(HttpMethod.Get, url);
         if (!string.IsNullOrEmpty(ifNoneMatch))
             request.Headers.IfNoneMatch.Add(new System.Net.Http.Headers.EntityTagHeaderValue(ifNoneMatch));
 
@@ -145,17 +229,19 @@ public sealed class NzbdavApiClient
         using (var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeoutCts.Token).ConfigureAwait(false))
         {
             var etag = response.Headers.ETag?.Tag;
-            if (response.StatusCode == System.Net.HttpStatusCode.NotModified) return (null, etag);
+            if (response.StatusCode == System.Net.HttpStatusCode.NotModified)
+                return (new ManifestResponse(), etag, true);
             response.EnsureSuccessStatusCode();
 
             var body = await ReadBodyAsync(response.Content, _maxManifestContentLength, timeoutCts.Token, "Manifest").ConfigureAwait(false);
             if (body.Length == 0) throw new HttpRequestException("Manifest response body is empty.");
             using var document = ParseManifestJson(body);
-            ValidateJsonLimits(document.RootElement, _maxManifestItems, MaxManifestStringBytes);
-            var manifest = JsonSerializer.Deserialize<ManifestResponse>(body, ManifestResponseJsonOptions)
+            ValidateJsonLimits(document.RootElement, MaxJsonArrayItems, MaxManifestStringBytes);
+            var page = JsonSerializer.Deserialize<ManifestResponse>(body, ManifestResponseJsonOptions)
                 ?? throw new HttpRequestException("Manifest response was malformed.");
-            ValidateManifest(manifest);
-            return (manifest, etag);
+            if (page.Items is null || page.ItemCount != page.Items.Length)
+                throw new HttpRequestException("Manifest item count is invalid.");
+            return (page, etag, false);
         }
     }
 

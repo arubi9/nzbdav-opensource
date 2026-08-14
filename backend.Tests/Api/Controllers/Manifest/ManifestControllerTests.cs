@@ -304,7 +304,7 @@ public sealed class ManifestControllerTests
             }
         };
 
-        var result = await controller.GetManifest(cancellationToken);
+        var result = await controller.GetManifest(paged: false, after: null, cancellationToken);
         return new ManifestControllerResult(result, request);
     }
 

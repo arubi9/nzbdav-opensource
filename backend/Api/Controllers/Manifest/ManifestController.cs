@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -8,6 +9,7 @@ using NzbWebDAV.Api.Filters;
 using NzbWebDAV.Clients.Usenet.Caching;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
+using NzbWebDAV.Services;
 
 namespace NzbWebDAV.Api.Controllers.Manifest;
 
@@ -20,7 +22,13 @@ public class ManifestController(DavDatabaseClient dbClient, LiveSegmentCache liv
     // Keep this below the plugin's 8 MiB input cap. The response is built in a
     // fixed-size buffer, so serialization can never grow beyond this limit.
     internal const int MaxManifestResponseBytes = 7 * 1024 * 1024;
+
+    // Unpaged callers still get one document, so they keep the original ceiling.
+    // Paged callers reuse the same number as a page size: every per-response bound
+    // below is a property of the response, not of the library, so a page that
+    // respects them is servable no matter how large the tree grows.
     private const int MaxManifestItems = 10_000;
+    internal const int MaxCursorLength = 2_048;
     private const int MaxManifestInputUtf16Chars = 2 * 1024 * 1024;
     private const int MaxManifestInputUtf8Bytes = 4 * 1024 * 1024;
     private const int MaxPathLength = 1_024;
@@ -32,16 +40,43 @@ public class ManifestController(DavDatabaseClient dbClient, LiveSegmentCache liv
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
+    /// <param name="paged">
+    /// Opt-in. An older plugin that does not understand <c>nextCursor</c> would treat
+    /// every item beyond the first page as deleted and quarantine it, so pagination is
+    /// never applied unless the caller asks for it.
+    /// </param>
+    /// <param name="after">Opaque cursor from the previous page's <c>nextCursor</c>.</param>
     [HttpGet]
-    public async Task<IActionResult> GetManifest(CancellationToken ct)
+    public async Task<IActionResult> GetManifest(
+        [FromQuery] bool paged,
+        [FromQuery] string? after,
+        CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
+
+        if (!paged && !string.IsNullOrEmpty(after))
+            return InvalidManifest("Manifest cursors require paged=true.");
+
+        var afterPath = string.Empty;
+        if (!string.IsNullOrEmpty(after))
+        {
+            if (!TryDecodeCursor(after, out afterPath))
+                return InvalidManifest("Manifest cursor is malformed.");
+        }
+
+        // Paging keys on Path alone. Path is already required to be unique -- the
+        // duplicate check below rejects the manifest outright otherwise -- so it is a
+        // complete sort key, and unlike Id it orders identically in .NET, SQLite and
+        // Postgres. Guid ordering does not agree across those three.
+        var hasCursor = afterPath.Length > 0;
 
         // Do not materialize entities or an unbounded query. The projection is
         // deliberately kept here so the database only returns manifest data.
         var manifestRows = dbClient.Ctx.Items
             .AsNoTracking()
             .Where(x => x.Path.StartsWith("/content/"))
+            .Where(x => !hasCursor || string.Compare(x.Path, afterPath) > 0)
+            .OrderBy(x => x.Path)
             .Select(x => new
             {
                 x.Id,
@@ -64,10 +99,23 @@ public class ManifestController(DavDatabaseClient dbClient, LiveSegmentCache liv
         var inputUtf16Chars = 0L;
         var inputUtf8Bytes = 0L;
 
+        // Set when a bound stopped the page early rather than the tree running out.
+        var hasMore = false;
+
+        // The cursor must be the last path in *database* order. The sort below reorders
+        // this page ordinally for stable output bytes, and the database collation need
+        // not agree with ordinal comparison, so reading the cursor off the sorted list
+        // would skip or repeat rows at every page boundary.
+        var cursorPath = string.Empty;
+
         await foreach (var row in manifestRows.WithCancellation(ct).ConfigureAwait(false))
         {
             if (items.Count == MaxManifestItems)
-                return TooLarge("Manifest contains too many items.");
+            {
+                if (!paged) return TooLarge("Manifest contains too many items.");
+                hasMore = true;
+                break;
+            }
 
             if (row.Name is null || row.Path is null || row.Type is null)
                 return InvalidManifest("Manifest contains an item with a missing string field.");
@@ -90,7 +138,15 @@ public class ManifestController(DavDatabaseClient dbClient, LiveSegmentCache liv
             }
             if (inputUtf16Chars > MaxManifestInputUtf16Chars - rowUtf16Chars
                 || inputUtf8Bytes > MaxManifestInputUtf8Bytes - rowUtf8Bytes)
-                return TooLarge("Manifest contains too much string data.");
+            {
+                // A single row that cannot fit an empty page is unservable at any page
+                // size. Failing here is what stops the caller looping on a page that
+                // can never make progress.
+                if (!paged || items.Count == 0)
+                    return TooLarge("Manifest contains too much string data.");
+                hasMore = true;
+                break;
+            }
             inputUtf16Chars += rowUtf16Chars;
             inputUtf8Bytes += rowUtf8Bytes;
 
@@ -107,6 +163,7 @@ public class ManifestController(DavDatabaseClient dbClient, LiveSegmentCache liv
                 CreatedAt = row.CreatedAt,
                 HasProbeData = hasProbeData
             });
+            cursorPath = row.Path;
         }
 
         // Database ordering is not part of the contract. Sort the bounded set
@@ -117,7 +174,16 @@ public class ManifestController(DavDatabaseClient dbClient, LiveSegmentCache liv
             return pathComparison != 0 ? pathComparison : left.Id.CompareTo(right.Id);
         });
 
-        var response = new ManifestResponse { ItemCount = items.Count, Items = items };
+        var response = new ManifestResponse
+        {
+            ItemCount = items.Count,
+            Items = items,
+            // Null in unpaged mode, and both properties are omitted when null, so an
+            // unpaged response is byte-identical to the one served before paging
+            // existed. That keeps existing ETags valid across this change.
+            NextCursor = hasMore && cursorPath.Length > 0 ? EncodeCursor(cursorPath) : null,
+            Version = paged ? ManifestVersion.Token : null
+        };
         byte[] serialized;
         try
         {
@@ -134,18 +200,57 @@ public class ManifestController(DavDatabaseClient dbClient, LiveSegmentCache liv
             return TooLarge("Manifest JSON is too large.");
         }
 
-        // Hash the bytes clients actually receive. In particular, this keeps
+        // Unpaged: hash the bytes clients actually receive. In particular, this keeps
         // ETags coupled to JSON escaping and property ordering.
-        var etag = $"\"{Convert.ToHexString(SHA256.HashData(serialized))}\"";
+        //
+        // Paged: hashing one page would only prove that page unchanged, so a 304 on it
+        // would wrongly imply the rest of the tree is unchanged too. Use the tree
+        // version instead, which moves on any content or probe change.
+        var etag = paged
+            ? $"\"{ManifestVersion.Token}\""
+            : $"\"{Convert.ToHexString(SHA256.HashData(serialized))}\"";
         Response.Headers.ETag = etag;
         Response.Headers.CacheControl = "private, max-age=30";
-        if (Request.Headers.IfNoneMatch.Any(value => string.Equals((value ?? string.Empty).Trim(), etag, StringComparison.Ordinal)))
+
+        // Only the first page may be revalidated. Honouring If-None-Match on a later
+        // page would answer "the tree is unchanged" to a question about one slice of it,
+        // leaving the caller with a truncated walk.
+        var mayRevalidate = !hasCursor;
+        if (mayRevalidate && Request.Headers.IfNoneMatch.Any(value => string.Equals((value ?? string.Empty).Trim(), etag, StringComparison.Ordinal)))
         {
             Response.StatusCode = StatusCodes.Status304NotModified;
             return new EmptyResult();
         }
 
         return File(serialized, "application/json");
+    }
+
+    /// <summary>Cursors are opaque to clients; the encoding only has to round-trip.</summary>
+    private static string EncodeCursor(string path)
+        => Convert.ToBase64String(Utf8.GetBytes(path));
+
+    private static bool TryDecodeCursor(string cursor, out string path)
+    {
+        path = string.Empty;
+        if (cursor.Length > MaxCursorLength) return false;
+
+        Span<byte> decoded = new byte[MaxCursorLength];
+        if (!Convert.TryFromBase64String(cursor, decoded, out var written)) return false;
+
+        try
+        {
+            // Throws on malformed UTF-8 because Utf8 is constructed to.
+            path = Utf8.GetString(decoded[..written]);
+        }
+        catch (DecoderFallbackException)
+        {
+            return false;
+        }
+
+        // A cursor is a path the caller was previously given. Anything else is either a
+        // client bug or someone probing, and both deserve the same flat rejection.
+        return path.Length is > 0 and <= MaxPathLength
+               && path.StartsWith("/content/", StringComparison.Ordinal);
     }
 
     private static int GetUtf8ByteCount(string value)
@@ -231,6 +336,17 @@ public class ManifestResponse
 {
     public required int ItemCount { get; init; }
     public required List<ManifestItem> Items { get; init; }
+
+    /// <summary>Cursor for the next page, or null when this is the last page.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? NextCursor { get; init; }
+
+    /// <summary>
+    /// Identifies the tree these pages were read from. A caller that sees this change
+    /// mid-walk has assembled a torn view and must start over.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Version { get; init; }
 }
 
 public class ManifestItem
