@@ -1156,6 +1156,23 @@ public class ConfigManager
     public string? GetL2Endpoint()
         => StringUtil.EmptyToNull(GetConfigValue("cache.l2.endpoint"));
 
+    /// <summary>
+    /// Root directory for the filesystem-backed L2 tier (typically a mounted NAS).
+    /// When set, it takes precedence over the S3 endpoint: the object-storage
+    /// round trip is pure overhead once the bytes are reachable through the
+    /// filesystem.
+    /// </summary>
+    public string? GetL2Path()
+    {
+        // NZBDAV_L2_PATH overrides the shared DB config for the same reason as
+        // NZBDAV_CACHE_MAX_SIZE_GB: a mount point is a property of the node, not
+        // of the cluster. Nodes without the NAS mounted must not inherit it.
+        var envOverride = EnvironmentUtil.GetEnvironmentVariable("NZBDAV_L2_PATH");
+        if (!string.IsNullOrWhiteSpace(envOverride))
+            return envOverride;
+        return StringUtil.EmptyToNull(GetConfigValue("cache.l2.path"));
+    }
+
     public string GetL2BucketName()
         => StringUtil.EmptyToNull(GetConfigValue("cache.l2.bucket-name")) ?? "nzbdav-segments";
 
