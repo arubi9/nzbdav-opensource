@@ -107,6 +107,23 @@ public sealed class FullStackComposeTests
             $"expected exactly one /metadata mount, found {artworkMounts.Length}");
     }
 
+    // Ingest parallelism must be reproducible from the committed .env for the same
+    // reason as the cache size: the application default is serial (1), which is the
+    // wrong shape for bulk library imports and invisible if only set by hand.
+    [Fact]
+    public void NzbdavPassesTheQueueParallelismThroughFromTheEnvironment()
+    {
+        using var compose = ComposeConfig(ComposePath);
+        var environment = compose.RootElement
+            .GetProperty("services")
+            .GetProperty("nzbdav")
+            .GetProperty("environment");
+
+        Assert.True(
+            environment.TryGetProperty("NZBDAV_QUEUE_PARALLELISM", out _),
+            "NZBDAV_QUEUE_PARALLELISM must pass through compose, otherwise .env cannot set it");
+    }
+
     // The L1 cache size was previously only reachable by hand-editing a row in
     // the runtime database, so a rebuilt stack silently reverted to the 10 GB
     // application default. Passing it through compose keeps the deployed cache

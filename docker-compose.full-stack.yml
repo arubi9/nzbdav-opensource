@@ -42,6 +42,10 @@ services:
       # each node can size its own disk. Left at the application default here;
       # set it in .env for deployments with room for a larger cache.
       NZBDAV_CACHE_MAX_SIZE_GB: "${NZBDAV_CACHE_MAX_SIZE_GB:-10}"
+      # Ingest parallelism for bulk imports; NZBs in the queue are processed
+      # this many at a time. They share the NNTP connection pool, so gains
+      # taper; 4 keeps bulk adds moving without starving live playback.
+      NZBDAV_QUEUE_PARALLELISM: "${NZBDAV_QUEUE_PARALLELISM:-1}"
       # Filesystem-backed L2 tier. Empty disables it, so the bind mount below
       # is inert on hosts without the NAS attached. Set both this and
       # NZBDAV_L2_HOST_PATH in .env to turn L2 on.
