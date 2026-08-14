@@ -17,8 +17,9 @@ public sealed class NzbdavApiClient
     // Bounds the assembled tree rather than a single response. Paging means the
     // server no longer caps what a library may contain, so this is the remaining
     // guard against an unbounded read; at roughly 200 bytes per item it is about
-    // 50 MB, which a Jellyfin host can absorb.
-    private const int MaxManifestItems = 250_000;
+    // 50 MB, which a Jellyfin host can absorb. Operators with larger libraries
+    // raise it through configuration; it is never switched off.
+    private const int DefaultMaxManifestItems = 250_000;
 
     private const int MaxManifestWalkRestarts = 3;
     private const int MaxManifestContentLength = 8 * 1024 * 1024;
@@ -49,9 +50,14 @@ public sealed class NzbdavApiClient
         // SharedHttp is configured once at type initialization. HttpClient
         // properties cannot be changed after the first request is sent.
         _http = handler is null ? SharedHttp : CreateHttpClient(handler);
-        _maxManifestItems = maxManifestItems ?? MaxManifestItems;
+        _maxManifestItems = maxManifestItems ?? ResolveMaxManifestItems(config);
         _maxManifestContentLength = maxManifestContentLength ?? MaxManifestContentLength;
     }
+
+    // A cap of zero or less would reject every manifest, which is a misconfiguration
+    // rather than a stricter policy, so it falls back to the default instead.
+    private static int ResolveMaxManifestItems(PluginConfiguration config)
+        => config.MaxManifestItems > 0 ? config.MaxManifestItems : DefaultMaxManifestItems;
 
     private static HttpClient CreateHttpClient(HttpMessageHandler handler)
     {

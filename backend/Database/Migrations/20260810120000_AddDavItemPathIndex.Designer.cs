@@ -2,42 +2,40 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
-using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using NzbWebDAV.Database;
 
 #nullable disable
 
-namespace NzbWebDAV.Database.Migrations.Postgres
+namespace NzbWebDAV.Database.Migrations
 {
-    [DbContext(typeof(PostgresDavMigrationContext))]
-    partial class PostgresDavMigrationContextModelSnapshot : ModelSnapshot
+    [DbContext(typeof(DavDatabaseContext))]
+    [Migration("20260810120000_AddDavItemPathIndex")]
+    partial class AddDavItemPathIndex
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
-            modelBuilder
-                .HasAnnotation("ProductVersion", "10.0.4")
-                .HasAnnotation("Relational:MaxIdentifierLength", 63);
-
-            NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
+            modelBuilder.HasAnnotation("ProductVersion", "10.0.4");
 
             modelBuilder.Entity("NzbWebDAV.Database.Models.Account", b =>
                 {
                     b.Property<int>("Type")
-                        .HasColumnType("integer");
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("Username")
                         .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("PasswordHash")
                         .IsRequired()
-                        .HasColumnType("text");
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("RandomSalt")
                         .IsRequired()
-                        .HasColumnType("text");
+                        .HasColumnType("TEXT");
 
                     b.HasKey("Type", "Username");
 
@@ -47,15 +45,15 @@ namespace NzbWebDAV.Database.Migrations.Postgres
             modelBuilder.Entity("NzbWebDAV.Database.Models.AuthFailureEntry", b =>
                 {
                     b.Property<string>("IpAddress")
-                        .HasColumnType("text")
+                        .HasColumnType("TEXT")
                         .HasColumnName("ip_address");
 
                     b.Property<int>("FailureCount")
-                        .HasColumnType("integer")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("failure_count");
 
                     b.Property<DateTime>("WindowStart")
-                        .HasColumnType("timestamp with time zone")
+                        .HasColumnType("TEXT")
                         .HasColumnName("window_start");
 
                     b.HasKey("IpAddress");
@@ -69,7 +67,7 @@ namespace NzbWebDAV.Database.Migrations.Postgres
             modelBuilder.Entity("NzbWebDAV.Database.Models.BlobCleanupItem", b =>
                 {
                     b.Property<Guid>("Id")
-                        .HasColumnType("uuid");
+                        .HasColumnType("TEXT");
 
                     b.HasKey("Id");
 
@@ -79,15 +77,15 @@ namespace NzbWebDAV.Database.Migrations.Postgres
             modelBuilder.Entity("NzbWebDAV.Database.Models.ConfigItem", b =>
                 {
                     b.Property<string>("ConfigName")
-                        .HasColumnType("text");
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("ConfigValue")
                         .IsRequired()
-                        .HasColumnType("text");
+                        .HasColumnType("TEXT");
 
                     b.Property<bool>("IsEncrypted")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("boolean")
+                        .HasColumnType("INTEGER")
                         .HasDefaultValue(false);
 
                     b.HasKey("ConfigName");
@@ -98,20 +96,20 @@ namespace NzbWebDAV.Database.Migrations.Postgres
             modelBuilder.Entity("NzbWebDAV.Database.Models.ConnectionPoolClaim", b =>
                 {
                     b.Property<string>("NodeId")
-                        .HasColumnType("text")
+                        .HasColumnType("TEXT")
                         .HasColumnName("node_id");
 
                     b.Property<int>("ProviderIndex")
-                        .HasColumnType("integer")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("provider_index");
 
                     b.Property<int>("ClaimedSlots")
-                        .HasColumnType("integer")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("claimed_slots");
 
                     b.Property<DateTime>("HeartbeatAt")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp with time zone")
+                        .HasColumnType("TEXT")
                         .HasColumnName("heartbeat_at")
                         .HasDefaultValueSql("CURRENT_TIMESTAMP");
 
@@ -126,53 +124,53 @@ namespace NzbWebDAV.Database.Migrations.Postgres
             modelBuilder.Entity("NzbWebDAV.Database.Models.DavItem", b =>
                 {
                     b.Property<Guid>("Id")
-                        .HasColumnType("uuid");
+                        .HasColumnType("TEXT");
 
                     b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("TEXT");
 
                     b.Property<long?>("FileSize")
-                        .HasColumnType("bigint");
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("IdPrefix")
                         .IsRequired()
-                        .HasColumnType("text");
+                        .HasColumnType("TEXT");
 
                     b.Property<long?>("LastHealthCheck")
-                        .HasColumnType("bigint");
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
+                        .HasColumnType("TEXT");
 
                     b.Property<long?>("NextHealthCheck")
-                        .HasColumnType("bigint");
+                        .HasColumnType("INTEGER");
 
                     b.Property<Guid?>("ParentId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("Path")
                         .IsRequired()
-                        .HasColumnType("text");
+                        .HasColumnType("TEXT");
 
                     b.Property<long?>("ReleaseDate")
-                        .HasColumnType("bigint");
+                        .HasColumnType("INTEGER");
 
                     b.Property<int>("Type")
-                        .HasColumnType("integer");
+                        .HasColumnType("INTEGER");
 
                     b.Property<long?>("YencLastPartSize")
-                        .HasColumnType("bigint");
+                        .HasColumnType("INTEGER");
 
                     b.Property<bool?>("YencLayoutUniform")
-                        .HasColumnType("boolean");
+                        .HasColumnType("INTEGER");
 
                     b.Property<long?>("YencPartSize")
-                        .HasColumnType("bigint");
+                        .HasColumnType("INTEGER");
 
                     b.Property<int?>("YencSegmentCount")
-                        .HasColumnType("integer");
+                        .HasColumnType("INTEGER");
 
                     b.HasKey("Id");
 
@@ -191,7 +189,7 @@ namespace NzbWebDAV.Database.Migrations.Postgres
             modelBuilder.Entity("NzbWebDAV.Database.Models.DavMultipartFile", b =>
                 {
                     b.Property<Guid>("Id")
-                        .HasColumnType("uuid");
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("Metadata")
                         .IsRequired()
@@ -205,7 +203,7 @@ namespace NzbWebDAV.Database.Migrations.Postgres
             modelBuilder.Entity("NzbWebDAV.Database.Models.DavNzbFile", b =>
                 {
                     b.Property<Guid>("Id")
-                        .HasColumnType("uuid");
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("SegmentIds")
                         .IsRequired()
@@ -219,7 +217,7 @@ namespace NzbWebDAV.Database.Migrations.Postgres
             modelBuilder.Entity("NzbWebDAV.Database.Models.DavRarFile", b =>
                 {
                     b.Property<Guid>("Id")
-                        .HasColumnType("uuid");
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("RarParts")
                         .IsRequired()
@@ -233,26 +231,26 @@ namespace NzbWebDAV.Database.Migrations.Postgres
             modelBuilder.Entity("NzbWebDAV.Database.Models.HealthCheckResult", b =>
                 {
                     b.Property<Guid>("Id")
-                        .HasColumnType("uuid");
+                        .HasColumnType("TEXT");
 
                     b.Property<long>("CreatedAt")
-                        .HasColumnType("bigint");
+                        .HasColumnType("INTEGER");
 
                     b.Property<Guid>("DavItemId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("Message")
-                        .HasColumnType("text");
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("Path")
                         .IsRequired()
-                        .HasColumnType("text");
+                        .HasColumnType("TEXT");
 
                     b.Property<int>("RepairStatus")
-                        .HasColumnType("integer");
+                        .HasColumnType("INTEGER");
 
                     b.Property<int>("Result")
-                        .HasColumnType("integer");
+                        .HasColumnType("INTEGER");
 
                     b.HasKey("Id");
 
@@ -269,19 +267,19 @@ namespace NzbWebDAV.Database.Migrations.Postgres
             modelBuilder.Entity("NzbWebDAV.Database.Models.HealthCheckStat", b =>
                 {
                     b.Property<long>("DateStartInclusive")
-                        .HasColumnType("bigint");
+                        .HasColumnType("INTEGER");
 
                     b.Property<long>("DateEndExclusive")
-                        .HasColumnType("bigint");
+                        .HasColumnType("INTEGER");
 
                     b.Property<int>("Result")
-                        .HasColumnType("integer");
+                        .HasColumnType("INTEGER");
 
                     b.Property<int>("RepairStatus")
-                        .HasColumnType("integer");
+                        .HasColumnType("INTEGER");
 
                     b.Property<int>("Count")
-                        .HasColumnType("integer");
+                        .HasColumnType("INTEGER");
 
                     b.HasKey("DateStartInclusive", "DateEndExclusive", "Result", "RepairStatus");
 
@@ -291,37 +289,37 @@ namespace NzbWebDAV.Database.Migrations.Postgres
             modelBuilder.Entity("NzbWebDAV.Database.Models.HistoryItem", b =>
                 {
                     b.Property<Guid>("Id")
-                        .HasColumnType("uuid");
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("Category")
                         .IsRequired()
-                        .HasColumnType("text");
+                        .HasColumnType("TEXT");
 
                     b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("TEXT");
 
                     b.Property<Guid?>("DownloadDirId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("TEXT");
 
                     b.Property<int>("DownloadStatus")
-                        .HasColumnType("integer");
+                        .HasColumnType("INTEGER");
 
                     b.Property<int>("DownloadTimeSeconds")
-                        .HasColumnType("integer");
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("FailMessage")
-                        .HasColumnType("text");
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("FileName")
                         .IsRequired()
-                        .HasColumnType("text");
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("JobName")
                         .IsRequired()
-                        .HasColumnType("text");
+                        .HasColumnType("TEXT");
 
                     b.Property<long>("TotalSegmentBytes")
-                        .HasColumnType("bigint");
+                        .HasColumnType("INTEGER");
 
                     b.HasKey("Id");
 
@@ -340,10 +338,10 @@ namespace NzbWebDAV.Database.Migrations.Postgres
                 {
                     b.Property<string>("SegmentId")
                         .HasMaxLength(512)
-                        .HasColumnType("character varying(512)");
+                        .HasColumnType("TEXT");
 
                     b.Property<long>("DetectedAt")
-                        .HasColumnType("bigint");
+                        .HasColumnType("INTEGER");
 
                     b.HasKey("SegmentId");
 
@@ -353,40 +351,40 @@ namespace NzbWebDAV.Database.Migrations.Postgres
             modelBuilder.Entity("NzbWebDAV.Database.Models.NntpConnectionLease", b =>
                 {
                     b.Property<string>("NodeId")
-                        .HasColumnType("text")
+                        .HasColumnType("TEXT")
                         .HasColumnName("node_id");
 
                     b.Property<int>("ProviderIndex")
-                        .HasColumnType("integer")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("provider_index");
 
                     b.Property<int>("BorrowedSlots")
-                        .HasColumnType("integer")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("borrowed_slots");
 
                     b.Property<long>("Epoch")
-                        .HasColumnType("bigint")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("epoch");
 
                     b.Property<int>("GrantedSlots")
-                        .HasColumnType("integer")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("granted_slots");
 
                     b.Property<DateTime>("LeaseUntil")
-                        .HasColumnType("timestamp with time zone")
+                        .HasColumnType("TEXT")
                         .HasColumnName("lease_until");
 
                     b.Property<int>("ReservedSlots")
-                        .HasColumnType("integer")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("reserved_slots");
 
                     b.Property<int>("Role")
-                        .HasColumnType("integer")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("role");
 
                     b.Property<DateTime>("UpdatedAt")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp with time zone")
+                        .HasColumnType("TEXT")
                         .HasColumnName("updated_at")
                         .HasDefaultValueSql("CURRENT_TIMESTAMP");
 
@@ -401,11 +399,11 @@ namespace NzbWebDAV.Database.Migrations.Postgres
             modelBuilder.Entity("NzbWebDAV.Database.Models.NntpLeaseEpoch", b =>
                 {
                     b.Property<int>("ProviderIndex")
-                        .HasColumnType("integer")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("provider_index");
 
                     b.Property<long>("Epoch")
-                        .HasColumnType("bigint")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("epoch");
 
                     b.HasKey("ProviderIndex");
@@ -416,42 +414,42 @@ namespace NzbWebDAV.Database.Migrations.Postgres
             modelBuilder.Entity("NzbWebDAV.Database.Models.NntpNodeHeartbeat", b =>
                 {
                     b.Property<string>("NodeId")
-                        .HasColumnType("text")
+                        .HasColumnType("TEXT")
                         .HasColumnName("node_id");
 
                     b.Property<int>("ProviderIndex")
-                        .HasColumnType("integer")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("provider_index");
 
                     b.Property<int>("ActiveSlots")
-                        .HasColumnType("integer")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("active_slots");
 
                     b.Property<int>("DesiredSlots")
-                        .HasColumnType("integer")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("desired_slots");
 
                     b.Property<bool>("HasDemand")
-                        .HasColumnType("boolean")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("has_demand");
 
                     b.Property<DateTime>("HeartbeatAt")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp with time zone")
+                        .HasColumnType("TEXT")
                         .HasColumnName("heartbeat_at")
                         .HasDefaultValueSql("CURRENT_TIMESTAMP");
 
                     b.Property<int>("LiveSlots")
-                        .HasColumnType("integer")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("live_slots");
 
                     b.Property<string>("Region")
                         .IsRequired()
-                        .HasColumnType("text")
+                        .HasColumnType("TEXT")
                         .HasColumnName("region");
 
                     b.Property<int>("Role")
-                        .HasColumnType("integer")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("role");
 
                     b.HasKey("NodeId", "ProviderIndex");
@@ -465,37 +463,37 @@ namespace NzbWebDAV.Database.Migrations.Postgres
             modelBuilder.Entity("NzbWebDAV.Database.Models.QueueItem", b =>
                 {
                     b.Property<Guid>("Id")
-                        .HasColumnType("uuid");
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("Category")
                         .IsRequired()
-                        .HasColumnType("text");
+                        .HasColumnType("TEXT");
 
                     b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("FileName")
                         .IsRequired()
-                        .HasColumnType("text");
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("JobName")
                         .IsRequired()
-                        .HasColumnType("text");
+                        .HasColumnType("TEXT");
 
                     b.Property<long>("NzbFileSize")
-                        .HasColumnType("bigint");
+                        .HasColumnType("INTEGER");
 
                     b.Property<DateTime?>("PauseUntil")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("TEXT");
 
                     b.Property<int>("PostProcessing")
-                        .HasColumnType("integer");
+                        .HasColumnType("INTEGER");
 
                     b.Property<int>("Priority")
-                        .HasColumnType("integer");
+                        .HasColumnType("INTEGER");
 
                     b.Property<long>("TotalSegmentBytes")
-                        .HasColumnType("bigint");
+                        .HasColumnType("INTEGER");
 
                     b.HasKey("Id");
 
@@ -518,11 +516,11 @@ namespace NzbWebDAV.Database.Migrations.Postgres
             modelBuilder.Entity("NzbWebDAV.Database.Models.QueueNzbContents", b =>
                 {
                     b.Property<Guid>("Id")
-                        .HasColumnType("uuid");
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("NzbContents")
                         .IsRequired()
-                        .HasColumnType("text");
+                        .HasColumnType("TEXT");
 
                     b.HasKey("Id");
 
@@ -532,19 +530,19 @@ namespace NzbWebDAV.Database.Migrations.Postgres
             modelBuilder.Entity("NzbWebDAV.Database.Models.SetupCompletionOperation", b =>
                 {
                     b.Property<int>("Id")
-                        .HasColumnType("integer")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("id");
 
                     b.Property<string>("ActiveSessionCiphertext")
-                        .HasColumnType("text")
+                        .HasColumnType("TEXT")
                         .HasColumnName("active_session_ciphertext");
 
                     b.Property<string>("CandidateOperationCiphertext")
-                        .HasColumnType("text")
+                        .HasColumnType("TEXT")
                         .HasColumnName("candidate_operation_ciphertext");
 
                     b.Property<string>("CandidateSessionCiphertext")
-                        .HasColumnType("text")
+                        .HasColumnType("TEXT")
                         .HasColumnName("candidate_session_ciphertext");
 
                     b.Property<DateTime>("CreatedAtUtc")
@@ -552,24 +550,24 @@ namespace NzbWebDAV.Database.Migrations.Postgres
                         .HasColumnName("created_at_utc");
 
                     b.Property<string>("EmergencyOperationCiphertext")
-                        .HasColumnType("text")
+                        .HasColumnType("TEXT")
                         .HasColumnName("emergency_operation_ciphertext");
 
                     b.Property<string>("EmergencySessionCiphertext")
-                        .HasColumnType("text")
+                        .HasColumnType("TEXT")
                         .HasColumnName("emergency_session_ciphertext");
 
                     b.Property<string>("OperationId")
                         .IsRequired()
-                        .HasColumnType("text")
+                        .HasColumnType("TEXT")
                         .HasColumnName("operation_id");
 
                     b.Property<bool>("RevocationPending")
-                        .HasColumnType("boolean")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("revocation_pending");
 
                     b.Property<string>("RevocationSessionCiphertext")
-                        .HasColumnType("text")
+                        .HasColumnType("TEXT")
                         .HasColumnName("revocation_session_ciphertext");
 
                     b.HasKey("Id");
@@ -583,7 +581,7 @@ namespace NzbWebDAV.Database.Migrations.Postgres
             modelBuilder.Entity("NzbWebDAV.Database.Models.SetupGrant", b =>
                 {
                     b.Property<int>("Id")
-                        .HasColumnType("integer")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("id");
 
                     b.Property<DateTime>("ExpiresAtUtc")
@@ -592,11 +590,11 @@ namespace NzbWebDAV.Database.Migrations.Postgres
 
                     b.Property<string>("GrantedTokenHash")
                         .IsRequired()
-                        .HasColumnType("text")
+                        .HasColumnType("TEXT")
                         .HasColumnName("granted_token_hash");
 
                     b.Property<bool>("IsRevoked")
-                        .HasColumnType("boolean")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("is_revoked");
 
                     b.Property<DateTime>("IssuedAtUtc")
@@ -604,22 +602,22 @@ namespace NzbWebDAV.Database.Migrations.Postgres
                         .HasColumnName("issued_at_utc");
 
                     b.Property<string>("IssuedByUsername")
-                        .HasColumnType("text")
+                        .HasColumnType("TEXT")
                         .HasColumnName("issued_by_username");
 
                     b.Property<string>("Purpose")
                         .IsRequired()
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("text")
+                        .HasColumnType("TEXT")
                         .HasDefaultValue("setup")
                         .HasColumnName("purpose");
 
                     b.Property<string>("RepairSessionCiphertext")
-                        .HasColumnType("text")
+                        .HasColumnType("TEXT")
                         .HasColumnName("repair_session_ciphertext");
 
                     b.Property<string>("RepairSessionOperationId")
-                        .HasColumnType("text")
+                        .HasColumnType("TEXT")
                         .HasColumnName("repair_session_operation_id");
 
                     b.Property<DateTime?>("RevokedAtUtc")
@@ -640,15 +638,15 @@ namespace NzbWebDAV.Database.Migrations.Postgres
             modelBuilder.Entity("NzbWebDAV.Database.Models.SetupMutationFence", b =>
                 {
                     b.Property<int>("Id")
-                        .HasColumnType("integer")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("id");
 
                     b.Property<long>("Epoch")
-                        .HasColumnType("bigint")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("epoch");
 
                     b.Property<string>("ReservedCandidateOperationId")
-                        .HasColumnType("text")
+                        .HasColumnType("TEXT")
                         .HasColumnName("reserved_candidate_operation_id");
 
                     b.HasKey("Id");
@@ -662,16 +660,16 @@ namespace NzbWebDAV.Database.Migrations.Postgres
             modelBuilder.Entity("NzbWebDAV.Database.Models.SetupRunLease", b =>
                 {
                     b.Property<int>("Id")
-                        .HasColumnType("integer")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("id");
 
                     b.Property<long>("Generation")
-                        .HasColumnType("bigint")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("generation");
 
                     b.Property<string>("GrantHash")
                         .IsRequired()
-                        .HasColumnType("text")
+                        .HasColumnType("TEXT")
                         .HasColumnName("grant_hash");
 
                     b.Property<DateTime>("LeaseUntilUtc")
@@ -680,12 +678,12 @@ namespace NzbWebDAV.Database.Migrations.Postgres
 
                     b.Property<string>("OwnerId")
                         .IsRequired()
-                        .HasColumnType("text")
+                        .HasColumnType("TEXT")
                         .HasColumnName("owner_id");
 
                     b.Property<string>("Purpose")
                         .IsRequired()
-                        .HasColumnType("text")
+                        .HasColumnType("TEXT")
                         .HasColumnName("purpose");
 
                     b.HasKey("Id");
@@ -700,25 +698,23 @@ namespace NzbWebDAV.Database.Migrations.Postgres
                 {
                     b.Property<long>("Seq")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("seq");
-
-                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Seq"));
 
                     b.Property<DateTime>("CreatedAt")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp with time zone")
+                        .HasColumnType("TEXT")
                         .HasColumnName("created_at")
                         .HasDefaultValueSql("CURRENT_TIMESTAMP");
 
                     b.Property<string>("Payload")
                         .IsRequired()
-                        .HasColumnType("text")
+                        .HasColumnType("TEXT")
                         .HasColumnName("payload");
 
                     b.Property<string>("Topic")
                         .IsRequired()
-                        .HasColumnType("text")
+                        .HasColumnType("TEXT")
                         .HasColumnName("topic");
 
                     b.HasKey("Seq");
@@ -732,42 +728,42 @@ namespace NzbWebDAV.Database.Migrations.Postgres
             modelBuilder.Entity("NzbWebDAV.Database.Models.YencHeaderCacheEntry", b =>
                 {
                     b.Property<string>("SegmentId")
-                        .HasColumnType("text")
+                        .HasColumnType("TEXT")
                         .HasColumnName("segment_id");
 
                     b.Property<DateTime>("CachedAt")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp with time zone")
+                        .HasColumnType("TEXT")
                         .HasColumnName("cached_at")
                         .HasDefaultValueSql("CURRENT_TIMESTAMP");
 
                     b.Property<string>("FileName")
                         .IsRequired()
-                        .HasColumnType("text")
+                        .HasColumnType("TEXT")
                         .HasColumnName("file_name");
 
                     b.Property<long>("FileSize")
-                        .HasColumnType("bigint")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("file_size");
 
                     b.Property<int>("LineLength")
-                        .HasColumnType("integer")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("line_length");
 
                     b.Property<int>("PartNumber")
-                        .HasColumnType("integer")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("part_number");
 
                     b.Property<long>("PartOffset")
-                        .HasColumnType("bigint")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("part_offset");
 
                     b.Property<long>("PartSize")
-                        .HasColumnType("bigint")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("part_size");
 
                     b.Property<int>("TotalParts")
-                        .HasColumnType("integer")
+                        .HasColumnType("INTEGER")
                         .HasColumnName("total_parts");
 
                     b.HasKey("SegmentId");

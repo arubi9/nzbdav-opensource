@@ -47,6 +47,7 @@ public sealed class PostgresDavMigrationTests : IClassFixture<PostgresDavMigrati
         "20260809120000_AddSetupGrants",
         "20260809130000_AddSetupMutationFenceAndCompletion",
         "20260809140000_AddSetupRunLease",
+        "20260810120000_AddDavItemPathIndex",
     ];
 
     private readonly PostgresDavMigrationFixture _fixture;
