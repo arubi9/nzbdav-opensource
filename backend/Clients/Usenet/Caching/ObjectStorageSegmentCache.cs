@@ -64,6 +64,7 @@ public sealed class ObjectStorageSegmentCache : IDisposable
     private long _l2Misses;
     private long _l2Writes;
     private long _l2WriteFailures;
+    private int _writeFailureLogged;
     private long _l2WritesDropped;
     private long _l2ReadTimeouts;
     private long _lastWriteUnixtime;
@@ -338,6 +339,12 @@ public sealed class ObjectStorageSegmentCache : IDisposable
             sw.Stop();
             Interlocked.Increment(ref _l2Writes);
             Interlocked.Exchange(ref _lastWriteUnixtime, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+            if (Interlocked.Exchange(ref _writeFailureLogged, 0) == 1)
+            {
+                Log.Warning(
+                    "L2 writes are succeeding again after {Failures} total failure(s).",
+                    Interlocked.Read(ref _l2WriteFailures));
+            }
             if (sw.Elapsed > _writeTimeout / 2)
             {
                 Log.Warning(
@@ -361,7 +368,12 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         catch (Exception ex)
         {
             Interlocked.Increment(ref _l2WriteFailures);
-            Log.Warning(ex, "L2 write failed for segment {SegmentId}", request.SegmentId);
+            // Log once per failure episode. A full backing store fails every
+            // write, and at streaming rates a per-write stack trace fills the
+            // host disk faster than the cache ever filled the NAS. The counter
+            // stays exact; only the logging is collapsed.
+            if (Interlocked.Exchange(ref _writeFailureLogged, 1) == 0)
+                Log.Warning(ex, "L2 writes are failing, starting with segment {SegmentId}. Further failures are suppressed until one succeeds.", request.SegmentId);
         }
     }
 

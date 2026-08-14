@@ -20,6 +20,10 @@ The stack needs no rclone, manual Arr API-key copying, request manager, or
 reverse proxy. Provider and indexer accounts are external prerequisites and
 are entered in the NZBDAV wizard.
 
+To cache far more than local disk holds, see the optional
+**[L2 segment cache](docs/l2-cache.md)**, which can be backed by a mounted
+disk, a NAS over NFS, or S3.
+
 ## Standalone NZBDAV
 
 See the **[standalone setup guide](docs/setup-guide.md)** for a persistent
