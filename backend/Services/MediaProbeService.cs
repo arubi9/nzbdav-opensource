@@ -384,6 +384,12 @@ public class MediaProbeService : BackgroundService
 
         await Parallel.ForEachAsync(items, options, async (item, innerCt) =>
         {
+            // The outer priority scope is keyed to `ct`, but each body receives
+            // its own linked `innerCt`, so the Low priority never reached the
+            // per-item downloads and backfill competed with live streams.
+            using var innerPriorityScope = innerCt.SetContext(
+                new DownloadPriorityContext { Priority = SemaphorePriority.Low });
+
             try
             {
                 await processItem(item, innerCt).ConfigureAwait(false);

@@ -10,6 +10,51 @@ namespace backend.Tests.Services;
 
 public sealed class ReadAheadWarmingServiceTests
 {
+    // Warming used to run one segment at a time, which pinned the prefetcher to a
+    // single NNTP connection and capped streaming throughput far below the
+    // available uplink no matter how many connections the pool allowed.
+    // Eight segments at 200ms each take >=1.6s sequentially; concurrently they
+    // finish in roughly one fetch delay.
+    [Fact]
+    public async Task WarmingFetchesSegmentsConcurrentlyRatherThanOneAtATime()
+    {
+        await using var cacheScope = new TempCacheScope();
+        var configManager = new ConfigManager();
+        configManager.UpdateValues(
+        [
+            new ConfigItem { ConfigName = "cache.read-ahead-enable", ConfigValue = "true" },
+            new ConfigItem { ConfigName = "cache.read-ahead-segments", ConfigValue = "8" },
+            new ConfigItem { ConfigName = "cache.read-ahead-concurrency", ConfigValue = "8" }
+        ]);
+
+        using var liveCache = new LiveSegmentCache(cacheScope.Path);
+        using var fakeNntpClient = new FakeNntpClient
+        {
+            BodyFetchDelay = TimeSpan.FromMilliseconds(200)
+        };
+
+        var segmentIds = new string[8];
+        for (var i = 0; i < segmentIds.Length; i++)
+        {
+            segmentIds[i] = $"segment-{i}";
+            fakeNntpClient.AddSegment(segmentIds[i], Encoding.ASCII.GetBytes(i.ToString()), partOffset: i);
+        }
+
+        using var cachingClient = new LiveSegmentCachingNntpClient(fakeNntpClient, liveCache);
+        using var warmingService = new ReadAheadWarmingService(cachingClient, liveCache, configManager);
+        using var cts = new CancellationTokenSource();
+        var sessionId = warmingService.CreateSession(segmentIds, cts.Token);
+
+        var startedAt = DateTime.UtcNow;
+        warmingService.UpdatePosition(sessionId, 0);
+        await WaitForConditionAsync(() => segmentIds.All(liveCache.HasBody));
+        var elapsed = DateTime.UtcNow - startedAt;
+
+        Assert.True(
+            elapsed < TimeSpan.FromMilliseconds(1200),
+            $"Expected concurrent warming to finish well under the {8 * 200}ms sequential cost, took {elapsed.TotalMilliseconds:F0}ms.");
+    }
+
     [Fact]
     public async Task UpdatePositionWarmsFromLatestPosition()
     {
@@ -55,7 +100,11 @@ public sealed class ReadAheadWarmingServiceTests
         configManager.UpdateValues(
         [
             new ConfigItem { ConfigName = "cache.read-ahead-enable", ConfigValue = "true" },
-            new ConfigItem { ConfigName = "cache.read-ahead-segments", ConfigValue = "4" }
+            new ConfigItem { ConfigName = "cache.read-ahead-segments", ConfigValue = "4" },
+            // Warming is parallel by default, which would put the whole 3-segment
+            // window in flight before StopSession could be observed. Pin it to one
+            // at a time so this test measures stop semantics rather than fan-out.
+            new ConfigItem { ConfigName = "cache.read-ahead-concurrency", ConfigValue = "1" }
         ]);
 
         using var liveCache = new LiveSegmentCache(cacheScope.Path);

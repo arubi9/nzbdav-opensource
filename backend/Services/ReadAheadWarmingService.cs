@@ -1,7 +1,10 @@
 using System.Collections.Concurrent;
 using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Clients.Usenet.Caching;
+using NzbWebDAV.Clients.Usenet.Concurrency;
+using NzbWebDAV.Clients.Usenet.Contexts;
 using NzbWebDAV.Config;
+using NzbWebDAV.Extensions;
 using Serilog;
 
 namespace NzbWebDAV.Services;
@@ -132,6 +135,11 @@ public class ReadAheadWarmingService : IDisposable
                         },
                         async (i, innerCt) =>
                         {
+                            // Honour a stopped session promptly: queued items
+                            // must not start a fetch after cancellation.
+                            if (innerCt.IsCancellationRequested)
+                                return;
+
                             // Playback has already moved past this segment, so
                             // warming it is wasted bandwidth.
                             if (session.CurrentPosition > i + Math.Max(1, maxSegments / 2))
@@ -144,6 +152,16 @@ public class ReadAheadWarmingService : IDisposable
                             try
                             {
                                 using var ctx = SegmentFetchContext.Set(SegmentCategory.VideoSegment);
+
+                                // Prefetch is speculative, so it must never
+                                // outrank somebody's actual playback. An unset
+                                // context defaults to High (DownloadingNntpClient
+                                // line 108), which let one viewer's read-ahead
+                                // crowd another viewer's live reads out of the
+                                // shared connection pool.
+                                using var priority = innerCt.SetContext(
+                                    new DownloadPriorityContext { Priority = SemaphorePriority.Low });
+
                                 var response = await _usenetClient
                                     .DecodedBodyWithFallbackAsync(segmentId, innerCt)
                                     .ConfigureAwait(false);
