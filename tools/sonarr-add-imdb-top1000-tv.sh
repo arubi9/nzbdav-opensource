@@ -126,7 +126,9 @@ echo "=== dedupe against Sonarr library ==="
 curl -s "$SONARR_URL/api/v3/series" -H "X-Api-Key: $SONARR_KEY" | \
     jq -r '.[] | [.imdbId, .tvdbId] | @tsv' > existing.tsv
 awk -F'\t' '{if ($1 != "" && $1 != "null") print $1}' existing.tsv > existing_imdb.txt
-awk -F'\t' 'NR==FNR {have[$1]=1; next} !have[$1]' existing_imdb.txt top_imdb_tv.tsv > to_add.tsv
+# FILENAME check, not NR==FNR: with an empty exclusion list NR==FNR would
+# stay true into the second file and filter out every candidate.
+awk -F'\t' 'FILENAME==ARGV[1] {have[$1]=1; next} !($1 in have)' existing_imdb.txt top_imdb_tv.tsv > to_add.tsv
 TO_ADD=$(wc -l < to_add.tsv)
 echo "  library has $(wc -l < existing.tsv) series"
 echo "  new to add:    $TO_ADD"
