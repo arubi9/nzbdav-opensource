@@ -140,7 +140,16 @@ public class UsenetStreamingClient : WrappingNntpClient
     )
     {
         var initialMaxConnections = Math.Max(1, maxConnections);
-        var connectionPool = new ConnectionPool<INntpClient>(initialMaxConnections, connectionFactory);
+        var connectionPool = new ConnectionPool<INntpClient>(
+            initialMaxConnections,
+            connectionFactory,
+            keepAlive: static async (client, ct) =>
+            {
+                // NNTP DATE round-trip: proves the socket is alive AND resets
+                // the provider's idle timer so warm connections stay warm.
+                await client.DateAsync(ct).ConfigureAwait(false);
+                return true;
+            });
         // Keep warm connections ready for instant playback start.
         // 30 idle connections ensure parallel segment fetches fire instantly
         // for multiple concurrent streaming users.
