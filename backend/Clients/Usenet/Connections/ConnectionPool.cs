@@ -33,6 +33,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
     public event EventHandler<ConnectionPoolStats.ConnectionPoolChangedEventArgs>? OnConnectionPoolChanged;
 
     private readonly Func<CancellationToken, ValueTask<T>> _factory;
+    private readonly Func<T, CancellationToken, ValueTask<bool>>? _keepAlive;
     private int _maxConnections;
 
     /* --------------------------------- state --------------------------------------- */
@@ -50,8 +51,10 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
     public ConnectionPool(
         int maxConnections,
         Func<CancellationToken, ValueTask<T>> connectionFactory,
-        TimeSpan? idleTimeout = null)
+        TimeSpan? idleTimeout = null,
+        Func<T, CancellationToken, ValueTask<bool>>? keepAlive = null)
     {
+        _keepAlive = keepAlive;
         if (maxConnections <= 0)
             throw new ArgumentOutOfRangeException(nameof(maxConnections));
 
@@ -223,7 +226,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         {
             using var timer = new PeriodicTimer(IdleTimeout / 2);
             while (await timer.WaitForNextTickAsync(_sweepCts.Token).ConfigureAwait(false))
-                SweepOnce();
+                await SweepOnceAsync().ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -231,7 +234,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         }
     }
 
-    private void SweepOnce()
+    internal async Task SweepOnceAsync()
     {
         var now = Environment.TickCount64;
         var survivors = new List<Pooled>();
@@ -247,11 +250,27 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
 
         // Keep at least MinIdleConnections alive — rescue the newest expired
         // connections (lowest index = most recently expired) to meet the floor.
+        // A rescued connection has been idle past the timeout, so the server
+        // may have dropped its side already. Re-stamping the timestamp alone
+        // keeps a corpse in the pool forever (the cause of "Invalid NNTP
+        // Response" bursts after long idle periods), so when a keep-alive
+        // probe is configured, validate before trusting — the probe also
+        // resets the server's idle timer, keeping the warm floor genuinely
+        // warm.
         var minIdle = MinIdleConnections;
         while (survivors.Count < minIdle && expired.Count > 0)
         {
             var rescued = expired[^1];
             expired.RemoveAt(expired.Count - 1);
+
+            if (_keepAlive is not null && !await ProbeAsync(rescued.Connection).ConfigureAwait(false))
+            {
+                DisposeConnection(rescued.Connection);
+                Interlocked.Decrement(ref _live);
+                TriggerConnectionPoolChangedEvent();
+                continue;
+            }
+
             survivors.Add(new Pooled(rescued.Connection, Environment.TickCount64));
         }
 
@@ -267,6 +286,35 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
 
         if (expired.Count > 0)
             TriggerConnectionPoolChangedEvent();
+    }
+
+    /// <summary>
+    /// Test seam: back-date every idle entry so the next sweep treats it as
+    /// expired, without real waiting (the sweeper and expiry checks use the
+    /// wall clock).
+    /// </summary>
+    internal void ExpireIdleConnectionsForTest()
+    {
+        var aged = new List<Pooled>();
+        var expiredStamp = Environment.TickCount64 - (long)(2 * IdleTimeout.TotalMilliseconds);
+        while (_idleConnections.TryPop(out var item))
+            aged.Add(item with { LastTouchedMillis = expiredStamp });
+        for (var i = aged.Count - 1; i >= 0; i--)
+            _idleConnections.Push(aged[i]);
+    }
+
+    private async ValueTask<bool> ProbeAsync(T connection)
+    {
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(_sweepCts.Token);
+            cts.CancelAfter(TimeSpan.FromSeconds(5));
+            return await _keepAlive!(connection, cts.Token).ConfigureAwait(false);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /* ------------------------- dispose helpers ------------------------------------ */
