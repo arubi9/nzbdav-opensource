@@ -149,7 +149,9 @@ echo "  existing library: $(wc -l < existing.tsv) entries"
 awk -F'\t' '{if ($1 != "" && $1 != "null") print $1}' existing.tsv > existing_imdb.txt
 
 # Filter top list to only those not already present
-awk -F'\t' 'NR==FNR {have[$1]=1; next} !have[$1]' existing_imdb.txt top_imdb_ids.tsv > to_add.tsv
+# FILENAME check, not NR==FNR: with an empty exclusion list NR==FNR would
+# stay true into the second file and filter out every candidate.
+awk -F'\t' 'FILENAME==ARGV[1] {have[$1]=1; next} !($1 in have)' existing_imdb.txt top_imdb_ids.tsv > to_add.tsv
 TO_ADD=$(wc -l < to_add.tsv)
 echo "  new to add: $TO_ADD"
 echo
