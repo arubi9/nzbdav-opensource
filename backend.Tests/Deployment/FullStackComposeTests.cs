@@ -6,7 +6,7 @@ namespace backend.Tests.Deployment;
 
 public sealed class FullStackComposeTests
 {
-    private static readonly string[] Services = ["nzbdav", "jellyfin", "sonarr", "radarr", "prowlarr"];
+    private static readonly string[] Services = ["nzbdav", "jellyfin", "sonarr", "radarr", "prowlarr", "cloudflared"];
     private static string RepoRoot => Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
     private static string ComposePath => Path.Combine(RepoRoot, "docker-compose.full-stack.yml");
     private static string NvidiaPath => Path.Combine(RepoRoot, "docker-compose.nvidia.yml");
@@ -59,6 +59,27 @@ public sealed class FullStackComposeTests
     // than a named volume. Both halves must stay in place: without the mount the
     // path resolves to container-local disk, and without the env var the backend
     // silently stays off.
+    [Fact]
+    public void CloudflaredExposesNoPortsAndOnlyRunsWithATunnelToken()
+    {
+        using var compose = ComposeConfig(ComposePath);
+        var cloudflared = compose.RootElement.GetProperty("services").GetProperty("cloudflared");
+
+        // Outbound-only edge: publishing ports would defeat the point of the tunnel.
+        Assert.False(cloudflared.TryGetProperty("ports", out _));
+
+        // Token comes from the environment so no secret lives in the compose file.
+        var token = cloudflared.GetProperty("environment").GetProperty("TUNNEL_TOKEN").GetString();
+        Assert.Equal(string.Empty, token);
+
+        // Only Jellyfin is published through the tunnel, so it must be healthy first.
+        Assert.True(cloudflared.GetProperty("depends_on").TryGetProperty("jellyfin", out _));
+
+        // Inert unless the operator opts into the edge profile.
+        var profiles = cloudflared.GetProperty("profiles").EnumerateArray().Select(p => p.GetString()).ToArray();
+        Assert.Contains("edge", profiles);
+    }
+
     [Fact]
     public void NzbdavBindsTheL2CacheMountAndItsPathTogether()
     {
@@ -169,6 +190,7 @@ public sealed class FullStackComposeTests
         Assert.Equal("linuxserver/prowlarr:2.5.2.5491-ls156@sha256:1295cff29d10b486c0d8324d1559a552140a5932bf8b3d87e398654414f63f92", services.GetProperty("prowlarr").GetProperty("image").GetString());
         Assert.Equal("nzbdav:0.6.4-full-stack", services.GetProperty("nzbdav").GetProperty("image").GetString());
         Assert.Equal("nzbdav-jellyfin:10.11.8", services.GetProperty("jellyfin").GetProperty("image").GetString());
+        Assert.Equal("cloudflare/cloudflared:2026.8.2@sha256:0aa26e284f05e6c77ae375b8c9c11d9eb6a448fb7bcd8d40f31cb6176189eb38", services.GetProperty("cloudflared").GetProperty("image").GetString());
 
         Assert.Equal("Dockerfile", services.GetProperty("nzbdav").GetProperty("build").GetProperty("dockerfile").GetString());
         Assert.Equal("jellyfin-stack/Dockerfile", services.GetProperty("jellyfin").GetProperty("build").GetProperty("dockerfile").GetString());
@@ -598,7 +620,7 @@ public sealed class FullStackComposeTests
     }
 
     private static IEnumerable<JsonElement> Mounts(JsonElement service) =>
-        service.GetProperty("volumes").EnumerateArray();
+        service.TryGetProperty("volumes", out var volumes) ? volumes.EnumerateArray() : [];
 
     private static JsonDocument ComposeConfig(params string[] files) => ComposeConfigWithMasterKey(null, files);
 
@@ -627,6 +649,9 @@ public sealed class FullStackComposeTests
             startInfo.ArgumentList.Add("-f");
             startInfo.ArgumentList.Add(file);
         }
+        // Include profiled services (e.g. the "edge" cloudflared service) in the
+        // normalized output so they can be asserted on like any other service.
+        startInfo.Environment["COMPOSE_PROFILES"] = "edge";
         startInfo.ArgumentList.Add("config");
         startInfo.ArgumentList.Add("--format");
         startInfo.ArgumentList.Add("json");
