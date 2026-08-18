@@ -29,3 +29,4 @@ nuget
 # PlaybackInfo dump scratchpad from debugging.
 /pb.json
 /.pi/
+.env.edge
