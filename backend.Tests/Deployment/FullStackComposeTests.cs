@@ -68,9 +68,13 @@ public sealed class FullStackComposeTests
         // Outbound-only edge: publishing ports would defeat the point of the tunnel.
         Assert.False(cloudflared.TryGetProperty("ports", out _));
 
-        // Token comes from the environment so no secret lives in the compose file.
-        var token = cloudflared.GetProperty("environment").GetProperty("TUNNEL_TOKEN").GetString();
-        Assert.Equal(string.Empty, token);
+        // The token is a credential: it must come from the untracked .env.edge
+        // secrets file, never the tracked .env or the compose file itself.
+        Assert.False(cloudflared.TryGetProperty("environment", out _));
+        var composeText = File.ReadAllText(ComposePath);
+        Assert.Contains(".env.edge", composeText, StringComparison.Ordinal);
+        var gitignore = File.ReadAllText(Path.Combine(RepoRoot, ".gitignore"));
+        Assert.Contains(".env.edge", gitignore, StringComparison.Ordinal);
 
         // Only Jellyfin is published through the tunnel, so it must be healthy first.
         Assert.True(cloudflared.GetProperty("depends_on").TryGetProperty("jellyfin", out _));
