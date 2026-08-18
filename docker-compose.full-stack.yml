@@ -138,6 +138,8 @@ services:
       # Jellyfin's metadata path at /metadata; until then it is an empty bind.
       # jellyfin.db must stay on /config: SQLite WAL does not work over NFS.
       - "${NZBDAV_ARTWORK_HOST_PATH:-/mnt/nas-artwork}:/metadata"
+      # Arr-organized strm library; Jellyfin only reads it.
+      - media_library:/data/media:ro
     networks:
       - full_stack
     depends_on:
@@ -199,14 +201,18 @@ services:
       - sonarr_config:/config
       # Keep the category root identical to NZBDAV and ArrSetup's root path.
       - completed_downloads:/data/completed-downloads
+      # Arr-organized library (Series/Season layout) that Jellyfin scans.
+      # Kept separate from the download dir so release-named folders never
+      # fragment the Jellyfin library.
+      - media_library:/data/media
     # LinuxServer initializes /config but not an additional shared volume.
     # Seed the exact category directory before handing PID 1 to s6.
     entrypoint:
       - /bin/sh
       - -ec
       - |
-        mkdir -p /data/completed-downloads/tv
-        chown "$${PUID}:$${PGID}" /data/completed-downloads/tv
+        mkdir -p /data/completed-downloads/tv /data/media/tv
+        chown "$${PUID}:$${PGID}" /data/completed-downloads/tv /data/media/tv
         exec /init
     networks:
       - full_stack
@@ -233,14 +239,16 @@ services:
       - radarr_config:/config
       # Keep the category root identical to NZBDAV and ArrSetup's root path.
       - completed_downloads:/data/completed-downloads
+      # Arr-organized library (Movie (Year) layout) that Jellyfin scans.
+      - media_library:/data/media
     # LinuxServer initializes /config but not an additional shared volume.
     # Seed the exact category directory before handing PID 1 to s6.
     entrypoint:
       - /bin/sh
       - -ec
       - |
-        mkdir -p /data/completed-downloads/movies
-        chown "$${PUID}:$${PGID}" /data/completed-downloads/movies
+        mkdir -p /data/completed-downloads/movies /data/media/movies
+        chown "$${PUID}:$${PGID}" /data/completed-downloads/movies /data/media/movies
         exec /init
     networks:
       - full_stack
@@ -283,6 +291,7 @@ volumes:
   nzbdav_config:
   nzbdav_media:
   completed_downloads:
+  media_library:
   jellyfin_config:
   jellyfin_cache:
   sonarr_config:
