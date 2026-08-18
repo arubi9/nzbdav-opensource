@@ -151,6 +151,33 @@ services:
       retries: 5
       start_period: 30s
 
+  # Public edge: outbound-only Cloudflare Tunnel. No inbound ports are opened
+  # anywhere; the tunnel connects out to Cloudflare and exposes ONLY Jellyfin
+  # (configured as a public hostname on the tunnel, e.g.
+  # watch.example.com -> http://jellyfin:8096). Admin surfaces (NZBDAV, the
+  # Arrs, Prowlarr) stay LAN-only on purpose. The service is inert until
+  # CLOUDFLARE_TUNNEL_TOKEN is set in .env.
+  cloudflared:
+    image: cloudflare/cloudflared:2026.8.2@sha256:0aa26e284f05e6c77ae375b8c9c11d9eb6a448fb7bcd8d40f31cb6176189eb38
+    command: tunnel --no-autoupdate --metrics 127.0.0.1:2000 run
+    environment:
+      TUNNEL_TOKEN: "${CLOUDFLARE_TUNNEL_TOKEN:-}"
+    networks:
+      - full_stack
+    depends_on:
+      jellyfin:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles:
+      - edge
+    healthcheck:
+      # /ready on the metrics endpoint returns 200 once tunnel connections are up.
+      test: ["CMD", "cloudflared", "tunnel", "--metrics", "127.0.0.1:2000", "ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
   sonarr:
     image: linuxserver/sonarr:4.0.19.2979-ls321@sha256:373159ba768e23a3a1c497d9f2b936addf8fd5b1fdce7dd6a14080ac928bfda0
     # LinuxServer documents NET_RAW reduction for these images.
