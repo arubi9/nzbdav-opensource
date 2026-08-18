@@ -104,14 +104,22 @@ public class NzbdavLibrarySyncTask : IScheduledTask
     // null; tests can inject one without sharing mutable process-wide state.
     private readonly Action<string>? _pathMutationHook;
     private readonly Func<NzbdavOperationConfiguration?> _configurationAccessor;
+    private readonly MediaBrowser.Controller.Library.ILibraryManager? _libraryManager;
     private static readonly SemaphoreSlim ExecuteGate = new(1, 1);
     private string? _cachedETag;
+    // Counts real filesystem mutations (strm writes, quarantine copies) during
+    // the current run so a library scan is queued only when something changed.
+    // Every mutation site routes through _pathMutationHook, so the composed
+    // hook below observes all of them. ExecuteGate makes runs single-flight,
+    // so reset-at-start/read-at-end needs no cross-run coordination.
+    private int _mutationsObserved;
 
     public NzbdavLibrarySyncTask(
         ILogger<NzbdavLibrarySyncTask> logger,
         TimeProvider? timeProvider = null,
-        Action<string>? pathMutationHook = null)
-        : this(logger, timeProvider, pathMutationHook, NzbdavOperationConfigurationAccessor.CaptureFromPlugin)
+        Action<string>? pathMutationHook = null,
+        MediaBrowser.Controller.Library.ILibraryManager? libraryManager = null)
+        : this(logger, timeProvider, pathMutationHook, NzbdavOperationConfigurationAccessor.CaptureFromPlugin, libraryManager)
     {
     }
 
@@ -119,12 +127,19 @@ public class NzbdavLibrarySyncTask : IScheduledTask
         ILogger<NzbdavLibrarySyncTask> logger,
         TimeProvider? timeProvider,
         Action<string>? pathMutationHook,
-        Func<NzbdavOperationConfiguration?> configurationAccessor)
+        Func<NzbdavOperationConfiguration?> configurationAccessor,
+        MediaBrowser.Controller.Library.ILibraryManager? libraryManager = null)
     {
         _logger = logger;
         _timeProvider = timeProvider ?? TimeProvider.System;
-        _pathMutationHook = pathMutationHook;
+        var callerHook = pathMutationHook;
+        _pathMutationHook = path =>
+        {
+            Interlocked.Increment(ref _mutationsObserved);
+            callerHook?.Invoke(path);
+        };
         _configurationAccessor = configurationAccessor;
+        _libraryManager = libraryManager;
     }
 
     public string Name => "NZBDAV Library Sync";
@@ -153,6 +168,7 @@ public class NzbdavLibrarySyncTask : IScheduledTask
         await ExecuteGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            Interlocked.Exchange(ref _mutationsObserved, 0);
             await ExecuteCoreAsync(progress, operationConfiguration, ct).ConfigureAwait(false);
         }
         finally
@@ -304,6 +320,16 @@ public class NzbdavLibrarySyncTask : IScheduledTask
                 _cachedETag = newETag;
 
             _logger.LogInformation("NZBDAV sync complete: {Count} video files processed from manifest", processed);
+
+            // Jellyfin's realtime monitor is disabled in this deployment, so
+            // nothing else notices mirror changes until the next scheduled
+            // scan. Queue one now when this run touched the filesystem;
+            // Jellyfin ignores the request if a scan is already running.
+            if (Volatile.Read(ref _mutationsObserved) > 0 && _libraryManager is not null)
+            {
+                _logger.LogInformation("Mirror changed during sync; queueing a library scan");
+                _libraryManager.QueueLibraryScan();
+            }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
