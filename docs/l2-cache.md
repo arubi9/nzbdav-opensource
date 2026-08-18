@@ -98,6 +98,30 @@ Bound it at the storage layer — a share quota, a dedicated dataset, or a
 dedicated volume. The current deployment uses a **5 TB quota** on the NAS
 share.
 
+### Growth model (measured)
+
+L2 is written by **ingest as well as playback**. Importing a movie fetches
+first segments for every file in the NZB, archive headers, ffprobe reads, and
+read-ahead warming — all of which are teed into L2. Measured on a bulk
+import of ~3,700 movies: **~200 MB of L2 per imported movie** (~959K segment
+writes, 732 GB), before anyone watched anything. This is deliberate: those
+early-file segments are what make a cold title start in tens of milliseconds
+instead of the 300–1000 ms of a raw NNTP round-trip.
+
+Sizing rule of thumb:
+
+| Contribution | Estimate |
+|---|---|
+| Ingest | ~200 MB per movie; TV episodes proportionally less |
+| Playback | up to full file size for whatever is actually watched cold |
+| 10K-movie library | ~2 TB from ingest alone before viewing patterns add more |
+
+If the share also hosts backup dumps and Jellyfin artwork (as the full-stack
+deployment does), budget those separately — nightly `vzdump` retention
+settles at several hundred GB, artwork at tens of GB for a 10K library. For
+that combined workload a 5 TB quota is months, not years; **15 TB** is a
+comfortable steady state.
+
 When the backing store fills, every write fails. NZBDAV degrades rather than
 breaks: playback is unaffected because those bytes were already served from
 NNTP, `nzbdav_l2_cache_write_failures_total` climbs, and the failure is logged
@@ -115,7 +139,26 @@ space looks healthy until the moment writes start failing. Track the tier with
 
 The in-memory write queue is bounded by **both** item count and bytes
 (512 MB). The item count alone is not a safe bound: 16384 queued 716 KB video
-segments is roughly 11.7 GB.
+segments is roughly 11.7 GB. When the queue is full, further writes are shed
+and counted in `nzbdav_l2_cache_writes_dropped_total`; during bulk ingest a
+large dropped count is normal and harmless — NNTP outpaces the NAS write
+ceiling, and the dropped segments simply stay uncached. Total attempted
+writes are visible in `nzbdav_l2_cache_writes_total`.
+
+### The cache is a speed tier, not a requirement
+
+Playback works with no L2 at all — every miss falls through to NNTP. What
+each tier buys, measured on this deployment:
+
+| Segment source | Time to first byte |
+|---|---|
+| L1 (local NVMe) | ~10–30 ms |
+| L2 (NAS over NFS) | ~30–100 ms |
+| NNTP direct (warm connection pool) | ~300–1000 ms |
+
+L2 exists to turn "sub-second" into "imperceptible" and to keep openings
+instant when the Usenet provider has latency spikes, article failures, or
+connection-count contention.
 
 ## NAS over NFS
 
