@@ -159,7 +159,10 @@ services:
   # CLOUDFLARE_TUNNEL_TOKEN is set in .env.
   cloudflared:
     image: cloudflare/cloudflared:2026.8.2@sha256:0aa26e284f05e6c77ae375b8c9c11d9eb6a448fb7bcd8d40f31cb6176189eb38
-    command: tunnel --no-autoupdate --metrics 127.0.0.1:2000 run
+    # http2 (TCP) transport: QUIC/UDP kept dropping through the LXC->host NAT
+    # layers ("failed to dial to edge with quic" every few minutes), and every
+    # drop stalls in-flight streams. TCP is stabler through these middleboxes.
+    command: tunnel --no-autoupdate --metrics 127.0.0.1:2000 --protocol http2 run
     # TUNNEL_TOKEN lives in an untracked secrets file, not the tracked .env:
     # it is a credential, and .env gets overwritten by deploys.
     env_file:
