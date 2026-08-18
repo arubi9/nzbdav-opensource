@@ -273,26 +273,31 @@ public class NzbdavLibrarySyncTask : IScheduledTask
                 progress.Report((double)processed / videoFiles.Length * 100);
             }
 
+            // Reconciliation is safe even when individual items failed to sync:
+            // the expected set is built from the complete manifest before any
+            // per-item work, so a failed item's existing outputs are inside the
+            // expected set and are preserved. Skipping cleanup on transient item
+            // failures let dead outputs accumulate indefinitely during
+            // continuous imports (a bulk import always has a few not-yet-probed
+            // items), and players kept hitting those dead stream URLs.
             bool didReconcile = false;
-            if (!anyFailures)
+            try
             {
-                try
-                {
-                    didReconcile = ReconcileStaleFiles(config, expectedRelativePaths, runId: CreateRunId(), ct: ct);
-                }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested)
-                {
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed to reconcile stale files for library run");
-                    anyFailures = true;
-                }
+                didReconcile = ReconcileStaleFiles(config, expectedRelativePaths, runId: CreateRunId(), ct: ct);
             }
-            else
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                _logger.LogWarning("Manifest sync contained item failures; skipping stale-file reconciliation");
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to reconcile stale files for library run");
+                anyFailures = true;
+            }
+
+            if (anyFailures)
+            {
+                _logger.LogWarning("Manifest sync contained item failures; ETag will not advance so failed items retry next cycle");
             }
 
             if (!anyFailures && didReconcile)
