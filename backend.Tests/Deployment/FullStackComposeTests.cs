@@ -21,7 +21,7 @@ public sealed class FullStackComposeTests
         Assert.Equal(Services.OrderBy(x => x), services.EnumerateObject().Select(x => x.Name).OrderBy(x => x));
         Assert.Single(root.GetProperty("networks").EnumerateObject());
         Assert.Equal(
-            ["completed_downloads", "jellyfin_cache", "jellyfin_config", "nzbdav_config", "nzbdav_media", "prowlarr_config", "radarr_config", "sonarr_config"],
+            ["completed_downloads", "jellyfin_cache", "jellyfin_config", "media_library", "nzbdav_config", "nzbdav_media", "prowlarr_config", "radarr_config", "sonarr_config"],
             root.GetProperty("volumes").EnumerateObject().Select(x => x.Name).OrderBy(x => x));
         var network = root.GetProperty("networks").GetProperty("full_stack");
         Assert.Equal("bridge", network.GetProperty("driver").GetString());
@@ -130,6 +130,33 @@ public sealed class FullStackComposeTests
         Assert.True(
             artworkMounts.Length == 1,
             $"expected exactly one /metadata mount, found {artworkMounts.Length}");
+    }
+
+    // The Arr-organized library is a separate volume from the download dir so
+    // release-named download folders never fragment the Jellyfin library.
+    // Sonarr/Radarr write it; Jellyfin must only read it.
+    [Fact]
+    public void MediaLibraryVolumeIsSharedByTheArrsAndReadOnlyForJellyfin()
+    {
+        using var compose = ComposeConfig(ComposePath);
+        var services = compose.RootElement.GetProperty("services");
+
+        foreach (var name in new[] { "sonarr", "radarr", "jellyfin" })
+        {
+            var mounts = services.GetProperty(name).GetProperty("volumes")
+                .EnumerateArray()
+                .Where(v => v.ValueKind == JsonValueKind.Object
+                    && v.TryGetProperty("target", out var target)
+                    && target.GetString() == "/data/media")
+                .ToArray();
+
+            Assert.True(mounts.Length == 1, $"{name}: expected exactly one /data/media mount, found {mounts.Length}");
+
+            var readOnly = mounts[0].TryGetProperty("read_only", out var ro) && ro.GetBoolean();
+            Assert.True(
+                readOnly == (name == "jellyfin"),
+                $"{name}: expected read_only={name == "jellyfin"}, got {readOnly}");
+        }
     }
 
     // Ingest parallelism must be reproducible from the committed .env for the same
