@@ -10,6 +10,7 @@ import { SimpleDropdown } from "../simple-dropdown/simple-dropdown"
 import styles from "../../route.module.css"
 import { WideViewport } from "../wide-viewport/wide-viewport"
 import { ThinViewport } from "../thin-viewport/thin-viewport"
+import { csrfFetch } from "~/utils/csrf-fetch"
 
 export type QueueTableProps = {
     queueSlots: PresentationQueueSlot[],
@@ -73,7 +74,7 @@ export function QueueTable({
         onIsRemovingChanged(queued_nzo_ids, true);
         try {
             const url = `/api?mode=queue&name=delete`;
-            const response = await fetch(url, {
+            const response = await csrfFetch(url, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json;charset=UTF-8',
@@ -183,7 +184,7 @@ export const QueueRow = memo(({ slot, onIsSelectedChanged, onIsRemovingChanged, 
         try {
             const url = '/api?mode=queue&name=delete'
                 + `&value=${encodeURIComponent(slot.nzo_id)}`;
-            const response = await fetch(url);
+            const response = await csrfFetch(url, { method: "POST" });
             if (response.ok) {
                 const data = await response.json();
                 if (data.status === true) {

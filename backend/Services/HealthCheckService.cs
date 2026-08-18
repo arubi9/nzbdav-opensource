@@ -105,6 +105,10 @@ public class HealthCheckService : BackgroundService
                 // perform the health check
                 await PerformHealthCheck(davItem, dbClient, concurrency, cts.Token).ConfigureAwait(false);
             }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                throw;
+            }
             catch (Exception e)
             {
                 Log.Error(e, $"Unexpected error performing background health checks: {e.Message}");
@@ -279,12 +283,12 @@ public class HealthCheckService : BackgroundService
             var linkType = symlinkOrStrmPath.ToLower().EndsWith("strm") ? "strm-file" : "symlink";
             foreach (var arrClient in _configManager.GetArrConfig().GetArrClients())
             {
-                var rootFolders = await arrClient.GetRootFolders().ConfigureAwait(false);
+                var rootFolders = await arrClient.GetRootFolders(ct).ConfigureAwait(false);
                 if (!rootFolders.Any(x => symlinkOrStrmPath.StartsWith(x.Path!))) continue;
 
                 // if we found a corresponding arr instance,
                 // then remove and search.
-                if (await arrClient.RemoveAndSearch(symlinkOrStrmPath).ConfigureAwait(false))
+                if (await arrClient.RemoveAndSearch(symlinkOrStrmPath, ct).ConfigureAwait(false))
                 {
                     dbClient.Ctx.Items.Remove(davItem);
                     dbClient.Ctx.HealthCheckResults.Add(SendStatus(new HealthCheckResult()
@@ -364,6 +368,30 @@ public class HealthCheckService : BackgroundService
         return result;
     }
 
+    // A single NZB can carry hundreds of thousands of segment ids, and EF
+    // expands Contains() into one SQL variable per element. SQLite caps that at
+    // 32766 (999 on older builds), so an unchunked query fails outright with
+    // "too many SQL variables" and makes large releases impossible to import.
+    private const int SegmentIdQueryChunkSize = 500;
+
+    private static async Task<HashSet<string>> GetExistingSegmentIdsAsync(
+        DavDatabaseContext dbContext,
+        IReadOnlyList<string> segmentIds,
+        CancellationToken ct)
+    {
+        var existing = new HashSet<string>();
+        foreach (var chunk in segmentIds.Chunk(SegmentIdQueryChunkSize))
+        {
+            var found = await dbContext.Set<MissingSegmentId>()
+                .Where(m => chunk.Contains(m.SegmentId))
+                .Select(m => m.SegmentId)
+                .ToListAsync(ct)
+                .ConfigureAwait(false);
+            existing.UnionWith(found);
+        }
+        return existing;
+    }
+
     public static async Task CheckMissingSegmentIdsAsync(
         DavDatabaseContext dbContext,
         IEnumerable<string> segmentIds,
@@ -377,13 +405,7 @@ public class HealthCheckService : BackgroundService
             .Distinct()
             .ToList();
 
-        var existingIds = await dbContext.Set<MissingSegmentId>()
-            .Where(m => candidateIds.Contains(m.SegmentId))
-            .Select(m => m.SegmentId)
-            .ToListAsync(ct)
-            .ConfigureAwait(false);
-
-        var existingSet = existingIds.ToHashSet();
+        var existingSet = await GetExistingSegmentIdsAsync(dbContext, candidateIds, ct).ConfigureAwait(false);
         foreach (var segmentId in encodedIds)
         {
             if (NzbSegmentIdSet.Decode(segmentId).All(existingSet.Contains))
@@ -397,11 +419,7 @@ public class HealthCheckService : BackgroundService
         CancellationToken ct)
     {
         var decodedIds = NzbSegmentIdSet.Decode(encodedSegmentId).Distinct().ToList();
-        var existingIds = await dbContext.Set<MissingSegmentId>()
-            .Where(m => decodedIds.Contains(m.SegmentId))
-            .Select(m => m.SegmentId)
-            .ToListAsync(ct)
-            .ConfigureAwait(false);
+        var existingIds = await GetExistingSegmentIdsAsync(dbContext, decodedIds, ct).ConfigureAwait(false);
 
         var missingIds = decodedIds.Except(existingIds).ToList();
         if (missingIds.Count == 0) return;

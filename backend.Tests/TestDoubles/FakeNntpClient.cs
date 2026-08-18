@@ -57,6 +57,12 @@ public sealed class FakeNntpClient : NntpClient
 
     public TimeSpan BodyFetchDelay { get; set; } = TimeSpan.Zero;
 
+    private int _concurrentBodyFetches;
+    private int _peakConcurrentBodyFetches;
+
+    /// <summary>Highest number of body fetches observed in flight simultaneously.</summary>
+    public int PeakConcurrentBodyFetches => Volatile.Read(ref _peakConcurrentBodyFetches);
+
     public int GetYencHeadersCallCount => Volatile.Read(ref _getYencHeadersCallCount);
     public int DecodedBodyCallCount => Volatile.Read(ref _decodedBodyCallCount);
     public int DecodedArticleCallCount => Volatile.Read(ref _decodedArticleCallCount);
@@ -120,8 +126,25 @@ public sealed class FakeNntpClient : NntpClient
     )
     {
         Interlocked.Increment(ref _decodedBodyCallCount);
-        if (BodyFetchDelay > TimeSpan.Zero)
-            await Task.Delay(BodyFetchDelay, cancellationToken).ConfigureAwait(false);
+
+        var inFlight = Interlocked.Increment(ref _concurrentBodyFetches);
+        // Track the high-water mark so tests can assert on fetch concurrency.
+        int observedPeak;
+        while (inFlight > (observedPeak = Volatile.Read(ref _peakConcurrentBodyFetches)))
+        {
+            if (Interlocked.CompareExchange(ref _peakConcurrentBodyFetches, inFlight, observedPeak) == observedPeak)
+                break;
+        }
+
+        try
+        {
+            if (BodyFetchDelay > TimeSpan.Zero)
+                await Task.Delay(BodyFetchDelay, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _concurrentBodyFetches);
+        }
 
         onConnectionReadyAgain?.Invoke(ArticleBodyResult.Retrieved);
         return CreateBodyResponse(segmentId);

@@ -140,7 +140,16 @@ public class UsenetStreamingClient : WrappingNntpClient
     )
     {
         var initialMaxConnections = Math.Max(1, maxConnections);
-        var connectionPool = new ConnectionPool<INntpClient>(initialMaxConnections, connectionFactory);
+        var connectionPool = new ConnectionPool<INntpClient>(
+            initialMaxConnections,
+            connectionFactory,
+            keepAlive: static async (client, ct) =>
+            {
+                // NNTP DATE round-trip: proves the socket is alive AND resets
+                // the provider's idle timer so warm connections stay warm.
+                await client.DateAsync(ct).ConfigureAwait(false);
+                return true;
+            });
         // Keep warm connections ready for instant playback start.
         // 30 idle connections ensure parallel segment fetches fire instantly
         // for multiple concurrent streaming users.
@@ -190,20 +199,35 @@ public class UsenetStreamingClient : WrappingNntpClient
         _downloadingClient?.UpdateMaxDownloadConnections(maxDownloadConnections);
     }
 
-    public static async ValueTask<INntpClient> CreateNewConnection
+    public static ValueTask<INntpClient> CreateNewConnection
     (
         UsenetProviderConfig.ConnectionDetails connectionDetails,
         CancellationToken ct
+    ) => CreateNewConnection(connectionDetails, ct, static () => new BaseNntpClient());
+
+    // Internal factory seam keeps failure cleanup testable without replacing
+    // the production NNTP implementation.
+    internal static async ValueTask<INntpClient> CreateNewConnection
+    (
+        UsenetProviderConfig.ConnectionDetails connectionDetails,
+        CancellationToken ct,
+        Func<INntpClient> connectionFactory
     )
     {
-        var connection = new BaseNntpClient();
-        var host = connectionDetails.Host;
-        var port = connectionDetails.Port;
-        var useSsl = connectionDetails.UseSsl;
-        var user = connectionDetails.User;
-        var pass = connectionDetails.Pass;
-        await connection.ConnectAsync(host, port, useSsl, ct).ConfigureAwait(false);
-        await connection.AuthenticateAsync(user, pass, ct).ConfigureAwait(false);
-        return connection;
+        ArgumentNullException.ThrowIfNull(connectionFactory);
+        var connection = connectionFactory();
+        try
+        {
+            await connection.ConnectAsync(connectionDetails.Host, connectionDetails.Port, connectionDetails.UseSsl, ct).ConfigureAwait(false);
+            await connection.AuthenticateAsync(connectionDetails.User, connectionDetails.Pass, ct).ConfigureAwait(false);
+            return connection;
+        }
+        catch
+        {
+            // A failed connect/authentication still owns a socket and must be
+            // disposed exactly once. Successful callers own the returned client.
+            connection.Dispose();
+            throw;
+        }
     }
 }

@@ -34,6 +34,9 @@ services:
     environment:
       NZBDAV_ROLE: streaming
       DATABASE_URL: Host=pgbouncer;Port=5432;Database=nzbdav;Username=nzbdav;Password=nzbdav;Pooling=true;MinPoolSize=2;MaxPoolSize=50;No Reset On Close=true;Server Compatibility Mode=Redshift
+      # Migrations use a direct PostgreSQL session for the advisory lock. Keep
+      # operational queries on the transaction-pooled DATABASE_URL.
+      MIGRATION_DATABASE_URL: Host=postgres;Port=5432;Database=nzbdav;Username=nzbdav;Password=nzbdav;Pooling=true
       DATABASE_URL_SESSION: Host=pgbouncer-session;Port=5432;Database=nzbdav;Username=nzbdav;Password=nzbdav;Pooling=true;MinPoolSize=1;MaxPoolSize=10
       FRONTEND_BACKEND_API_KEY: ${FRONTEND_BACKEND_API_KEY}
       NZBDAV_L2_ACCESS_KEY: ${MINIO_ROOT_USER:-nzbdav}
@@ -67,6 +70,9 @@ services:
     environment:
       NZBDAV_ROLE: streaming
       DATABASE_URL: Host=pgbouncer;Port=5432;Database=nzbdav;Username=nzbdav;Password=nzbdav;Pooling=true;MinPoolSize=2;MaxPoolSize=50;No Reset On Close=true;Server Compatibility Mode=Redshift
+      # Migrations use a direct PostgreSQL session for the advisory lock. Keep
+      # operational queries on the transaction-pooled DATABASE_URL.
+      MIGRATION_DATABASE_URL: Host=postgres;Port=5432;Database=nzbdav;Username=nzbdav;Password=nzbdav;Pooling=true
       DATABASE_URL_SESSION: Host=pgbouncer-session;Port=5432;Database=nzbdav;Username=nzbdav;Password=nzbdav;Pooling=true;MinPoolSize=1;MaxPoolSize=10
       FRONTEND_BACKEND_API_KEY: ${FRONTEND_BACKEND_API_KEY}
       NZBDAV_L2_ACCESS_KEY: ${MINIO_ROOT_USER:-nzbdav}
@@ -100,6 +106,9 @@ services:
     environment:
       NZBDAV_ROLE: ingest
       DATABASE_URL: Host=pgbouncer;Port=5432;Database=nzbdav;Username=nzbdav;Password=nzbdav;Pooling=true;MinPoolSize=2;MaxPoolSize=50;No Reset On Close=true;Server Compatibility Mode=Redshift
+      # Migrations use a direct PostgreSQL session for the advisory lock. Keep
+      # operational queries on the transaction-pooled DATABASE_URL.
+      MIGRATION_DATABASE_URL: Host=postgres;Port=5432;Database=nzbdav;Username=nzbdav;Password=nzbdav;Pooling=true
       DATABASE_URL_SESSION: Host=pgbouncer-session;Port=5432;Database=nzbdav;Username=nzbdav;Password=nzbdav;Pooling=true;MinPoolSize=1;MaxPoolSize=10
       FRONTEND_BACKEND_API_KEY: ${FRONTEND_BACKEND_API_KEY}
       NZBDAV_L2_ACCESS_KEY: ${MINIO_ROOT_USER:-nzbdav}

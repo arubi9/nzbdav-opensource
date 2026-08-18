@@ -80,9 +80,10 @@
     color: #5dade2;
 }
 
-.header-action-button.delete:hover {
-    border-color: #dc322f;
-    color: #dc322f;
+.header-action-button.delete:hover,
+.header-action-button.reorder:hover {
+    border-color: #2aa198;
+    color: #2aa198;
 }
 
 .provider-icon svg {

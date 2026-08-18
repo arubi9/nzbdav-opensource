@@ -1,18 +1,22 @@
 import type { Route } from "./+types/route";
 import styles from "./route.module.css"
 import { Tabs, Tab, Button } from "react-bootstrap"
-import { backendClient, type EncryptionStatus } from "~/clients/backend-client.server";
+import { backendClient, type AdminSettingsResponse, type EncryptionStatus, type UsenetSettingsResponse } from "~/clients/backend-client.server";
+import type { ConnectionDetails } from "./usenet/usenet";
 import { isUsenetSettingsUpdated, UsenetSettings } from "./usenet/usenet";
 import { isSabnzbdSettingsUpdated, isSabnzbdSettingsValid, SabnzbdSettings } from "./sabnzbd/sabnzbd";
 import { isWebdavSettingsUpdated, isWebdavSettingsValid, WebdavSettings } from "./webdav/webdav";
 import { isArrsSettingsUpdated, isArrsSettingsValid, ArrsSettings } from "./arrs/arrs";
 import { Maintenance } from "./maintenance/maintenance";
 import { isRepairsSettingsUpdated, RepairsSettings } from "./repairs/repairs";
-import { useCallback, useState } from "react";
+import { useCallback, useState, type Dispatch, type SetStateAction } from "react";
 import { useBlocker } from "react-router";
 import { ConfirmModal } from "~/components/confirm-modal/confirm-modal";
+import { csrfFetch } from "~/utils/csrf-fetch";
+import { isAuthenticated } from "~/auth/authentication.server";
+import { DEFAULT_NO_CACHE_HEADERS } from "~/onboarding/onboarding-request.server";
 
-const defaultConfig = {
+export const defaultConfig = {
     "general.base-url": "",
     "api.key": "",
     "api.categories": "",
@@ -25,7 +29,6 @@ const defaultConfig = {
     "api.import-strategy": "symlinks",
     "api.completed-downloads-dir": "",
     "api.user-agent": "",
-    "usenet.providers": "",
     "usenet.max-download-connections": "15",
     "usenet.streaming-priority": "80",
     "usenet.article-buffer-size": "40",
@@ -56,21 +59,36 @@ const defaultConfig = {
 }
 
 export async function loader({ request }: Route.LoaderArgs) {
-    const [configItems, encryptionStatus] = await Promise.all([
-        backendClient.getConfig(Object.keys(defaultConfig)),
+    // React Router single-fetch can invoke this loader directly (for example
+    // `settings.data?_routes=routes/settings`) without running root.loader.
+    // Authenticate at the sensitive boundary before even constructing a
+    // backend request; redirects carry no decrypted settings body.
+    let authenticated = false;
+    try {
+        authenticated = await isAuthenticated(request);
+    } catch {
+        authenticated = false;
+    }
+    if (!authenticated) {
+        // React Router may wrap a direct loader response in its single-fetch
+        // envelope, but it must not get far enough to construct settings.
+        return new Response(null, { status: 302, headers: { ...Object.fromEntries(new Headers(DEFAULT_NO_CACHE_HEADERS).entries()), Location: "/login", "Content-Length": "0" } });
+    }
+
+    const [adminSettings, usenetSettings, encryptionStatus] = await Promise.all([
+        backendClient.getAdminSettings(),
+        backendClient.getUsenetSettings(),
         backendClient.getEncryptionStatus()
     ]);
 
-    // transform to a map
-    const config: Record<string, string> = { ...defaultConfig };
-    for (const item of configItems) {
-        config[item.configName] = item.configValue;
-    }
+    const config: Record<string, string> = { ...defaultConfig, ...adminSettings.config };
 
     return {
         config: config,
         appVersion: process.env.NZBDAV_VERSION ?? "unknown",
         encryptionStatus,
+        usenetSettings,
+        hasSecrets: adminSettings.hasSecrets,
     }
 }
 
@@ -80,30 +98,42 @@ export default function Settings(props: Route.ComponentProps) {
     );
 }
 
+export const WRITE_ONLY_SECRET_KEYS = ["api.key", "webdav.pass", "cache.l2.access-key", "cache.l2.secret-key", "arr.instances"] as const;
+type WriteOnlySecretKey = typeof WRITE_ONLY_SECRET_KEYS[number];
+
 type BodyProps = {
     config: Record<string, string>,
     appVersion: string,
     encryptionStatus: EncryptionStatus,
+    usenetSettings: UsenetSettingsResponse,
+    hasSecrets: Record<string, boolean>,
 };
 
-function Body(props: BodyProps) {
+export function Body(props: BodyProps) {
     // stateful variables
     const [config, setConfig] = useState(props.config);
     const [newConfig, setNewConfig] = useState(config);
+    const [usenetSettings, setUsenetSettings] = useState(props.usenetSettings);
+    const [newUsenetProviders, setNewUsenetProviders] = useState<ConnectionDetails[]>(
+        toProviderDrafts(props.usenetSettings.providers));
     const [isSaving, setIsSaving] = useState(false);
     const [isSaved, setIsSaved] = useState(false);
+    const [saveError, setSaveError] = useState<string | null>(null);
+    const [clearSecrets, setClearSecrets] = useState<Set<string>>(new Set());
+    const [hasSecrets, setHasSecrets] = useState(props.hasSecrets);
     const [activeTab, setActiveTab] = useState('usenet');
     const [postMigrationAcknowledged, setPostMigrationAcknowledged] = useState(
         props.encryptionStatus.postMigrationAcknowledged);
     const [isAcknowledgingPostMigration, setIsAcknowledgingPostMigration] = useState(false);
 
     // derived variables
-    const iseUsenetUpdated = isUsenetSettingsUpdated(config, newConfig);
+    const iseUsenetUpdated = isUsenetSettingsUpdated(
+        toProviderDrafts(usenetSettings.providers), newUsenetProviders);
     const isSabnzbdUpdated = isSabnzbdSettingsUpdated(config, newConfig);
     const isWebdavUpdated = isWebdavSettingsUpdated(config, newConfig);
     const isArrsUpdated = isArrsSettingsUpdated(config, newConfig);
     const isRepairsUpdated = isRepairsSettingsUpdated(config, newConfig);
-    const isUpdated = iseUsenetUpdated || isSabnzbdUpdated || isWebdavUpdated || isArrsUpdated || isRepairsUpdated;
+    const isUpdated = iseUsenetUpdated || isSabnzbdUpdated || isWebdavUpdated || isArrsUpdated || isRepairsUpdated || clearSecrets.size > 0;
     const navigationBlocker = useNavigationBlocker(isUpdated);
     const showEncryptionBanner = props.encryptionStatus.bannerSeverity !== "none";
     const showPostMigrationBanner = props.encryptionStatus.migrationCompletedAt !== null && !postMigrationAcknowledged;
@@ -118,7 +148,7 @@ function Body(props: BodyProps) {
         : !isUpdated && isSaved ? "Saved ✅"
         : !isUpdated && !isSaved ? "There are no changes to save"
         : isSabnzbdUpdated && !isSabnzbdSettingsValid(newConfig) ? "Invalid SABnzbd settings"
-        : isWebdavUpdated && !isWebdavSettingsValid(newConfig) ? "Invalid WebDAV settings"
+        : isWebdavUpdated && !isWebdavSettingsValid(newConfig, hasSecrets) ? "Invalid WebDAV settings"
         : isArrsUpdated && !isArrsSettingsValid(newConfig) ? "Invalid Arrs settings"
         : "Save";
     const saveButtonVariant = saveButtonLabel === "Save" ? "primary"
@@ -129,37 +159,79 @@ function Body(props: BodyProps) {
     // events
     const onClear = useCallback(() => {
         setNewConfig(config);
+        setNewUsenetProviders(toProviderDrafts(usenetSettings.providers));
+        setClearSecrets(new Set());
         setIsSaved(false);
-    }, [config, setNewConfig]);
+        setSaveError(null);
+    }, [config, usenetSettings, setNewConfig]);
 
     const onSave = useCallback(async () => {
         setIsSaving(true);
         setIsSaved(false);
-        const response = await fetch("/settings/update", {
-            method: "POST",
-            body: (() => {
-                const form = new FormData();
-                const changedConfig = getChangedConfig(config, newConfig);
-                form.append("config", JSON.stringify(changedConfig));
-                return form;
-            })()
-        });
-        if (response.ok) {
-            setConfig(newConfig);
+        setSaveError(null);
+        try {
+            let nextUsenetSettings = usenetSettings;
+            let nextUsenetProviders = newUsenetProviders;
+
+            if (iseUsenetUpdated) {
+                const usenetResponse = await csrfFetch("/settings/usenet", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(buildUsenetRequestPayload(usenetSettings.revision, newUsenetProviders)),
+                }, { idempotent: true });
+                if (!usenetResponse.ok) {
+                    throw new Error("Unable to save Usenet settings.");
+                }
+                nextUsenetSettings = await usenetResponse.json() as typeof usenetSettings;
+                nextUsenetProviders = mergeUsenetDraftWithSavedPasses(nextUsenetSettings, nextUsenetProviders);
+                setUsenetSettings(nextUsenetSettings);
+                setNewUsenetProviders(nextUsenetProviders);
+            }
+
+            const response = await csrfFetch("/settings/update", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    config: getChangedConfig(config, newConfig, clearSecrets),
+                    clearSecrets: [...clearSecrets],
+                }),
+            }, { idempotent: true });
+            if (!response.ok) throw new Error("Unable to save settings.");
+            const saved = await response.json() as AdminSettingsResponse;
+            const persistedConfig = { ...newConfig, ...(saved.config || {}) };
+            setConfig(persistedConfig);
+            setNewConfig(persistedConfig);
+            setHasSecrets(deriveHasSecrets(saved, hasSecrets));
+            setUsenetSettings(nextUsenetSettings);
+            setNewUsenetProviders(toProviderDrafts(nextUsenetSettings.providers));
+            setClearSecrets(new Set());
+            setIsSaved(true);
+        } catch {
+            setIsSaved(false);
+            setSaveError("Settings could not be saved. Please try again.");
+        } finally {
+            setIsSaving(false);
         }
-        setIsSaving(false);
-        setIsSaved(true);
-    }, [config, newConfig, setIsSaving, setIsSaved, setConfig]);
+    }, [config, hasSecrets, clearSecrets, newConfig, iseUsenetUpdated, newUsenetProviders, usenetSettings]);
+
 
     const onAcknowledgePostMigration = useCallback(async () => {
         setIsAcknowledgingPostMigration(true);
-        const response = await fetch("/settings/acknowledge-post-migration", {
-            method: "POST"
-        });
-        if (response.ok) {
+        setSaveError(null);
+        try {
+            const response = await csrfFetch("/settings/acknowledge-post-migration", {
+                method: "POST"
+            });
+            if (!response.ok) {
+                setSaveError("Unable to dismiss the migration banner. Please try again.");
+                return;
+            }
             setPostMigrationAcknowledged(true);
+        } catch {
+            setSaveError("Unable to dismiss the migration banner. Please try again.");
+        } finally {
+            setIsAcknowledgingPostMigration(false);
         }
-        setIsAcknowledgingPostMigration(false);
     }, []);
 
     return (
@@ -195,16 +267,16 @@ function Body(props: BodyProps) {
                 className={styles.tabs}
             >
                 <Tab eventKey="usenet" title={usenetTitle}>
-                    <UsenetSettings config={newConfig} setNewConfig={setNewConfig} />
+                    <UsenetSettings providers={newUsenetProviders} setProviders={setNewUsenetProviders} />
                 </Tab>
                 <Tab eventKey="sabnzbd" title={sabnzbdTitle}>
-                    <SabnzbdSettings config={newConfig} setNewConfig={setNewConfig} appVersion={props.appVersion} />
+                    <SabnzbdSettings config={newConfig} setNewConfig={setNewConfig} appVersion={props.appVersion} hasSecrets={hasSecrets} clearSecrets={clearSecrets} onSecretChange={setSecretClearState(setClearSecrets)} />
                 </Tab>
                 <Tab eventKey="webdav" title={webdavTitle}>
-                    <WebdavSettings config={newConfig} setNewConfig={setNewConfig} />
+                    <WebdavSettings config={newConfig} setNewConfig={setNewConfig} hasSecrets={hasSecrets} clearSecrets={clearSecrets} onSecretChange={setSecretClearState(setClearSecrets)} />
                 </Tab>
                 <Tab eventKey="arrs" title={arrsTitle}>
-                    <ArrsSettings config={newConfig} setNewConfig={setNewConfig} />
+                    <ArrsSettings config={newConfig} setNewConfig={setNewConfig} hasSecrets={hasSecrets} clearSecrets={clearSecrets} onSecretChange={setSecretClearState(setClearSecrets)} />
                 </Tab>
                 <Tab eventKey="repairs" title={repairsTitle}>
                     <RepairsSettings config={newConfig} setNewConfig={setNewConfig} />
@@ -214,6 +286,7 @@ function Body(props: BodyProps) {
                 </Tab>
             </Tabs>
             <hr />
+            {saveError && <div role="alert" className={styles.bannerWarning}>{saveError}</div>}
             {isUpdated && <Button
                 className={styles.button}
                 variant="secondary"
@@ -241,18 +314,70 @@ function Body(props: BodyProps) {
     );
 }
 
-function getChangedConfig(
+function toProviderDrafts(providers: UsenetSettingsResponse["providers"]): ConnectionDetails[] {
+    return providers.map(provider => ({
+        Id: provider.id,
+        Host: provider.host,
+        Port: provider.port,
+        UseSsl: provider.ssl,
+        User: provider.user,
+        MaxConnections: provider.max,
+        Type: provider.type as ConnectionDetails["Type"],
+        Pass: "",
+        HasPassword: provider.hasPassword,
+    }));
+}
+
+function toProviderRequest(provider: ConnectionDetails) {
+    return {
+        id: provider.Id,
+        host: provider.Host,
+        port: provider.Port,
+        ssl: provider.UseSsl,
+        user: provider.User,
+        max: provider.MaxConnections,
+        type: provider.Type,
+        ...(provider.Pass ? { password: provider.Pass } : {}),
+    };
+}
+
+export function mergeUsenetDraftWithSavedPasses(savedUsenet: UsenetSettingsResponse, draftProviders: ConnectionDetails[]): ConnectionDetails[] {
+    return toProviderDrafts(savedUsenet.providers).map((provider, index) => ({
+        ...provider,
+        Pass: draftProviders[index]?.Pass || "",
+    }));
+}
+
+export function buildUsenetRequestPayload(revision: string, providers: ConnectionDetails[]) {
+    return {
+        revision,
+        providers: providers.map(toProviderRequest),
+    };
+}
+
+export function getChangedConfig(
     config: Record<string, string>,
-    newConfig: Record<string, string>
+    newConfig: Record<string, string>,
+    clearSecrets: ReadonlySet<string> = new Set(),
 ): Record<string, string> {
-    let changedConfig: Record<string, string> = {};
-    let configKeys = Object.keys(defaultConfig);
-    for (const configKey of configKeys) {
-        if (config[configKey] !== newConfig[configKey]) {
-            changedConfig[configKey] = newConfig[configKey];
-        }
+    const changedConfig: Record<string, string> = {};
+    for (const configKey of Object.keys(defaultConfig)) {
+        // A redacted write-only field is intentionally blank. Clearing is a
+        // separate explicit operation; blank input must preserve the secret.
+        if (clearSecrets.has(configKey)) continue;
+        if (config[configKey] !== newConfig[configKey]) changedConfig[configKey] = newConfig[configKey];
     }
     return changedConfig;
+}
+
+export function setSecretClearState(setter: Dispatch<SetStateAction<Set<string>>>) {
+    return (key: WriteOnlySecretKey, clear: boolean) => {
+        setter(previous => {
+            const next = new Set(previous);
+            if (clear) next.add(key); else next.delete(key);
+            return next;
+        });
+    };
 }
 
 function formatTimestamp(value: string | null) {
@@ -260,6 +385,10 @@ function formatTimestamp(value: string | null) {
 
     const parsed = new Date(value);
     return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
+}
+
+export function deriveHasSecrets(saved: AdminSettingsResponse, fallback: Record<string, boolean>): Record<string, boolean> {
+    return saved.hasSecrets ?? fallback;
 }
 
 function useNavigationBlocker(isConfigUpdated: boolean) {

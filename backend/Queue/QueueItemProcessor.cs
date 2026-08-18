@@ -378,26 +378,30 @@ public class QueueItemProcessor(
         await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
         _ = websocketManager.SendMessage(WebsocketTopic.QueueItemRemoved, queueItem.Id.ToString());
         _ = websocketManager.SendMessage(WebsocketTopic.HistoryItemAdded, historySlot.ToJson());
-        _ = RefreshMonitoredDownloads();
+        _ = RefreshMonitoredDownloads(ct);
     }
 
-    private async Task RefreshMonitoredDownloads()
+    private async Task RefreshMonitoredDownloads(CancellationToken cancellationToken)
     {
         var tasks = configManager
             .GetArrConfig()
             .GetArrClients()
-            .Select(RefreshMonitoredDownloads);
+            .Select(client => RefreshMonitoredDownloads(client, cancellationToken));
         await Task.WhenAll(tasks).ConfigureAwait(false);
     }
 
-    private async Task RefreshMonitoredDownloads(ArrClient arrClient)
+    private async Task RefreshMonitoredDownloads(ArrClient arrClient, CancellationToken cancellationToken)
     {
         try
         {
-            var downloadClients = await arrClient.GetDownloadClientsAsync().ConfigureAwait(false);
+            var downloadClients = await arrClient.GetDownloadClientsAsync(cancellationToken).ConfigureAwait(false);
             if (downloadClients.All(x => x.Category != queueItem.Category)) return;
-            var queueCount = await arrClient.GetQueueCountAsync().ConfigureAwait(false);
-            if (queueCount < 300) await arrClient.RefreshMonitoredDownloads().ConfigureAwait(false);
+            var queueCount = await arrClient.GetQueueCountAsync(cancellationToken).ConfigureAwait(false);
+            if (queueCount < 300) await arrClient.RefreshMonitoredDownloads(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception e)
         {

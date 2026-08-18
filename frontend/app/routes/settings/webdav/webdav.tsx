@@ -7,9 +7,20 @@ import { isPositiveInteger } from "../usenet/usenet";
 type SabnzbdSettingsProps = {
     config: Record<string, string>
     setNewConfig: Dispatch<SetStateAction<Record<string, string>>>
+    hasSecrets?: Record<string, boolean>
+    clearSecrets?: ReadonlySet<string>
+    onSecretChange?: (key: "webdav.pass" | "cache.l2.access-key" | "cache.l2.secret-key", clear: boolean) => void
 };
 
-export function WebdavSettings({ config, setNewConfig }: SabnzbdSettingsProps) {
+export function WebdavSettings({ config, setNewConfig, hasSecrets = {}, clearSecrets = new Set(), onSecretChange }: SabnzbdSettingsProps) {
+    const updateSecret = (key: "webdav.pass" | "cache.l2.access-key" | "cache.l2.secret-key", value: string) => {
+        setNewConfig({ ...config, [key]: value });
+        if (value.trim()) onSecretChange?.(key, false);
+    };
+    const toggleClear = (key: "webdav.pass" | "cache.l2.access-key" | "cache.l2.secret-key", clear: boolean) => {
+        onSecretChange?.(key, clear);
+        if (clear) setNewConfig({ ...config, [key]: "" });
+    };
     return (
         <div className={styles.container}>
             <Form.Group>
@@ -34,8 +45,15 @@ export function WebdavSettings({ config, setNewConfig }: SabnzbdSettingsProps) {
                     type="password"
                     id="webdav-pass-input"
                     aria-describedby="webdav-pass-help"
+                    placeholder={hasSecrets["webdav.pass"] ? "Configured — enter a replacement to change" : undefined}
                     value={config["webdav.pass"]}
-                    onChange={e => setNewConfig({ ...config, "webdav.pass": e.target.value })} />
+                    onChange={e => updateSecret("webdav.pass", e.target.value)} />
+                {hasSecrets["webdav.pass"] ? <Form.Check
+                    id="webdav-pass-clear"
+                    label="Clear saved WebDAV password"
+                    checked={clearSecrets.has("webdav.pass")}
+                    onChange={e => toggleClear("webdav.pass", e.target.checked)}
+                /> : null}
                 <Form.Text id="webdav-pass-help" muted>
                     Use this password to connect to the webdav.
                 </Form.Text>
@@ -185,8 +203,15 @@ export function WebdavSettings({ config, setNewConfig }: SabnzbdSettingsProps) {
                     type="text"
                     id="l2-access-key-input"
                     aria-describedby="l2-access-key-help"
+                    placeholder={hasSecrets["cache.l2.access-key"] ? "Configured — enter a replacement to change" : undefined}
                     value={config["cache.l2.access-key"]}
-                    onChange={e => setNewConfig({ ...config, "cache.l2.access-key": e.target.value })} />
+                    onChange={e => updateSecret("cache.l2.access-key", e.target.value)} />
+                {hasSecrets["cache.l2.access-key"] ? <Form.Check
+                    id="l2-access-key-clear"
+                    label="Clear saved L2 access key"
+                    checked={clearSecrets.has("cache.l2.access-key")}
+                    onChange={e => toggleClear("cache.l2.access-key", e.target.checked)}
+                /> : null}
                 <Form.Text id="l2-access-key-help" muted>
                     Access key for the shared object-storage backend.
                 </Form.Text>
@@ -199,8 +224,15 @@ export function WebdavSettings({ config, setNewConfig }: SabnzbdSettingsProps) {
                     type="password"
                     id="l2-secret-key-input"
                     aria-describedby="l2-secret-key-help"
+                    placeholder={hasSecrets["cache.l2.secret-key"] ? "Configured — enter a replacement to change" : undefined}
                     value={config["cache.l2.secret-key"]}
-                    onChange={e => setNewConfig({ ...config, "cache.l2.secret-key": e.target.value })} />
+                    onChange={e => updateSecret("cache.l2.secret-key", e.target.value)} />
+                {hasSecrets["cache.l2.secret-key"] ? <Form.Check
+                    id="l2-secret-key-clear"
+                    label="Clear saved L2 secret key"
+                    checked={clearSecrets.has("cache.l2.secret-key")}
+                    onChange={e => toggleClear("cache.l2.secret-key", e.target.checked)}
+                /> : null}
                 <Form.Text id="l2-secret-key-help" muted>
                     Secret key for the shared object-storage backend.
                 </Form.Text>
@@ -378,7 +410,7 @@ export function isWebdavSettingsUpdated(config: Record<string, string>, newConfi
         || config["cache.metadata-retention-days"] !== newConfig["cache.metadata-retention-days"]
 }
 
-export function isWebdavSettingsValid(newConfig: Record<string, string>) {
+export function isWebdavSettingsValid(newConfig: Record<string, string>, hasSecrets: Record<string, boolean> = {}) {
     return isValidUser(newConfig["webdav.user"])
         && isValidMaxDownloadConnections(newConfig["usenet.max-download-connections"])
         && isValidStreamingPriority(newConfig["usenet.streaming-priority"])
@@ -387,8 +419,8 @@ export function isWebdavSettingsValid(newConfig: Record<string, string>) {
         && isPositiveInteger(newConfig["cache.max-age-hours"])
         && isValidL2Endpoint(newConfig)
         && isValidL2BucketName(newConfig)
-        && isValidL2AccessKey(newConfig)
-        && isValidL2SecretKey(newConfig)
+        && isValidL2AccessKey(newConfig, hasSecrets)
+        && isValidL2SecretKey(newConfig, hasSecrets)
         && isPositiveInteger(newConfig["cache.precache-max-file-size-mb"])
         && isPositiveInteger(newConfig["cache.read-ahead-segments"])
         && isPositiveInteger(newConfig["cache.metadata-retention-days"]);
@@ -426,10 +458,10 @@ function isValidL2BucketName(config: Record<string, string>): boolean {
     return /^[a-z0-9-]{3,63}$/.test(config["cache.l2.bucket-name"]);
 }
 
-function isValidL2AccessKey(config: Record<string, string>): boolean {
-    return !isL2Enabled(config) || config["cache.l2.access-key"].trim() !== "";
+function isValidL2AccessKey(config: Record<string, string>, hasSecrets: Record<string, boolean> = {}): boolean {
+    return !isL2Enabled(config) || config["cache.l2.access-key"].trim() !== "" || hasSecrets["cache.l2.access-key"] === true;
 }
 
-function isValidL2SecretKey(config: Record<string, string>): boolean {
-    return !isL2Enabled(config) || config["cache.l2.secret-key"].trim() !== "";
+function isValidL2SecretKey(config: Record<string, string>, hasSecrets: Record<string, boolean> = {}): boolean {
+    return !isL2Enabled(config) || config["cache.l2.secret-key"].trim() !== "" || hasSecrets["cache.l2.secret-key"] === true;
 }

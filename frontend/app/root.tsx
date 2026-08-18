@@ -15,8 +15,28 @@ import type { Route } from "./+types/root";
 import { IS_FRONTEND_AUTH_DISABLED, isAuthenticated } from "~/auth/authentication.server";
 import { TopNavigation } from "./routes/_index/components/top-navigation/top-navigation";
 import { LeftNavigation } from "./routes/_index/components/left-navigation/left-navigation";
+import { getCsrfToken } from "./onboarding/onboarding-csrf.server";
 import { PageLayout } from "./routes/_index/components/page-layout/page-layout";
 import { Loading } from "./routes/_index/components/loading/loading";
+import { DEFAULT_NO_CACHE_HEADERS } from "./onboarding/onboarding-request.server";
+import { backendClient } from "./clients/backend-client.server";
+
+const PRIVATE_NO_CACHE_HEADERS: HeadersInit = {
+  ...DEFAULT_NO_CACHE_HEADERS,
+  "Cache-Control": `private, ${(DEFAULT_NO_CACHE_HEADERS as Record<string, string>)["Cache-Control"]}`,
+};
+
+function withNoCache(headers?: HeadersInit): ResponseInit {
+  const merged = new Headers(headers);
+  for (const [name, value] of new Headers(PRIVATE_NO_CACHE_HEADERS).entries()) {
+    merged.append(name, value);
+  }
+  return { headers: merged };
+}
+
+const withAuthRedirectHeaders = (): ResponseInit => ({
+  headers: new Headers(PRIVATE_NO_CACHE_HEADERS),
+});
 
 export async function loader({ request }: Route.LoaderArgs) {
   // unauthenticated routes
@@ -25,12 +45,30 @@ export async function loader({ request }: Route.LoaderArgs) {
   if (path === "/onboarding") return { useLayout: false };
 
   // ensure all other routes are authenticated
-  if (!await isAuthenticated(request)) return redirect("/login");
-  return {
-    useLayout: true,
-    version: process.env.NZBDAV_VERSION,
-    isFrontendAuthDisabled: IS_FRONTEND_AUTH_DISABLED,
-  };
+  try {
+    if (!await isAuthenticated(request)) return redirect("/login", withAuthRedirectHeaders());
+  } catch {
+    return redirect("/login", withAuthRedirectHeaders());
+  }
+
+  const csrf = await getCsrfToken(request);
+  let resumeSetup = false;
+  try {
+    const setupStatus = await backendClient.getSetupStatus();
+    resumeSetup = setupStatus.enabled && !setupStatus.completed;
+  } catch {
+    // Navigation must remain available when setup status is temporarily down.
+  }
+  return Response.json(
+    {
+      useLayout: true,
+      resumeSetup,
+      version: process.env.NZBDAV_VERSION,
+      isFrontendAuthDisabled: IS_FRONTEND_AUTH_DISABLED,
+      csrfToken: csrf.token,
+    },
+    withNoCache(csrf.headers),
+  );
 }
 
 
@@ -54,7 +92,19 @@ export function Layout({ children }: { children: React.ReactNode }) {
 }
 
 export default function App({ loaderData }: Route.ComponentProps) {
-  const { useLayout, version, isFrontendAuthDisabled } = loaderData;
+  const {
+    useLayout,
+    version,
+    isFrontendAuthDisabled,
+    csrfToken,
+    resumeSetup,
+  } = loaderData as {
+    useLayout: boolean,
+    version?: string,
+    isFrontendAuthDisabled?: boolean,
+    csrfToken?: string,
+    resumeSetup?: boolean,
+  };
   const location = useLocation();
   const navigation = useNavigation();
   const isNavigating = Boolean(navigation.location);
@@ -67,14 +117,20 @@ export default function App({ loaderData }: Route.ComponentProps) {
 
   if (useLayout) {
     return (
+      <>
+      <meta name="csrf-token" content={csrfToken || ""} />
       <PageLayout
         topNavComponent={TopNavigation}
         bodyChild={showLoading ? <Loading /> : <Outlet />}
         leftNavChild={
           <LeftNavigation
             version={version}
-            isFrontendAuthDisabled={isFrontendAuthDisabled} />
+            isFrontendAuthDisabled={isFrontendAuthDisabled}
+            csrfToken={csrfToken}
+            resumeSetup={resumeSetup}
+          />
         } />
+      </>
     );
   }
 

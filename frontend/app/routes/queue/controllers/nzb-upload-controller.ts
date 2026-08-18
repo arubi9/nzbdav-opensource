@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import type { UploadingFile } from "../route";
+import { csrfUpload } from "~/utils/csrf-fetch";
 
 export function initializeUploadController(
     isUploadingRef: React.RefObject<boolean>,
@@ -29,14 +30,14 @@ async function processUploadQueue(
     ));
 
     try {
-        const xhr = new XMLHttpRequest();
         const formData = new FormData();
         formData.append('nzbFile', fileToUpload.file, fileToUpload.file.name);
 
-        xhr.responseType = 'json';
-        xhr.upload.addEventListener('progress', (e) => {
-            if (e.lengthComputable) {
-                const progress = Math.round((e.loaded / e.total) * 100);
+        const xhr = await csrfUpload(
+            `/api?mode=addfile&cat=${fileToUpload.queueSlot.cat}&priority=0&pp=0`,
+            formData,
+            (loaded, total) => {
+                const progress = Math.round((loaded / total) * 100);
                 setUploadingFiles(files => files.map(f =>
                     f.queueSlot.nzo_id === fileToUpload.queueSlot.nzo_id
                         ? {
@@ -49,24 +50,9 @@ async function processUploadQueue(
                         }
                         : f
                 ));
-            }
-        });
-
-        var response: any = await new Promise<void>((resolve, reject) => {
-            xhr.addEventListener('load', () => {
-                if (xhr.status >= 200 && xhr.status < 300) {
-                    resolve(xhr.response);
-                } else {
-                    const errorMessage = xhr.response.error || `Upload failed with status ${xhr.status}`;
-                    reject(new Error(errorMessage));
-                }
-            });
-            xhr.addEventListener('error', () => reject(new Error('Upload failed')));
-            xhr.addEventListener('abort', () => reject(new Error('Upload aborted')));
-
-            xhr.open('POST', `/api?mode=addfile&cat=${fileToUpload.queueSlot.cat}&priority=0&pp=0`);
-            xhr.send(formData);
-        });
+            },
+        );
+        const response: any = xhr.response;
 
         if (response.status == false) {
             throw new Error(response.error);
@@ -79,7 +65,7 @@ async function processUploadQueue(
                 queueSlot: {
                     ...f.queueSlot,
                     status: 'upload failed',
-                    error: error instanceof Error ? error.message : 'Upload failed'
+                    error: 'Upload failed.'
                 }
             } : f
         ));

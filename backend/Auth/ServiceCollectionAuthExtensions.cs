@@ -1,5 +1,4 @@
 ﻿using System.Security.Claims;
-using System.Security.Cryptography;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Extensions.DependencyInjection;
 using NWebDav.Server;
@@ -52,8 +51,8 @@ public static class ServiceCollectionAuthExtensions
         var user = configManager.GetWebdavUser();
         var passwordHash = configManager.GetWebdavPasswordHash();
 
-        if (string.IsNullOrEmpty(user) || string.IsNullOrEmpty(passwordHash)
-            || string.IsNullOrEmpty(context.Username) || string.IsNullOrEmpty(context.Password))
+        if (string.IsNullOrWhiteSpace(user) || string.IsNullOrWhiteSpace(passwordHash)
+            || string.IsNullOrWhiteSpace(context.Username) || string.IsNullOrWhiteSpace(context.Password))
         {
             context.Fail("webdav user and password are not yet configured.");
             return Task.CompletedTask;
@@ -62,13 +61,15 @@ public static class ServiceCollectionAuthExtensions
         var passwordMatches = false;
         try
         {
-            passwordMatches = PasswordUtil.Verify(passwordHash!, context.Password);
+            passwordMatches = PasswordUtil.Verify(passwordHash, context.Password);
         }
         catch (FormatException)
         {
+            // legacy fallback is disabled
         }
-        catch (CryptographicException)
+        catch (System.Security.Cryptography.CryptographicException)
         {
+            // legacy fallback is disabled
         }
 
         if (context.Username == user && passwordMatches)

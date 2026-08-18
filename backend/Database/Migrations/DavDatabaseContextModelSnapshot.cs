@@ -90,119 +90,6 @@ namespace NzbWebDAV.Database.Migrations
                     b.ToTable("ConfigItems", (string)null);
                 });
 
-            modelBuilder.Entity("NzbWebDAV.Database.Models.NntpConnectionLease", b =>
-                {
-                    b.Property<string>("NodeId")
-                        .HasColumnType("TEXT")
-                        .HasColumnName("node_id");
-
-                    b.Property<int>("ProviderIndex")
-                        .HasColumnType("INTEGER")
-                        .HasColumnName("provider_index");
-
-                    b.Property<int>("Role")
-                        .HasColumnType("INTEGER")
-                        .HasColumnName("role");
-
-                    b.Property<int>("BorrowedSlots")
-                        .HasColumnType("INTEGER")
-                        .HasColumnName("borrowed_slots");
-
-                    b.Property<long>("Epoch")
-                        .HasColumnType("INTEGER")
-                        .HasColumnName("epoch");
-
-                    b.Property<int>("GrantedSlots")
-                        .HasColumnType("INTEGER")
-                        .HasColumnName("granted_slots");
-
-                    b.Property<DateTime>("LeaseUntil")
-                        .HasColumnType("TEXT")
-                        .HasColumnName("lease_until");
-
-                    b.Property<int>("ReservedSlots")
-                        .HasColumnType("INTEGER")
-                        .HasColumnName("reserved_slots");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("TEXT")
-                        .HasColumnName("updated_at")
-                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
-
-                    b.HasKey("NodeId", "ProviderIndex");
-
-                    b.HasIndex("LeaseUntil")
-                        .HasDatabaseName("ix_nntp_connection_leases_lease_until");
-
-                    b.ToTable("nntp_connection_leases", (string)null);
-                });
-
-            modelBuilder.Entity("NzbWebDAV.Database.Models.NntpLeaseEpoch", b =>
-                {
-                    b.Property<int>("ProviderIndex")
-                        .ValueGeneratedNever()
-                        .HasColumnType("INTEGER")
-                        .HasColumnName("provider_index");
-
-                    b.Property<long>("Epoch")
-                        .HasColumnType("INTEGER")
-                        .HasColumnName("epoch");
-
-                    b.HasKey("ProviderIndex");
-
-                    b.ToTable("nntp_lease_epochs", (string)null);
-                });
-
-            modelBuilder.Entity("NzbWebDAV.Database.Models.NntpNodeHeartbeat", b =>
-                {
-                    b.Property<string>("NodeId")
-                        .HasColumnType("TEXT")
-                        .HasColumnName("node_id");
-
-                    b.Property<int>("ProviderIndex")
-                        .HasColumnType("INTEGER")
-                        .HasColumnName("provider_index");
-
-                    b.Property<int>("Role")
-                        .HasColumnType("INTEGER")
-                        .HasColumnName("role");
-
-                    b.Property<int>("ActiveSlots")
-                        .HasColumnType("INTEGER")
-                        .HasColumnName("active_slots");
-
-                    b.Property<int>("DesiredSlots")
-                        .HasColumnType("INTEGER")
-                        .HasColumnName("desired_slots");
-
-                    b.Property<bool>("HasDemand")
-                        .HasColumnType("INTEGER")
-                        .HasColumnName("has_demand");
-
-                    b.Property<DateTime>("HeartbeatAt")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("TEXT")
-                        .HasColumnName("heartbeat_at")
-                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
-
-                    b.Property<int>("LiveSlots")
-                        .HasColumnType("INTEGER")
-                        .HasColumnName("live_slots");
-
-                    b.Property<string>("Region")
-                        .IsRequired()
-                        .HasColumnType("TEXT")
-                        .HasColumnName("region");
-
-                    b.HasKey("NodeId", "ProviderIndex");
-
-                    b.HasIndex("HeartbeatAt")
-                        .HasDatabaseName("ix_nntp_node_heartbeats_heartbeat_at");
-
-                    b.ToTable("nntp_node_heartbeats", (string)null);
-                });
-
             modelBuilder.Entity("NzbWebDAV.Database.Models.ConnectionPoolClaim", b =>
                 {
                     b.Property<string>("NodeId")
@@ -270,16 +157,16 @@ namespace NzbWebDAV.Database.Migrations
                     b.Property<int>("Type")
                         .HasColumnType("INTEGER");
 
-                    b.Property<long?>("YencPartSize")
-                        .HasColumnType("INTEGER");
-
                     b.Property<long?>("YencLastPartSize")
                         .HasColumnType("INTEGER");
 
-                    b.Property<int?>("YencSegmentCount")
+                    b.Property<bool?>("YencLayoutUniform")
                         .HasColumnType("INTEGER");
 
-                    b.Property<bool?>("YencLayoutUniform")
+                    b.Property<long?>("YencPartSize")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("YencSegmentCount")
                         .HasColumnType("INTEGER");
 
                     b.HasKey("Id");
@@ -288,6 +175,8 @@ namespace NzbWebDAV.Database.Migrations
 
                     b.HasIndex("ParentId", "Name")
                         .IsUnique();
+
+                    b.HasIndex("Path");
 
                     b.HasIndex("Type", "NextHealthCheck", "ReleaseDate", "Id");
 
@@ -456,6 +345,118 @@ namespace NzbWebDAV.Database.Migrations
                     b.ToTable("MissingSegmentIds", (string)null);
                 });
 
+            modelBuilder.Entity("NzbWebDAV.Database.Models.NntpConnectionLease", b =>
+                {
+                    b.Property<string>("NodeId")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("node_id");
+
+                    b.Property<int>("ProviderIndex")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("provider_index");
+
+                    b.Property<int>("BorrowedSlots")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("borrowed_slots");
+
+                    b.Property<long>("Epoch")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("epoch");
+
+                    b.Property<int>("GrantedSlots")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("granted_slots");
+
+                    b.Property<DateTime>("LeaseUntil")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("lease_until");
+
+                    b.Property<int>("ReservedSlots")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("reserved_slots");
+
+                    b.Property<int>("Role")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("role");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT")
+                        .HasColumnName("updated_at")
+                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+                    b.HasKey("NodeId", "ProviderIndex");
+
+                    b.HasIndex("LeaseUntil")
+                        .HasDatabaseName("ix_nntp_connection_leases_lease_until");
+
+                    b.ToTable("nntp_connection_leases", (string)null);
+                });
+
+            modelBuilder.Entity("NzbWebDAV.Database.Models.NntpLeaseEpoch", b =>
+                {
+                    b.Property<int>("ProviderIndex")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("provider_index");
+
+                    b.Property<long>("Epoch")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("epoch");
+
+                    b.HasKey("ProviderIndex");
+
+                    b.ToTable("nntp_lease_epochs", (string)null);
+                });
+
+            modelBuilder.Entity("NzbWebDAV.Database.Models.NntpNodeHeartbeat", b =>
+                {
+                    b.Property<string>("NodeId")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("node_id");
+
+                    b.Property<int>("ProviderIndex")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("provider_index");
+
+                    b.Property<int>("ActiveSlots")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("active_slots");
+
+                    b.Property<int>("DesiredSlots")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("desired_slots");
+
+                    b.Property<bool>("HasDemand")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("has_demand");
+
+                    b.Property<DateTime>("HeartbeatAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT")
+                        .HasColumnName("heartbeat_at")
+                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+                    b.Property<int>("LiveSlots")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("live_slots");
+
+                    b.Property<string>("Region")
+                        .IsRequired()
+                        .HasColumnType("TEXT")
+                        .HasColumnName("region");
+
+                    b.Property<int>("Role")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("role");
+
+                    b.HasKey("NodeId", "ProviderIndex");
+
+                    b.HasIndex("HeartbeatAt")
+                        .HasDatabaseName("ix_nntp_node_heartbeats_heartbeat_at");
+
+                    b.ToTable("nntp_node_heartbeats", (string)null);
+                });
+
             modelBuilder.Entity("NzbWebDAV.Database.Models.QueueItem", b =>
                 {
                     b.Property<Guid>("Id")
@@ -521,6 +522,173 @@ namespace NzbWebDAV.Database.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("QueueNzbContents", (string)null);
+                });
+
+            modelBuilder.Entity("NzbWebDAV.Database.Models.SetupCompletionOperation", b =>
+                {
+                    b.Property<int>("Id")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("id");
+
+                    b.Property<string>("ActiveSessionCiphertext")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("active_session_ciphertext");
+
+                    b.Property<string>("CandidateOperationCiphertext")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("candidate_operation_ciphertext");
+
+                    b.Property<string>("CandidateSessionCiphertext")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("candidate_session_ciphertext");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("TIMESTAMP WITH TIME ZONE")
+                        .HasColumnName("created_at_utc");
+
+                    b.Property<string>("EmergencyOperationCiphertext")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("emergency_operation_ciphertext");
+
+                    b.Property<string>("EmergencySessionCiphertext")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("emergency_session_ciphertext");
+
+                    b.Property<string>("OperationId")
+                        .IsRequired()
+                        .HasColumnType("TEXT")
+                        .HasColumnName("operation_id");
+
+                    b.Property<bool>("RevocationPending")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("revocation_pending");
+
+                    b.Property<string>("RevocationSessionCiphertext")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("revocation_session_ciphertext");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("setup_completion_operations", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_setup_completion_operations_singleton", "\"id\" = 1");
+                        });
+                });
+
+            modelBuilder.Entity("NzbWebDAV.Database.Models.SetupGrant", b =>
+                {
+                    b.Property<int>("Id")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("id");
+
+                    b.Property<DateTime>("ExpiresAtUtc")
+                        .HasColumnType("TIMESTAMP WITH TIME ZONE")
+                        .HasColumnName("expires_at_utc");
+
+                    b.Property<string>("GrantedTokenHash")
+                        .IsRequired()
+                        .HasColumnType("TEXT")
+                        .HasColumnName("granted_token_hash");
+
+                    b.Property<bool>("IsRevoked")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("is_revoked");
+
+                    b.Property<DateTime>("IssuedAtUtc")
+                        .HasColumnType("TIMESTAMP WITH TIME ZONE")
+                        .HasColumnName("issued_at_utc");
+
+                    b.Property<string>("IssuedByUsername")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("issued_by_username");
+
+                    b.Property<string>("Purpose")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT")
+                        .HasDefaultValue("setup")
+                        .HasColumnName("purpose");
+
+                    b.Property<string>("RepairSessionCiphertext")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("repair_session_ciphertext");
+
+                    b.Property<string>("RepairSessionOperationId")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("repair_session_operation_id");
+
+                    b.Property<DateTime?>("RevokedAtUtc")
+                        .HasColumnType("TIMESTAMP WITH TIME ZONE")
+                        .HasColumnName("revoked_at_utc");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ExpiresAtUtc")
+                        .HasDatabaseName("IX_setup_grants_expires_at_utc");
+
+                    b.ToTable("setup_grants", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_setup_grants_singleton", "\"id\" = 1");
+                        });
+                });
+
+            modelBuilder.Entity("NzbWebDAV.Database.Models.SetupMutationFence", b =>
+                {
+                    b.Property<int>("Id")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("id");
+
+                    b.Property<long>("Epoch")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("epoch");
+
+                    b.Property<string>("ReservedCandidateOperationId")
+                        .HasColumnType("TEXT")
+                        .HasColumnName("reserved_candidate_operation_id");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("setup_mutation_fence", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_setup_mutation_fence_singleton", "\"id\" = 1");
+                        });
+                });
+
+            modelBuilder.Entity("NzbWebDAV.Database.Models.SetupRunLease", b =>
+                {
+                    b.Property<int>("Id")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("id");
+
+                    b.Property<long>("Generation")
+                        .HasColumnType("INTEGER")
+                        .HasColumnName("generation");
+
+                    b.Property<string>("GrantHash")
+                        .IsRequired()
+                        .HasColumnType("TEXT")
+                        .HasColumnName("grant_hash");
+
+                    b.Property<DateTime>("LeaseUntilUtc")
+                        .HasColumnType("TIMESTAMP WITH TIME ZONE")
+                        .HasColumnName("lease_until_utc");
+
+                    b.Property<string>("OwnerId")
+                        .IsRequired()
+                        .HasColumnType("TEXT")
+                        .HasColumnName("owner_id");
+
+                    b.Property<string>("Purpose")
+                        .IsRequired()
+                        .HasColumnType("TEXT")
+                        .HasColumnName("purpose");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("setup_run_leases", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_setup_run_leases_singleton", "\"id\" = 1");
+                        });
                 });
 
             modelBuilder.Entity("NzbWebDAV.Database.Models.WebsocketOutboxEntry", b =>

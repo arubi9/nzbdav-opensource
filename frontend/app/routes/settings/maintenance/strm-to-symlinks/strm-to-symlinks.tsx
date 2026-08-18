@@ -2,6 +2,7 @@ import { Alert, Button, Form } from "react-bootstrap";
 import styles from "./strm-to-symlinks.module.css";
 import { useCallback, useEffect, useState } from "react";
 import { receiveMessage } from "~/utils/websocket-util";
+import { csrfFetch } from "~/utils/csrf-fetch";
 
 const cleanupTaskTopic = { 'st2sy': 'state' };
 
@@ -42,7 +43,7 @@ export function ConvertStrmToSymlinks({ savedConfig }: ConvertStrmToSymlinksProp
     // events
     const onRun = useCallback(async () => {
         setIsFetching(true);
-        await fetch("/api/convert-strm-to-symlinks");
+        await csrfFetch("/api/convert-strm-to-symlinks", { method: "POST" });
         setIsFetching(false);
     }, [setIsFetching]);
 

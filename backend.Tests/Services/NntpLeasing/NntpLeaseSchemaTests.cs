@@ -16,10 +16,10 @@ public sealed class NntpLeaseSchemaTests : IClassFixture<PostgresHeaderCacheFixt
         _fixture = fixture;
     }
 
-    [SkippableFact]
+    [Fact]
     public async Task SaveChanges_PersistsHeartbeatAndLeaseRows()
     {
-        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
+        Assert.SkipUnless(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         using var environment = new backend.Tests.Config.TemporaryEnvironment(("DATABASE_URL", _fixture.ConnectionString));

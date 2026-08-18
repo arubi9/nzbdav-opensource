@@ -59,10 +59,10 @@ public sealed class ContentIndexRecoveryServiceTests
         }
 
         var snapshotReadResult = await ContentIndexSnapshotStore.ReadAsync(CancellationToken.None);
-        var snapshot = snapshotReadResult.Snapshot;
-        Assert.NotNull(snapshot);
-        Assert.Equal(2, snapshot!.Items.Count);
-        Assert.Single(snapshot.NzbFiles);
+        var summary = snapshotReadResult.Summary;
+        Assert.NotNull(summary);
+        Assert.Equal(2, summary!.ItemCount);
+        Assert.Equal(1, summary.NzbFileCount);
 
         await _fixture.RecreateDatabaseAsync();
 
@@ -156,9 +156,9 @@ public sealed class ContentIndexRecoveryServiceTests
             await saveTask;
             await Task.Delay(150);
 
-            var snapshot = (await ContentIndexSnapshotStore.ReadAsync(CancellationToken.None)).Snapshot;
-            Assert.NotNull(snapshot);
-            Assert.Contains(snapshot!.Items, x => x.Id == category.Id);
+            var summary = (await ContentIndexSnapshotStore.ReadAsync(CancellationToken.None)).Summary;
+            Assert.NotNull(summary);
+            Assert.Contains(category.Id, summary!.ItemsById.Keys);
         }
         finally
         {
@@ -197,15 +197,15 @@ public sealed class ContentIndexDatabaseFixture : IAsyncLifetime
         Environment.SetEnvironmentVariable("CONFIG_PATH", _configPath);
     }
 
-    public Task InitializeAsync()
+    public ValueTask InitializeAsync()
     {
         Directory.CreateDirectory(_configPath);
-        return Task.CompletedTask;
+        return ValueTask.CompletedTask;
     }
 
-    public Task DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        return ResetAsync();
+        return new ValueTask(ResetAsync());
     }
 
     public async Task ResetAsync()
@@ -214,6 +214,9 @@ public sealed class ContentIndexDatabaseFixture : IAsyncLifetime
         SqliteConnection.ClearAllPools();
         DeleteIfExists(DavDatabaseContext.DatabaseFilePath);
         DeleteIfExists(ContentIndexSnapshotStore.SnapshotFilePath);
+        // ReadAsync falls back to the backup, so a stale one would mask a test's
+        // own fixture.
+        DeleteIfExists(ContentIndexSnapshotStore.BackupSnapshotFilePath);
         DeleteIfExists(DavDatabaseContext.DatabaseFilePath + "-wal");
         DeleteIfExists(DavDatabaseContext.DatabaseFilePath + "-shm");
     }
@@ -375,6 +378,6 @@ public sealed class DelaySaveChangesInterceptor(Func<Task> onSavingChangesAsync)
 }
 
 [CollectionDefinition(nameof(ContentIndexDatabaseCollection), DisableParallelization = true)]
-public sealed class ContentIndexDatabaseCollection : ICollectionFixture<ContentIndexDatabaseFixture>
+public sealed class ContentIndexDatabaseCollection : ICollectionFixture<ContentIndexDatabaseFixture>, ICollectionFixture<backend.Tests.Config.ProcessEnvironmentFixture>
 {
 }

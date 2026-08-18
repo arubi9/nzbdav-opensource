@@ -4,4 +4,5 @@ public class BaseApiResponse
 {
     public bool Status { get; set; } = true;
     public string? Error { get; set; }
+    public string? Code { get; set; }
 }

@@ -1,5 +1,6 @@
 ﻿using NzbWebDAV.Clients.Usenet.Concurrency;
 using NzbWebDAV.Clients.Usenet.Contexts;
+using Serilog;
 using NzbWebDAV.Clients.Usenet.Models;
 using NzbWebDAV.Config;
 using NzbWebDAV.Extensions;
@@ -18,6 +19,8 @@ public class DownloadingNntpClient : WrappingNntpClient
     private readonly PrioritizedSemaphore _semaphore;
     private readonly bool _usePerNodeLeasing;
     private volatile int _maxDownloadConnections;
+    private volatile int _maxPendingDownloads;
+    private int _overloadLogged;
     public int MaxDownloadConnections => _maxDownloadConnections;
     public int PendingDownloadWaiters => _semaphore.PendingCount;
 
@@ -29,6 +32,7 @@ public class DownloadingNntpClient : WrappingNntpClient
         var streamingPriority = configManager.GetStreamingPriority();
         _configManager = configManager;
         _maxDownloadConnections = maxDownloadConnections;
+        _maxPendingDownloads = configManager.GetMaxPendingDownloads();
         _semaphore = new PrioritizedSemaphore(maxDownloadConnections, maxDownloadConnections, streamingPriority);
         configManager.OnConfigChanged += OnConfigChanged;
     }
@@ -39,6 +43,12 @@ public class DownloadingNntpClient : WrappingNntpClient
         {
             var maxDownloadConnections = _configManager.GetMaxDownloadConnections();
             UpdateMaxDownloadConnections(maxDownloadConnections);
+            _maxPendingDownloads = _configManager.GetMaxPendingDownloads();
+        }
+
+        if (e.ChangedConfig.ContainsKey("usenet.max-pending-downloads"))
+        {
+            _maxPendingDownloads = _configManager.GetMaxPendingDownloads();
         }
 
         if (e.ChangedConfig.ContainsKey("usenet.streaming-priority"))
@@ -103,10 +113,41 @@ public class DownloadingNntpClient : WrappingNntpClient
 
     private Task AcquireExclusiveConnectionAsync(CancellationToken cancellationToken)
     {
-        _semaphore.ThrowIfOverloaded(_maxDownloadConnections * 2);
+        ThrowIfOverloaded();
         var downloadPriorityContext = cancellationToken.GetContext<DownloadPriorityContext>();
         var semaphorePriority = downloadPriorityContext?.Priority ?? SemaphorePriority.High;
         return _semaphore.WaitAsync(semaphorePriority, cancellationToken);
+    }
+
+    /// <summary>
+    /// Sheds load when the queue behind the connection budget grows without
+    /// bound. This is deliberately logged: the exception is invisible to the
+    /// caller once a stream's response has started (ExceptionMiddleware can no
+    /// longer rewrite the status code), so without this line an overloaded
+    /// server truncates playback with no server-side trace at all.
+    /// </summary>
+    private void ThrowIfOverloaded()
+    {
+        var maxPending = _maxPendingDownloads;
+        var pending = _semaphore.PendingCount;
+        if (pending <= maxPending)
+        {
+            // Reset once the queue drains so the next episode is logged again.
+            Interlocked.Exchange(ref _overloadLogged, 0);
+            return;
+        }
+
+        // Log once per overload episode; a sustained overload would otherwise
+        // emit a line per rejected segment.
+        if (Interlocked.Exchange(ref _overloadLogged, 1) == 0)
+        {
+            Log.Warning(
+                "Shedding download requests: {Pending} pending exceeds {MaxPending} " +
+                "(connections={Connections}). Streams already sending bytes will be truncated.",
+                pending, maxPending, _maxDownloadConnections);
+        }
+
+        throw new NzbWebDAV.Exceptions.ServiceOverloadedException();
     }
 
     public void UpdateMaxDownloadConnections(int maxDownloadConnections)

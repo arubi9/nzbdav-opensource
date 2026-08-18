@@ -7,6 +7,11 @@ public static class EnvironmentUtil
         return GetEnvironmentVariable("DATABASE_URL");
     }
 
+    public static string? GetMigrationDatabaseUrl()
+    {
+        return GetEnvironmentVariable("MIGRATION_DATABASE_URL");
+    }
+
     public static string? GetDatabaseUrlSession()
     {
         return GetEnvironmentVariable("DATABASE_URL_SESSION");

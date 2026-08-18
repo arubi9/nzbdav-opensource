@@ -19,24 +19,54 @@
 set -euo pipefail
 
 RADARR_URL=${RADARR_URL:-http://localhost:7878}
+RADARR_CONTAINER=${RADARR_CONTAINER:-radarr}
 # BusyBox grep in Radarr container doesn't support -P, use sed.
-RADARR_KEY=${RADARR_KEY:-$(docker exec radarr sed -n 's|.*<ApiKey>\([^<]*\)</ApiKey>.*|\1|p' /config/config.xml)}
-PROFILE_ID=${PROFILE_ID:-8}
-ROOT_PATH=${ROOT_PATH:-/movies}
+RADARR_KEY=${RADARR_KEY:-$(docker exec "$RADARR_CONTAINER" sed -n 's|.*<ApiKey>\([^<]*\)</ApiKey>.*|\1|p' /config/config.xml 2>/dev/null)}
+PROFILE_ID=${PROFILE_ID:-}
+ROOT_PATH=${ROOT_PATH:-}
 TOP_N=${TOP_N:-1000}
 MIN_VOTES=${MIN_VOTES:-25000}
 SEARCH_AFTER=${SEARCH_AFTER:-false}
 
-echo "=== config ==="
-echo "radarr: $RADARR_URL"
-echo "profile: $PROFILE_ID (verify with: curl -sH 'X-Api-Key: ...' $RADARR_URL/api/v3/qualityprofile | jq)"
-echo "root: $ROOT_PATH"
-echo "top_n: $TOP_N  min_votes: $MIN_VOTES  search_after: $SEARCH_AFTER"
-echo
-
 # --- 1. deps ---
 command -v jq      >/dev/null 2>&1 || { echo "jq required (sudo apt install jq)"; exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "python3 required"; exit 1; }
+
+[ -n "$RADARR_KEY" ] || {
+  echo "could not read the Radarr api key."
+  echo "set RADARR_KEY=..., or RADARR_CONTAINER=<name> (this one is not '$RADARR_CONTAINER')."
+  exit 1
+}
+
+api() { curl -fsS -H "X-Api-Key: $RADARR_KEY" "$RADARR_URL/api/v3/$1"; }
+
+# Defaults are read from the instance rather than hardcoded: a wrong profile id or
+# root path is accepted per-title and then fails every single add, which looks like
+# a network problem thousands of times over instead of one bad setting.
+if [ -z "$PROFILE_ID" ]; then
+  PROFILE_ID=$(api qualityprofile | jq -r '.[0].id')
+  [ -n "$PROFILE_ID" ] && [ "$PROFILE_ID" != null ] || { echo "no quality profiles exist in Radarr"; exit 1; }
+elif ! api qualityprofile | jq -e --argjson p "$PROFILE_ID" 'any(.id == $p)' >/dev/null; then
+  echo "PROFILE_ID=$PROFILE_ID does not exist. available:"
+  api qualityprofile | jq -r '.[] | "  \(.id)\t\(.name)"'
+  exit 1
+fi
+
+if [ -z "$ROOT_PATH" ]; then
+  ROOT_PATH=$(api rootfolder | jq -r '.[0].path')
+  [ -n "$ROOT_PATH" ] && [ "$ROOT_PATH" != null ] || { echo "no root folders configured in Radarr"; exit 1; }
+elif ! api rootfolder | jq -e --arg r "$ROOT_PATH" 'any(.path == $r)' >/dev/null; then
+  echo "ROOT_PATH=$ROOT_PATH is not a Radarr root folder. available:"
+  api rootfolder | jq -r '.[] | "  \(.path)"'
+  exit 1
+fi
+
+echo "=== config ==="
+echo "radarr: $RADARR_URL"
+echo "profile: $PROFILE_ID ($(api qualityprofile | jq -r --argjson p "$PROFILE_ID" '.[]|select(.id==$p)|.name'))"
+echo "root: $ROOT_PATH"
+echo "top_n: $TOP_N  min_votes: $MIN_VOTES  search_after: $SEARCH_AFTER"
+echo
 
 WORK=$(mktemp -d); trap "rm -rf '$WORK'" EXIT
 cd "$WORK"
@@ -119,7 +149,9 @@ echo "  existing library: $(wc -l < existing.tsv) entries"
 awk -F'\t' '{if ($1 != "" && $1 != "null") print $1}' existing.tsv > existing_imdb.txt
 
 # Filter top list to only those not already present
-awk -F'\t' 'NR==FNR {have[$1]=1; next} !have[$1]' existing_imdb.txt top_imdb_ids.tsv > to_add.tsv
+# FILENAME check, not NR==FNR: with an empty exclusion list NR==FNR would
+# stay true into the second file and filter out every candidate.
+awk -F'\t' 'FILENAME==ARGV[1] {have[$1]=1; next} !($1 in have)' existing_imdb.txt top_imdb_ids.tsv > to_add.tsv
 TO_ADD=$(wc -l < to_add.tsv)
 echo "  new to add: $TO_ADD"
 echo

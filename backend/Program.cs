@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -58,26 +59,60 @@ public partial class Program
             .WriteTo.Console(theme: AnsiConsoleTheme.Code)
             .CreateLogger();
 
+        // Initialize this before any maintenance query. CLI maintenance has no
+        // ASP.NET host lifetime, so register real TERM/INT handlers here rather
+        // than waiting for the runtime unloading callback.
+        using var sigtermRegistration = !OperatingSystem.IsWindows()
+            ? PosixSignalRegistration.Create(PosixSignal.SIGTERM, context =>
+            {
+                context.Cancel = true;
+                SigtermUtil.Cancel();
+            })
+            : default(PosixSignalRegistration?);
+        using var sigintRegistration = !OperatingSystem.IsWindows()
+            ? PosixSignalRegistration.Create(PosixSignal.SIGINT, context =>
+            {
+                context.Cancel = true;
+                SigtermUtil.Cancel();
+            })
+            : default(PosixSignalRegistration?);
+        var cancellationToken = SigtermUtil.GetCancellationToken();
+
         // initialize database
         await using var databaseContext = new DavDatabaseContext();
 
-        // run database migration, if necessary.
+        // Explicit maintenance modes are used by deployment bootstrap.  Keep
+        // schema migration and encryption rotation separate so a caller can
+        // promote the persisted key only after the real rows have committed.
         if (args.Contains("--db-migration"))
         {
             var argIndex = args.ToList().IndexOf("--db-migration");
-            var targetMigration = args.Length > argIndex + 1 ? args[argIndex + 1] : null;
+            var targetMigration = args.Length > argIndex + 1 && !args[argIndex + 1].StartsWith("--", StringComparison.Ordinal)
+                ? args[argIndex + 1]
+                : null;
             await DatabaseInitialization
-                .InitializeAsync(databaseContext, SigtermUtil.GetCancellationToken(), targetMigration)
+                .InitializeAsync(databaseContext, cancellationToken, targetMigration)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        if (args.Contains("--encryption-maintenance"))
+        {
+            await DatabaseInitialization
+                .InitializeAsync(databaseContext, cancellationToken)
+                .ConfigureAwait(false);
+            using var maintenanceEncryption = new ConfigEncryptionService();
+            await StartupEncryptionCheck.RunAsync(databaseContext, maintenanceEncryption, cancellationToken)
                 .ConfigureAwait(false);
             return;
         }
 
         await DatabaseInitialization
-            .InitializeAsync(databaseContext, SigtermUtil.GetCancellationToken())
+            .InitializeAsync(databaseContext, cancellationToken)
             .ConfigureAwait(false);
 
         var encryptionService = new ConfigEncryptionService();
-        await StartupEncryptionCheck.RunAsync(databaseContext, encryptionService).ConfigureAwait(false);
+        await StartupEncryptionCheck.RunAsync(databaseContext, encryptionService, cancellationToken).ConfigureAwait(false);
 
         // initialize the config-manager
         var configManager = new ConfigManager(encryptionService);
@@ -198,6 +233,11 @@ public partial class Program
             .AddScoped<GetAndHeadHandlerPatch>()
             .AddSingleton<AuthFailureTracker>()
             .AddSingleton<ApiKeyAuthFilter>()
+            .AddScoped<NzbWebDAV.Api.Filters.SetupGrantAuthFilter>()
+            .AddScoped<NzbWebDAV.Setup.Core.SetupGrantService>()
+            .AddScoped<NzbWebDAV.Setup.Core.SetupConfigPersistence>()
+            .AddScoped<NzbWebDAV.Setup.Orchestration.SetupOrchestrationService>()
+            .AddSingleton(TimeProvider.System)
             .AddScoped<SabApiController>();
 
         if (MultiNodeMode.IsEnabled)
@@ -269,7 +309,9 @@ public partial class Program
             builder.Services.AddHostedService<SnapshotFlushOnShutdownService>();
         }
 
-        builder.Services.AddHostedService<ConfigReloadService>();
+        builder.Services
+            .AddHostedService<ConfigReloadService>()
+            .AddHostedService<SetupRevocationRecoveryService>();
 
         if (WebApplicationAuthExtensions.IsWebdavAuthDisabled())
             builder.Services.AddHostedService<InsecureAuthWarningService>();
@@ -363,18 +405,11 @@ public partial class Program
         if (NodeRoleConfig.RunsStreaming)
             app.UseNWebDav();
         _ = app.Services.GetRequiredService<NzbdavMetricsCollector>();
-        // SIGTERM cancellation token fires here so background work notices
-        // shutdown before the hosted-service graceful stop window begins.
-        // SigtermUtil.Cancel is intentionally synchronous — it's just
-        // CancellationTokenSource.Cancel(), which is trivially fast and
-        // safe to call from a sync ApplicationStopping callback. Unlike
-        // the old snapshot flush which used .GetAwaiter().GetResult() to
-        // bridge an async call and could block the shutdown thread on a
-        // slow disk, this callback returns immediately. The snapshot
-        // flush itself is now handled by SnapshotFlushOnShutdownService
-        // (registered above as a hosted service) so its async work can
-        // await cleanly under the host's graceful-stop budget.
-        app.Lifetime.ApplicationStopping.Register(SigtermUtil.Cancel);
+        // ApplicationStopping is local to this host. It is also raised by a
+        // WebApplicationFactory disposal, so it must not cancel SigtermUtil's
+        // process-wide token and poison a later host in the same process.
+        // Actual INT/TERM cancellation is handled by the signal registrations
+        // above (and AssemblyLoadContext unloading).
         await app.RunAsync().ConfigureAwait(false);
     }
 }

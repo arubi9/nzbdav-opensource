@@ -8,6 +8,7 @@ import { getLeafDirectoryName } from "~/utils/path"
 import { PageRow, PageTable } from "../page-table/page-table"
 import styles from "../../route.module.css"
 import { PageSection } from "../page-section/page-section"
+import { csrfFetch } from "~/utils/csrf-fetch"
 
 export type HistoryTableProps = {
     historySlots: PresentationHistorySlot[],
@@ -40,7 +41,7 @@ export function HistoryTable({ historySlots, totalHistoryCount, onIsSelectedChan
         onIsRemovingChanged(nzo_ids, true);
         try {
             const url = `/api?mode=history&name=delete&del_completed_files=${deleteCompletedFiles ? 1 : 0}`;
-            const response = await fetch(url, {
+            const response = await csrfFetch(url, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json;charset=UTF-8',
@@ -120,7 +121,7 @@ export function HistoryRow({ slot, onIsSelectedChanged, onIsRemovingChanged, onR
             const url = '/api?mode=history&name=delete'
                 + `&value=${encodeURIComponent(slot.nzo_id)}`
                 + `&del_completed_files=${deleteCompletedFiles ? 1 : 0}`;
-            const response = await fetch(url);
+            const response = await csrfFetch(url, { method: "POST" });
             if (response.ok) {
                 const data = await response.json();
                 if (data.status === true) {

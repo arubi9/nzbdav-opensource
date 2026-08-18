@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "parameters": "--deprecated",
+  "sources": [
+    "https://api.nuget.org/v3/index.json"
+  ],
+  "projects": [
+    {
+      "path": "C:/src/Deprecated.csproj",
+      "frameworks": [
+        {
+          "framework": "net10.0",
+          "topLevelPackages": [
+            {
+              "id": "Microsoft.AspNetCore.Mvc.WebApiCompatShim",
+              "requestedVersion": 800,
+              "resolvedVersion": "2.2.0",
+              "deprecationReasons": [
+                "Other",
+                "Legacy"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

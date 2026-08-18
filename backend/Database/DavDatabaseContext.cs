@@ -1,8 +1,6 @@
 ﻿using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
-using Npgsql;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database.Interceptors;
 using NzbWebDAV.Database.Models;
@@ -10,95 +8,32 @@ using NzbWebDAV.Utils;
 
 namespace NzbWebDAV.Database;
 
-public sealed class DavDatabaseContext() : DbContext(CreateOptions())
+public class DavDatabaseContext : DbContext
 {
+    public DavDatabaseContext() : base(CreateOptions())
+    {
+    }
+
+    public DavDatabaseContext(DbContextOptions options) : base(options)
+    {
+    }
+
     public static string ConfigPath => EnvironmentUtil.GetEnvironmentVariable("CONFIG_PATH") ?? "/config";
     public static string DatabaseFilePath => Path.Join(ConfigPath, "db.sqlite");
 
     private static DbContextOptions<DavDatabaseContext> CreateOptions()
     {
-        var builder = new DbContextOptionsBuilder<DavDatabaseContext>();
         var databaseUrl = EnvironmentUtil.GetDatabaseUrl();
-
-        if (!string.IsNullOrEmpty(databaseUrl))
+        if (string.IsNullOrEmpty(databaseUrl))
         {
-            var connectionString = BuildPostgresConnectionString(databaseUrl);
-            builder.UseNpgsql(connectionString);
-            builder.ConfigureWarnings(w => w.Ignore(RelationalEventId.PendingModelChangesWarning));
-        }
-        else
-        {
-            builder.UseSqlite($"Data Source={DatabaseFilePath}",
-                    o => o.MaxBatchSize(50))
-                .AddInterceptors(new SqliteForeignKeyEnabler());
+            return DavDatabaseContextOptionsFactory.CreateSqliteOptions<DavDatabaseContext>(
+                DatabaseFilePath,
+                NodeRoleConfig.RunsIngest);
         }
 
-        // Only the ingest node owns the content-index snapshot file. Streaming
-        // nodes read from the shared Postgres (or their own SQLite in combined
-        // mode) as the source of truth — they have nothing useful to persist
-        // to a local snapshot file. Registering the interceptor on a streaming
-        // node would cost a disk write on every SaveChanges for no recovery
-        // benefit, because the streaming node's local snapshot would lag
-        // behind whatever the ingest node actually wrote.
-        if (NodeRoleConfig.RunsIngest)
-            builder.AddInterceptors(new ContentIndexSnapshotInterceptor());
-
-        return builder.Options;
-    }
-
-    private static string BuildPostgresConnectionString(string databaseUrl)
-    {
-        var isUriStyle =
-            databaseUrl.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase) ||
-            databaseUrl.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase);
-        var connectionString =
-            isUriStyle
-                ? ConvertPostgresUrl(databaseUrl)
-                : databaseUrl;
-
-        return UsesPgbouncer(databaseUrl, connectionString, isUriStyle)
-            ? ApplyPgbouncerCompatibilityFlags(connectionString)
-            : connectionString;
-    }
-
-    private static string ApplyPgbouncerCompatibilityFlags(string connectionString)
-    {
-        var builder = new NpgsqlConnectionStringBuilder(connectionString)
-        {
-            Pooling = true
-        };
-
-        if (builder.MinPoolSize <= 0)
-            builder.MinPoolSize = 2;
-
-        if (builder.MaxPoolSize <= 0)
-            builder.MaxPoolSize = 50;
-
-        var normalized = builder.ConnectionString;
-        if (!normalized.Contains("No Reset On Close", StringComparison.OrdinalIgnoreCase))
-            normalized += ";No Reset On Close=true";
-        if (!normalized.Contains("Server Compatibility Mode", StringComparison.OrdinalIgnoreCase))
-            normalized += ";Server Compatibility Mode=Redshift";
-
-        return normalized;
-    }
-
-    private static string ConvertPostgresUrl(string url)
-    {
-        var uri = new Uri(url);
-        var userInfo = uri.UserInfo.Split(':', 2);
-        var username = userInfo.Length > 0 ? Uri.UnescapeDataString(userInfo[0]) : string.Empty;
-        var password = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : string.Empty;
-        return $"Host={uri.Host};Port={uri.Port};Database={uri.AbsolutePath.TrimStart('/')};Username={username};Password={password};Pooling=true;MinPoolSize=2;MaxPoolSize=50";
-    }
-
-    private static bool UsesPgbouncer(string databaseUrl, string connectionString, bool isUriStyle)
-    {
-        if (isUriStyle)
-            return new Uri(databaseUrl).Host.Contains("pgbouncer", StringComparison.OrdinalIgnoreCase);
-
-        var builder = new NpgsqlConnectionStringBuilder(connectionString);
-        return builder.Host.Contains("pgbouncer", StringComparison.OrdinalIgnoreCase);
+        return DavDatabaseContextOptionsFactory.CreatePostgresOptions<DavDatabaseContext>(
+            databaseUrl,
+            NodeRoleConfig.RunsIngest);
     }
 
     // database sets
@@ -122,6 +57,10 @@ public sealed class DavDatabaseContext() : DbContext(CreateOptions())
     public DbSet<BlobCleanupItem> BlobCleanupItems => Set<BlobCleanupItem>();
     public DbSet<MissingSegmentId> MissingSegmentIds => Set<MissingSegmentId>();
     public DbSet<YencHeaderCacheEntry> YencHeaderCache => Set<YencHeaderCacheEntry>();
+    public DbSet<SetupGrant> SetupGrants => Set<SetupGrant>();
+    public DbSet<SetupMutationFence> SetupMutationFences => Set<SetupMutationFence>();
+    public DbSet<SetupCompletionOperation> SetupCompletionOperations => Set<SetupCompletionOperation>();
+    public DbSet<SetupRunLease> SetupRunLeases => Set<SetupRunLease>();
 
     // tables
     protected override void OnModelCreating(ModelBuilder b)
@@ -202,6 +141,9 @@ public sealed class DavDatabaseContext() : DbContext(CreateOptions())
 
             e.HasIndex(i => new { i.ParentId, i.Name })
                 .IsUnique();
+
+            // keyset pagination over Path: ManifestController and ContentIndexSnapshotStore.
+            e.HasIndex(i => i.Path);
 
             e.HasIndex(i => new { i.IdPrefix, i.Type });
 
@@ -699,6 +641,83 @@ public sealed class DavDatabaseContext() : DbContext(CreateOptions())
                 .HasColumnName("cached_at")
                 .HasDefaultValueSql("CURRENT_TIMESTAMP");
             e.HasIndex(x => x.CachedAt).HasDatabaseName("ix_yenc_header_cache_cached_at");
+        });
+
+        b.Entity<SetupMutationFence>(e =>
+        {
+            e.ToTable("setup_mutation_fence");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").ValueGeneratedNever();
+            e.Property(x => x.Epoch).HasColumnName("epoch").IsRequired();
+            e.Property(x => x.ReservedCandidateOperationId).HasColumnName("reserved_candidate_operation_id");
+            e.HasCheckConstraint("CK_setup_mutation_fence_singleton", "\"id\" = 1");
+        });
+
+        b.Entity<SetupCompletionOperation>(e =>
+        {
+            e.ToTable("setup_completion_operations");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").ValueGeneratedNever();
+            e.Property(x => x.OperationId).HasColumnName("operation_id").IsRequired();
+            e.Property(x => x.CreatedAtUtc).HasColumnName("created_at_utc").HasColumnType("TIMESTAMP WITH TIME ZONE");
+            e.Property(x => x.RevocationPending).HasColumnName("revocation_pending").IsRequired();
+            e.Property(x => x.ActiveSessionCiphertext).HasColumnName("active_session_ciphertext");
+            e.Property(x => x.RevocationSessionCiphertext).HasColumnName("revocation_session_ciphertext");
+            e.Property(x => x.CandidateSessionCiphertext).HasColumnName("candidate_session_ciphertext");
+            e.Property(x => x.CandidateOperationCiphertext).HasColumnName("candidate_operation_ciphertext");
+            e.Property(x => x.EmergencySessionCiphertext).HasColumnName("emergency_session_ciphertext");
+            e.Property(x => x.EmergencyOperationCiphertext).HasColumnName("emergency_operation_ciphertext");
+            e.HasCheckConstraint("CK_setup_completion_operations_singleton", "\"id\" = 1");
+        });
+
+        b.Entity<SetupRunLease>(e =>
+        {
+            e.ToTable("setup_run_leases");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasColumnName("id").ValueGeneratedNever();
+            e.Property(x => x.OwnerId).HasColumnName("owner_id").IsRequired();
+            e.Property(x => x.GrantHash).HasColumnName("grant_hash").IsRequired();
+            e.Property(x => x.Purpose).HasColumnName("purpose").IsRequired();
+            e.Property(x => x.Generation).HasColumnName("generation").IsRequired();
+            e.Property(x => x.LeaseUntilUtc).HasColumnName("lease_until_utc").HasColumnType("TIMESTAMP WITH TIME ZONE").IsRequired();
+            e.HasCheckConstraint("CK_setup_run_leases_singleton", "\"id\" = 1");
+        });
+
+        b.Entity<SetupGrant>(e =>
+        {
+            e.ToTable("setup_grants");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id)
+                .HasColumnName("id")
+                .ValueGeneratedNever();
+            e.Property(x => x.GrantedTokenHash)
+                .HasColumnName("granted_token_hash")
+                .IsRequired();
+            e.Property(x => x.IssuedAtUtc)
+                .HasColumnName("issued_at_utc")
+                .HasColumnType("TIMESTAMP WITH TIME ZONE");
+            e.Property(x => x.ExpiresAtUtc)
+                .HasColumnName("expires_at_utc")
+                .HasColumnType("TIMESTAMP WITH TIME ZONE");
+            e.Property(x => x.IsRevoked)
+                .HasColumnName("is_revoked");
+            e.Property(x => x.RevokedAtUtc)
+                .HasColumnName("revoked_at_utc")
+                .HasColumnType("TIMESTAMP WITH TIME ZONE");
+            e.Property(x => x.IssuedByUsername)
+                .HasColumnName("issued_by_username");
+            e.Property(x => x.Purpose)
+                .HasColumnName("purpose")
+                .HasDefaultValue("setup")
+                .IsRequired();
+            e.Property(x => x.RepairSessionCiphertext)
+                .HasColumnName("repair_session_ciphertext");
+            e.Property(x => x.RepairSessionOperationId)
+                .HasColumnName("repair_session_operation_id");
+
+            e.HasCheckConstraint("CK_setup_grants_singleton", "\"id\" = 1");
+            e.HasIndex(x => x.ExpiresAtUtc)
+                .HasDatabaseName("IX_setup_grants_expires_at_utc");
         });
     }
 }

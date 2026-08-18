@@ -74,6 +74,35 @@ public class LiveSegmentCachingNntpClientTests
         Assert.Equal(1, fakeNntpClient.GetYencHeadersCallCount);
     }
 
+    // This client already routes GetYencHeadersAsync through the live cache, so
+    // a caller that wraps it in a second GetOrAddHeaderAsync for the same
+    // segment re-enters the Lazy the outer call is still executing. That is not
+    // a hypothetical: MediaProbeService did exactly this, so yEnc layout
+    // metadata population failed for every item and left NzbFileStream's O(1)
+    // offset fast path permanently dead behind InterpolationSearch.
+    [Fact]
+    public async Task WrappingThisClientInTheCacheAgainReentersTheSameLazyAndFails()
+    {
+        await using var cacheScope = new TempCacheScope();
+        var fakeNntpClient = new FakeNntpClient()
+            .AddSegment("segment-a", Encoding.ASCII.GetBytes("segment-a"), partOffset: 123);
+
+        using var liveCache = new LiveSegmentCache(cacheScope.Path);
+        using var client = new LiveSegmentCachingNntpClient(fakeNntpClient, liveCache);
+
+        var reentrantFailure = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => liveCache.GetOrAddHeaderAsync(
+                "segment-a",
+                ct => client.GetYencHeadersAsync("segment-a", ct),
+                CancellationToken.None));
+
+        Assert.Contains("ValueFactory", reentrantFailure.Message, StringComparison.Ordinal);
+
+        // Calling the client directly is the correct composition and still caches.
+        var header = await client.GetYencHeadersAsync("segment-a", CancellationToken.None);
+        Assert.Equal(123, header.PartOffset);
+    }
+
     [Fact]
     public async Task DecodedArticleAsyncOnCachedBodyDoesNotRefetchBodyData()
     {

@@ -65,13 +65,13 @@ public sealed class SqliteBatchingFixture : IAsyncLifetime
         Environment.SetEnvironmentVariable("CONFIG_PATH", _configPath);
     }
 
-    public Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         Directory.CreateDirectory(_configPath);
-        return Task.CompletedTask;
+        await Task.CompletedTask;
     }
 
-    public Task DisposeAsync() => ResetAsync();
+    public async ValueTask DisposeAsync() => await ResetAsync();
 
     public async Task ResetAsync()
     {
@@ -92,6 +92,6 @@ public sealed class SqliteBatchingFixture : IAsyncLifetime
 }
 
 [CollectionDefinition(nameof(SqliteBatchingCollection), DisableParallelization = true)]
-public sealed class SqliteBatchingCollection : ICollectionFixture<SqliteBatchingFixture>
+public sealed class SqliteBatchingCollection : ICollectionFixture<SqliteBatchingFixture>, ICollectionFixture<backend.Tests.Config.ProcessEnvironmentFixture>
 {
 }

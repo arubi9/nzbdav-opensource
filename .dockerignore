@@ -1,19 +1,56 @@
+# Source-control metadata and other worktrees must never enter a build context.
 .git
-.github
+.git/**
 .worktrees
-.claude
+.worktrees/**
+.pi
+.pi/**
 
+# Build products and dependency trees.
 **/bin
+**/bin/**
 **/obj
+**/obj/**
 **/node_modules
+**/node_modules/**
+**/artifacts
+**/artifacts/**
+**/publish
+**/publish/**
+
+# Runtime state, logs, credentials, and local scratch files.
+**/logs
+**/logs/**
+**/*.log
+nzbdav-config
+nzbdav-config/**
+**/local-state
+**/local-state/**
+.env
+.env.*
+
+# Generated frontend server output is rebuilt inside Docker.
+frontend/server.js
+frontend/server.d.ts
+frontend/vite.config.js
+frontend/vite.config.d.ts
+**/server.js
+**/server.d.ts
+**/vite.config.js
+**/vite.config.d.ts
+
+# Test/deployment artifacts and editor/OS debris.
+coverage
+coverage/**
+test-results
+test-results/**
+*.tmp
+*.temp
+NUL
+
+# Main-stack runtime state.
+jellyfin-config
+strm-library
 **/.react-router
 **/build
 **/dist-node
-
-nzbdav-config
-jellyfin-config
-strm-library
-
-*.user
-*.log
-pb.json

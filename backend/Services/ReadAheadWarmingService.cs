@@ -1,7 +1,10 @@
 using System.Collections.Concurrent;
 using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Clients.Usenet.Caching;
+using NzbWebDAV.Clients.Usenet.Concurrency;
+using NzbWebDAV.Clients.Usenet.Contexts;
 using NzbWebDAV.Config;
+using NzbWebDAV.Extensions;
 using Serilog;
 
 namespace NzbWebDAV.Services;
@@ -14,6 +17,12 @@ public class ReadAheadWarmingService : IDisposable
     private readonly LiveSegmentCache _liveSegmentCache;
     private readonly ConfigManager _configManager;
     private readonly ConcurrentDictionary<string, WarmingSession> _sessions = new();
+
+    // Prefetch concurrency is a property of the shared NNTP connection pool, not
+    // of any one viewer. Sizing it per session meant N viewers demanded N times
+    // the budget, which blew past the downloader's pending-queue guard and made
+    // other viewers' live reads throw. One budget, shared by every session.
+    private readonly Lazy<SemaphoreSlim> _globalWarmBudget;
 
     public int ActiveSessionCount => _sessions.Count;
 
@@ -34,6 +43,9 @@ public class ReadAheadWarmingService : IDisposable
         _usenetClient = usenetClient;
         _liveSegmentCache = liveSegmentCache;
         _configManager = configManager;
+        _globalWarmBudget = new Lazy<SemaphoreSlim>(
+            () => new SemaphoreSlim(_configManager.GetReadAheadConcurrency()),
+            LazyThreadSafetyMode.ExecutionAndPublication);
     }
 
     public string CreateSession(string[] segmentIds, CancellationToken ct)
@@ -93,6 +105,7 @@ public class ReadAheadWarmingService : IDisposable
     private async Task WarmSegmentsAsync(WarmingSession session, CancellationToken ct)
     {
         var maxSegments = _configManager.GetReadAheadSegments();
+        var warmConcurrency = _configManager.GetReadAheadConcurrency();
 
         try
         {
@@ -112,32 +125,93 @@ public class ReadAheadWarmingService : IDisposable
                 var currentPosition = session.CurrentPosition;
                 var targetEnd = Math.Min(currentPosition + maxSegments, session.SegmentIds.Length);
 
-                for (var i = currentPosition; i < targetEnd && !ct.IsCancellationRequested; i++)
+                // Warm the window in parallel. A strictly sequential loop here
+                // held exactly one NNTP connection open no matter how many the
+                // pool allowed, so the prefetcher could never outrun the reader
+                // and the connection pool sat mostly idle during playback.
+                // SegmentFetchContext is an ambient scope, so it must be set
+                // inside the body: a scope opened outside Parallel.ForEachAsync
+                // does not flow into the per-item execution contexts.
+                var warmFailures = 0;
+                try
                 {
-                    if (session.CurrentPosition > i + Math.Max(1, maxSegments / 2))
-                        break;
+                    await Parallel.ForEachAsync(
+                        Enumerable.Range(currentPosition, Math.Max(0, targetEnd - currentPosition)),
+                        new ParallelOptions
+                        {
+                            MaxDegreeOfParallelism = warmConcurrency,
+                            CancellationToken = ct,
+                        },
+                        async (i, innerCt) =>
+                        {
+                            // Honour a stopped session promptly: queued items
+                            // must not start a fetch after cancellation.
+                            if (innerCt.IsCancellationRequested)
+                                return;
 
-                    var segmentId = session.SegmentIds[i];
-                    if (_liveSegmentCache.HasBody(segmentId))
-                        continue;
+                            // Playback has already moved past this segment, so
+                            // warming it is wasted bandwidth.
+                            if (session.CurrentPosition > i + Math.Max(1, maxSegments / 2))
+                                return;
 
-                    try
-                    {
-                        using var ctx = SegmentFetchContext.Set(SegmentCategory.VideoSegment);
-                        var response = await _usenetClient
-                            .DecodedBodyWithFallbackAsync(segmentId, ct)
-                            .ConfigureAwait(false);
-                        await response.Stream.DisposeAsync().ConfigureAwait(false);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        break;
-                    }
-                    catch (Exception e)
-                    {
-                        Log.Debug($"Read-ahead warming failed for segment: {e.Message}");
-                    }
+                            var segmentId = session.SegmentIds[i];
+                            if (_liveSegmentCache.HasBody(segmentId))
+                                return;
+
+                            // Cheap local checks happen above so cache hits never
+                            // consume a slot; only real NNTP work is budgeted.
+                            var budget = _globalWarmBudget.Value;
+                            try
+                            {
+                                await budget.WaitAsync(innerCt).ConfigureAwait(false);
+                            }
+                            catch (OperationCanceledException)
+                            {
+                                return;
+                            }
+
+                            try
+                            {
+                                using var ctx = SegmentFetchContext.Set(SegmentCategory.VideoSegment);
+
+                                // Prefetch is speculative, so it must never
+                                // outrank somebody's actual playback. An unset
+                                // context defaults to High (DownloadingNntpClient
+                                // line 108), which let one viewer's read-ahead
+                                // crowd another viewer's live reads out of the
+                                // shared connection pool.
+                                using var priority = innerCt.SetContext(
+                                    new DownloadPriorityContext { Priority = SemaphorePriority.Low });
+
+                                var response = await _usenetClient
+                                    .DecodedBodyWithFallbackAsync(segmentId, innerCt)
+                                    .ConfigureAwait(false);
+                                await response.Stream.DisposeAsync().ConfigureAwait(false);
+                            }
+                            catch (OperationCanceledException)
+                            {
+                            }
+                            catch (Exception e)
+                            {
+                                Interlocked.Increment(ref warmFailures);
+                                Log.Debug($"Read-ahead warming failed for segment: {e.Message}");
+                            }
+                            finally
+                            {
+                                budget.Release();
+                            }
+                        }).ConfigureAwait(false);
                 }
+                catch (OperationCanceledException)
+                {
+                }
+
+                // A read-ahead that fails for every segment silently degrades
+                // playback to synchronous NNTP fetches, so surface it above the
+                // production log level instead of only at Debug.
+                if (warmFailures > 0)
+                    Log.Warning("Read-ahead warming failed for {Failures} segment(s) in session {Session}",
+                        warmFailures, session.SessionId);
 
                 try
                 {
@@ -161,6 +235,10 @@ public class ReadAheadWarmingService : IDisposable
             StopSession(sessionId);
 
         _sessions.Clear();
+
+        if (_globalWarmBudget.IsValueCreated)
+            _globalWarmBudget.Value.Dispose();
+
         GC.SuppressFinalize(this);
     }
 

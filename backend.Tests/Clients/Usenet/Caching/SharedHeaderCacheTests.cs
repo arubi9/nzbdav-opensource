@@ -20,10 +20,10 @@ public sealed class SharedHeaderCacheTests : IClassFixture<PostgresHeaderCacheFi
         _fixture = fixture;
     }
 
-    [SkippableFact]
+    [Fact]
     public async Task TryReadAsync_ReturnsNullOnMissingRow()
     {
-        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
+        Assert.SkipUnless(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         var cache = new SharedHeaderCache();
@@ -34,10 +34,10 @@ public sealed class SharedHeaderCacheTests : IClassFixture<PostgresHeaderCacheFi
         Assert.Equal(1, cache.Misses);
     }
 
-    [SkippableFact]
+    [Fact]
     public async Task TryReadAsync_ReturnsPopulatedHeaderOnHit()
     {
-        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
+        Assert.SkipUnless(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         var cache = new SharedHeaderCache();
@@ -50,10 +50,10 @@ public sealed class SharedHeaderCacheTests : IClassFixture<PostgresHeaderCacheFi
         Assert.Equal(1, cache.Hits);
     }
 
-    [SkippableFact]
+    [Fact]
     public async Task WriteAsync_UpsertsExistingRow()
     {
-        Skip.IfNot(_fixture.IsAvailable, "Docker is required for this integration test.");
+        Assert.SkipUnless(_fixture.IsAvailable, "Docker is required for this integration test.");
 
         await _fixture.ResetAsync();
         var cache = new SharedHeaderCache();
@@ -107,38 +107,51 @@ public sealed class PostgresHeaderCacheFixture : IAsyncLifetime
 {
     private readonly string? _previousDatabaseUrl = Environment.GetEnvironmentVariable("DATABASE_URL");
     private readonly PostgreSqlContainer? _container;
+    private readonly bool _isManagedDatabase;
+    private bool _isAvailable;
 
     public PostgresHeaderCacheFixture()
     {
-        IsAvailable = DockerAvailable();
-        if (!IsAvailable)
-            return;
-
-        _container = new PostgreSqlBuilder("postgres:17")
-            .WithName($"nzbdav-header-cache-{Guid.NewGuid():N}")
-            .WithDatabase("nzbdav")
-            .WithUsername("nzbdav")
-            .WithPassword("nzbdav")
-            .WithCleanUp(true)
-            .Build();
+        _isAvailable = false;
+        _isManagedDatabase = string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DATABASE_URL"));
+        if (_isManagedDatabase)
+        {
+            _container = new PostgreSqlBuilder("postgres:17-alpine")
+                .WithName($"nzbdav-header-cache-{Guid.NewGuid():N}")
+                .WithDatabase("nzbdav")
+                .WithUsername("nzbdav")
+                .WithPassword("nzbdav")
+                .WithCleanUp(true)
+                .Build();
+        }
     }
 
-    public bool IsAvailable { get; }
+    public bool IsAvailable => _isAvailable;
     public string? ConnectionString => Environment.GetEnvironmentVariable("DATABASE_URL");
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
-        if (!IsAvailable || _container == null)
+        var explicitConnectionString = Environment.GetEnvironmentVariable("DATABASE_URL");
+        if (!string.IsNullOrWhiteSpace(explicitConnectionString))
+        {
+            _isAvailable = true;
+            await using var dbContext = new DavDatabaseContext();
+            await DatabaseInitialization.InitializeAsync(dbContext, CancellationToken.None);
+            return;
+        }
+
+        _isAvailable = await DockerAvailableAsync();
+        if (!_isAvailable || _container == null)
             return;
 
         await _container.StartAsync();
         Environment.SetEnvironmentVariable("DATABASE_URL", _container.GetConnectionString());
 
-        await using var dbContext = new DavDatabaseContext();
-        await DatabaseInitialization.InitializeAsync(dbContext, CancellationToken.None);
+        await using var managedContainerDbContext = new DavDatabaseContext();
+        await DatabaseInitialization.InitializeAsync(managedContainerDbContext, CancellationToken.None);
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         Environment.SetEnvironmentVariable("DATABASE_URL", _previousDatabaseUrl);
         if (_container != null)
@@ -147,21 +160,29 @@ public sealed class PostgresHeaderCacheFixture : IAsyncLifetime
 
     public async Task ResetAsync()
     {
-        if (!IsAvailable)
+        if (!IsAvailable || !_isManagedDatabase)
             return;
 
         await using var dbContext = new DavDatabaseContext();
         await dbContext.Database.ExecuteSqlRawAsync(@"
-            DELETE FROM websocket_outbox;
-            DELETE FROM auth_failures;
-            DELETE FROM nntp_node_heartbeats;
-            DELETE FROM nntp_connection_leases;
-            DELETE FROM nntp_lease_epochs;
-            DELETE FROM connection_pool_claims;
-            DELETE FROM yenc_header_cache;");
+            DO
+            $$
+            DECLARE
+                r RECORD;
+            BEGIN
+                FOR r IN
+                    SELECT tablename
+                    FROM pg_tables
+                    WHERE schemaname = 'public'
+                      AND tablename <> '__EFMigrationsHistory'
+                LOOP
+                    EXECUTE format('TRUNCATE TABLE %I.%I RESTART IDENTITY CASCADE', 'public', r.tablename);
+                END LOOP;
+            END;
+            $$;");
     }
 
-    private static bool DockerAvailable()
+    private static async Task<bool> DockerAvailableAsync()
     {
         try
         {
@@ -177,8 +198,21 @@ public sealed class PostgresHeaderCacheFixture : IAsyncLifetime
             if (process is null)
                 return false;
 
-            process.WaitForExit(5000);
-            return process.ExitCode == 0;
+            var outputTask = process.StandardOutput.ReadToEndAsync();
+            var errorTask = process.StandardError.ReadToEndAsync();
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(5000));
+            await process.WaitForExitAsync(timeout.Token);
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                return false;
+            }
+
+            await Task.WhenAll(outputTask, errorTask);
+            if (process.ExitCode != 0)
+                return false;
+
+            return !string.IsNullOrWhiteSpace(outputTask.Result);
         }
         catch
         {
@@ -188,4 +222,4 @@ public sealed class PostgresHeaderCacheFixture : IAsyncLifetime
 }
 
 [CollectionDefinition(nameof(SharedHeaderCacheCollection), DisableParallelization = true)]
-public sealed class SharedHeaderCacheCollection;
+public sealed class SharedHeaderCacheCollection : ICollectionFixture<backend.Tests.Config.ProcessEnvironmentFixture>;

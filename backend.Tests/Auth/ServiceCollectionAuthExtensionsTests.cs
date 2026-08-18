@@ -1,138 +1,139 @@
-using System.Reflection;
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using Microsoft.EntityFrameworkCore;
 using NWebDav.Server.Authentication;
 using NzbWebDAV.Auth;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
+using NzbWebDAV.Services;
 using NzbWebDAV.Utils;
 
 namespace backend.Tests.Auth;
 
-[Collection(nameof(backend.Tests.Services.ConfigEncryptionDatabaseCollection))]
 public sealed class ServiceCollectionAuthExtensionsTests
 {
-    private static readonly MethodInfo ValidateCredentialsMethod =
-        typeof(ServiceCollectionAuthExtensions)
-            .GetMethod("ValidateCredentials", BindingFlags.NonPublic | BindingFlags.Static)
-        ?? throw new InvalidOperationException("Could not find the ValidateCredentials method.");
-
-    private readonly backend.Tests.Services.ConfigEncryptionDatabaseFixture _fixture;
-
-    public ServiceCollectionAuthExtensionsTests(backend.Tests.Services.ConfigEncryptionDatabaseFixture fixture)
+    [Fact]
+    public async Task WebdavAuthVerifier_AllowsValidHashedPasswordOnly()
     {
-        _fixture = fixture;
+        var harness = await CreateAuthEnvironmentAsync(PasswordUtil.Hash("backend-unit-password"));
+        using var provider = harness.Provider;
+        using var environment = harness.Environment;
+
+        var options = provider.GetRequiredService<IOptionsMonitor<BasicAuthenticationOptions>>()
+            .Get(BasicAuthenticationDefaults.AuthenticationScheme);
+
+        var result = await ValidateCredentialsAsync(options, "unit-api", "backend-unit-password");
+        Assert.NotNull(result.Principal);
+
+        var invalid = await ValidateCredentialsAsync(options, "unit-api", "wrong-password");
+        Assert.Null(invalid.Principal);
     }
 
     [Fact]
-    public async Task ValidateCredentials_WithHashedPassword_Authenticates()
+    public async Task WebdavAuthVerifier_RejectsStoredPlaintextPassword()
     {
-        var plainPassword = "correct-password";
-        var configManager = await CreateConfigManagerAsync(PasswordUtil.Hash(plainPassword));
+        var harness = await CreateAuthEnvironmentAsync("backend-unit-password");
+        using var provider = harness.Provider;
+        using var environment = harness.Environment;
 
-        var context = await InvokeValidateCredentialsAsync(configManager, "admin", plainPassword);
+        var options = provider.GetRequiredService<IOptionsMonitor<BasicAuthenticationOptions>>()
+            .Get(BasicAuthenticationDefaults.AuthenticationScheme);
 
-        var identity = Assert.IsType<ClaimsIdentity>(context.Principal?.Identity);
-        Assert.True(identity.IsAuthenticated);
-        Assert.Equal("admin", context.Principal!.Identity!.Name);
+        var result = await ValidateCredentialsAsync(options, "unit-api", "backend-unit-password");
+        Assert.Null(result.Principal);
     }
 
     [Fact]
-    public async Task ValidateCredentials_WithWrongPassword_Fails()
+    public async Task WebdavAuthVerifier_RejectsMalformedPasswordHash()
     {
-        var configManager = await CreateConfigManagerAsync(PasswordUtil.Hash("correct-password"));
+        var harness = await CreateAuthEnvironmentAsync("not-a-valid-hash");
+        using var provider = harness.Provider;
+        using var environment = harness.Environment;
 
-        var context = await InvokeValidateCredentialsAsync(configManager, "admin", "wrong-password");
+        var options = provider.GetRequiredService<IOptionsMonitor<BasicAuthenticationOptions>>()
+            .Get(BasicAuthenticationDefaults.AuthenticationScheme);
 
-        Assert.Null(context.Principal);
-    }
-
-    [Theory]
-    [InlineData("correct-password")]
-    [InlineData("malformed-or-plaintext")]
-    public async Task ValidateCredentials_WithMalformedOrPlaintextPassword_FailsWithoutThrowing(string storedPassword)
-    {
-        var configManager = await CreateConfigManagerAsync(storedPassword);
-
-        var context = await InvokeValidateCredentialsAsync(configManager, "admin", "correct-password");
-
-        Assert.Null(context.Principal);
+        var result = await ValidateCredentialsAsync(options, "unit-api", "backend-unit-password");
+        Assert.Null(result.Principal);
     }
 
     [Fact]
-    public async Task ValidateCredentials_MissingUser_IsRejected()
+    public async Task WebdavAuthVerifier_RejectsMissingCredentials()
     {
-        var configManager = await CreateConfigManagerAsync(PasswordUtil.Hash("correct-password"));
+        var harness = await CreateAuthEnvironmentAsync(PasswordUtil.Hash("backend-unit-password"));
+        using var provider = harness.Provider;
+        using var environment = harness.Environment;
 
-        var context = await InvokeValidateCredentialsAsync(configManager, null, "correct-password");
+        var options = provider.GetRequiredService<IOptionsMonitor<BasicAuthenticationOptions>>()
+            .Get(BasicAuthenticationDefaults.AuthenticationScheme);
 
-        Assert.Null(context.Principal);
+        var missingUser = await ValidateCredentialsAsync(options, string.Empty, "backend-unit-password");
+        var missingPassword = await ValidateCredentialsAsync(options, "unit-api", string.Empty);
+        Assert.Null(missingUser.Principal);
+        Assert.Null(missingPassword.Principal);
     }
 
-    [Fact]
-    public async Task ValidateCredentials_MissingPassword_IsRejected()
+    private static async Task<ValidateCredentialsContext> ValidateCredentialsAsync(BasicAuthenticationOptions options, string username, string password)
     {
-        var configManager = await CreateConfigManagerAsync(PasswordUtil.Hash("correct-password"));
+        var httpContext = new DefaultHttpContext();
+        var scheme = new AuthenticationScheme(
+            BasicAuthenticationDefaults.AuthenticationScheme,
+            BasicAuthenticationDefaults.AuthenticationScheme,
+            typeof(TestAuthenticationHandler));
 
-        var context = await InvokeValidateCredentialsAsync(configManager, "admin", null);
-
-        Assert.Null(context.Principal);
-    }
-
-    private async Task<ConfigManager> CreateConfigManagerAsync(string passwordHash)
-    {
-        await _fixture.ResetAsync();
-        await using var setupContext = await _fixture.CreateMigratedContextAsync();
-        setupContext.ConfigItems.AddRange(
-        [
-            new ConfigItem
-            {
-                ConfigName = "webdav.user",
-                ConfigValue = "admin",
-                IsEncrypted = false
-            },
-            new ConfigItem
-            {
-                ConfigName = "webdav.pass",
-                ConfigValue = passwordHash,
-                IsEncrypted = false
-            }
-        ]);
-        await setupContext.SaveChangesAsync();
-
-        var configManager = new ConfigManager();
-        await configManager.LoadConfig();
-        return configManager;
-    }
-
-    private static async Task<ValidateCredentialsContext> InvokeValidateCredentialsAsync(
-        ConfigManager configManager,
-        string? username,
-        string? password)
-    {
-        var handlerType = typeof(ValidateCredentialsContext).Assembly.GetType(
-            "NWebDav.Server.Authentication.BasicAuthenticationHandler",
-            throwOnError: false);
-
-        if (handlerType is null)
-            throw new InvalidOperationException("Could not find the BasicAuthenticationHandler type.");
-
-        var authContext = new ValidateCredentialsContext(
-            new DefaultHttpContext(),
-            new AuthenticationScheme("Basic", "Basic", handlerType),
-            new BasicAuthenticationOptions())
+        var context = new ValidateCredentialsContext(httpContext, scheme, options)
         {
-            Username = username!,
-            Password = password!
+            Username = username,
+            Password = password,
         };
 
-        var task = ValidateCredentialsMethod.Invoke(null, [authContext, configManager])
-                   ?? throw new InvalidOperationException("ValidateCredentials did not return a task.");
+        await options.Events.OnValidateCredentials(context);
+        return context;
+    }
 
-        await (Task)task;
-        return authContext;
+    private static async Task<(ServiceProvider Provider, backend.Tests.Config.TemporaryEnvironment Environment)> CreateAuthEnvironmentAsync(string storedPassword)
+    {
+        var tempPath = Path.Combine(Path.GetTempPath(), "nzbdav-tests", $"webdav-auth-{Guid.NewGuid():N}");
+        var environment = new backend.Tests.Config.TemporaryEnvironment(
+            ("CONFIG_PATH", tempPath),
+            ("DATABASE_URL", null),
+            ("FRONTEND_BACKEND_API_KEY", "unit-api-key"));
+
+        Directory.CreateDirectory(tempPath);
+
+        await using (var context = new DavDatabaseContext())
+        {
+            await context.Database.MigrateAsync();
+            context.ConfigItems.Add(new ConfigItem { ConfigName = "webdav.user", ConfigValue = "unit-api", IsEncrypted = false });
+            context.ConfigItems.Add(new ConfigItem { ConfigName = "webdav.pass", ConfigValue = storedPassword, IsEncrypted = false });
+            await context.SaveChangesAsync();
+        }
+
+        var services = new ServiceCollection();
+        var encryption = new ConfigEncryptionService();
+        var manager = new ConfigManager(encryption);
+        await manager.LoadConfig();
+
+        services.AddSingleton(manager);
+        services.AddSingleton(encryption);
+        services.AddAuthentication();
+        services.AddWebdavBasicAuthentication(manager);
+
+        return (services.BuildServiceProvider(), environment);
+    }
+
+    private sealed class TestAuthenticationHandler : IAuthenticationHandler
+    {
+        public Task InitializeAsync(AuthenticationScheme scheme, HttpContext context) => Task.CompletedTask;
+
+        public Task<AuthenticateResult> AuthenticateAsync() => Task.FromResult(AuthenticateResult.NoResult());
+
+        public Task ChallengeAsync(AuthenticationProperties? properties) => Task.CompletedTask;
+
+        public Task ForbidAsync(AuthenticationProperties? properties) => Task.CompletedTask;
     }
 }

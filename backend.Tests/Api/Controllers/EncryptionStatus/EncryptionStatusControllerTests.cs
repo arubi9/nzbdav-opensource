@@ -45,6 +45,31 @@ public sealed class EncryptionStatusControllerTests
     }
 
     [Fact]
+    public async Task Get_ReturnsWarningState_WhenPlaintextSecretsExistWithKey()
+    {
+        await _fixture.ResetAsync();
+        _fixture.SetKeys(masterKey: _fixture.CreateKey(), oldKey: null);
+
+        await using (var setupContext = await _fixture.CreateMigratedContextAsync())
+        {
+            var apiKeyRow = await setupContext.ConfigItems.SingleAsync(x => x.ConfigName == "api.key");
+            apiKeyRow.ConfigValue = "still-plaintext";
+            apiKeyRow.IsEncrypted = false;
+            await setupContext.SaveChangesAsync();
+        }
+
+        await using var dbContext = await _fixture.CreateMigratedContextAsync();
+        using var encryption = new ConfigEncryptionService();
+        var response = Assert.IsType<EncryptionStatusResponse>(
+            Assert.IsType<OkObjectResult>(await new EncryptionStatusController(
+                new DavDatabaseClient(dbContext), encryption).Get()).Value);
+
+        Assert.True(response.KeySet);
+        Assert.True(response.PlaintextSecretsCount > 0);
+        Assert.Equal("warning", response.BannerSeverity);
+    }
+
+    [Fact]
     public async Task Get_ReturnsMigrationMetadata_WhenMarkerRowsExist()
     {
         await _fixture.ResetAsync();
@@ -77,10 +102,30 @@ public sealed class EncryptionStatusControllerTests
         var response = Assert.IsType<EncryptionStatusResponse>(ok.Value);
 
         Assert.True(response.KeySet);
-        Assert.Equal("none", response.BannerSeverity);
+        Assert.Equal("warning", response.BannerSeverity);
         Assert.Equal("2026-04-07T12:00:00.0000000Z", response.MigrationCompletedAt);
         Assert.True(response.PostMigrationAcknowledged);
         Assert.Equal("2026-04-07T12:30:00.0000000Z", response.PostMigrationAcknowledgedAt);
+    }
+
+    [Fact]
+    public async Task AcknowledgePostMigration_IsIdempotentAcrossConcurrentContexts()
+    {
+        await _fixture.ResetAsync();
+        _fixture.SetKeys(masterKey: _fixture.CreateKey(), oldKey: null);
+
+        await using var context1 = await _fixture.CreateMigratedContextAsync();
+        await using var context2 = await _fixture.CreateMigratedContextAsync();
+        using var encryption1 = new ConfigEncryptionService();
+        using var encryption2 = new ConfigEncryptionService();
+        var first = new EncryptionStatusController(new DavDatabaseClient(context1), encryption1);
+        var second = new EncryptionStatusController(new DavDatabaseClient(context2), encryption2);
+
+        await Task.WhenAll(first.AcknowledgePostMigration(), second.AcknowledgePostMigration());
+
+        await using var verify = await _fixture.CreateMigratedContextAsync();
+        Assert.Equal(1, await verify.ConfigItems.CountAsync(
+            item => item.ConfigName == "encryption.post-migration-acknowledged"));
     }
 
     [Fact]

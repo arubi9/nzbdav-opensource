@@ -17,21 +17,51 @@
 set -euo pipefail
 
 SONARR_URL=${SONARR_URL:-http://localhost:8989}
-SONARR_KEY=${SONARR_KEY:-$(docker exec sonarr sed -n 's|.*<ApiKey>\([^<]*\)</ApiKey>.*|\1|p' /config/config.xml)}
-PROFILE_ID=${PROFILE_ID:-6}
-ROOT_PATH=${ROOT_PATH:-/tv}
+SONARR_CONTAINER=${SONARR_CONTAINER:-sonarr}
+SONARR_KEY=${SONARR_KEY:-$(docker exec "$SONARR_CONTAINER" sed -n 's|.*<ApiKey>\([^<]*\)</ApiKey>.*|\1|p' /config/config.xml 2>/dev/null)}
+PROFILE_ID=${PROFILE_ID:-}
+ROOT_PATH=${ROOT_PATH:-}
 TOP_N=${TOP_N:-1000}
 MIN_VOTES=${MIN_VOTES:-10000}
 MONITOR=${MONITOR:-all}
 SEARCH_AFTER=${SEARCH_AFTER:-false}
 
+command -v jq      >/dev/null 2>&1 || { echo "jq required"; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "python3 required"; exit 1; }
+
+[ -n "$SONARR_KEY" ] || {
+  echo "could not read the Sonarr api key."
+  echo "set SONARR_KEY=..., or SONARR_CONTAINER=<name> (this one is not '$SONARR_CONTAINER')."
+  exit 1
+}
+
+api() { curl -fsS -H "X-Api-Key: $SONARR_KEY" "$SONARR_URL/api/v3/$1"; }
+
+# Read defaults from the instance rather than hardcoding them: a wrong profile id or
+# root path is accepted per-title and then fails every add, which reads as thousands
+# of network errors instead of one bad setting.
+if [ -z "$PROFILE_ID" ]; then
+  PROFILE_ID=$(api qualityprofile | jq -r '.[0].id')
+  [ -n "$PROFILE_ID" ] && [ "$PROFILE_ID" != null ] || { echo "no quality profiles exist in Sonarr"; exit 1; }
+elif ! api qualityprofile | jq -e --argjson p "$PROFILE_ID" 'any(.id == $p)' >/dev/null; then
+  echo "PROFILE_ID=$PROFILE_ID does not exist. available:"
+  api qualityprofile | jq -r '.[] | "  \(.id)\t\(.name)"'
+  exit 1
+fi
+
+if [ -z "$ROOT_PATH" ]; then
+  ROOT_PATH=$(api rootfolder | jq -r '.[0].path')
+  [ -n "$ROOT_PATH" ] && [ "$ROOT_PATH" != null ] || { echo "no root folders configured in Sonarr"; exit 1; }
+elif ! api rootfolder | jq -e --arg r "$ROOT_PATH" 'any(.path == $r)' >/dev/null; then
+  echo "ROOT_PATH=$ROOT_PATH is not a Sonarr root folder. available:"
+  api rootfolder | jq -r '.[] | "  \(.path)"'
+  exit 1
+fi
+
 echo "=== config ==="
 echo "sonarr: $SONARR_URL  profile=$PROFILE_ID  root=$ROOT_PATH"
 echo "top_n=$TOP_N  min_votes=$MIN_VOTES  monitor=$MONITOR  search_after=$SEARCH_AFTER"
 echo
-
-command -v jq      >/dev/null 2>&1 || { echo "jq required"; exit 1; }
-command -v python3 >/dev/null 2>&1 || { echo "python3 required"; exit 1; }
 
 WORK=$(mktemp -d); trap "rm -rf '$WORK'" EXIT
 cd "$WORK"
@@ -96,7 +126,9 @@ echo "=== dedupe against Sonarr library ==="
 curl -s "$SONARR_URL/api/v3/series" -H "X-Api-Key: $SONARR_KEY" | \
     jq -r '.[] | [.imdbId, .tvdbId] | @tsv' > existing.tsv
 awk -F'\t' '{if ($1 != "" && $1 != "null") print $1}' existing.tsv > existing_imdb.txt
-awk -F'\t' 'NR==FNR {have[$1]=1; next} !have[$1]' existing_imdb.txt top_imdb_tv.tsv > to_add.tsv
+# FILENAME check, not NR==FNR: with an empty exclusion list NR==FNR would
+# stay true into the second file and filter out every candidate.
+awk -F'\t' 'FILENAME==ARGV[1] {have[$1]=1; next} !($1 in have)' existing_imdb.txt top_imdb_tv.tsv > to_add.tsv
 TO_ADD=$(wc -l < to_add.tsv)
 echo "  library has $(wc -l < existing.tsv) series"
 echo "  new to add:    $TO_ADD"

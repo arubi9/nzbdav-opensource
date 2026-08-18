@@ -36,21 +36,28 @@ public class ArrMonitoringService : BackgroundService
 
             // otherwise, handle stuck queue items according to the config
             foreach (var arrClient in arrConfig.GetArrClients())
-                await HandleStuckQueueItems(arrConfig, arrClient).ConfigureAwait(false);
+            {
+                stoppingToken.ThrowIfCancellationRequested();
+                await HandleStuckQueueItems(arrConfig, arrClient, stoppingToken).ConfigureAwait(false);
+            }
         }
     }
 
-    private async Task HandleStuckQueueItems(ArrConfig arrConfig, ArrClient client)
+    private async Task HandleStuckQueueItems(ArrConfig arrConfig, ArrClient client, CancellationToken cancellationToken)
     {
         try
         {
-            var queueStatus = await client.GetQueueStatusAsync().ConfigureAwait(false);
+            var queueStatus = await client.GetQueueStatusAsync(cancellationToken).ConfigureAwait(false);
             if (queueStatus is { Warnings: false, UnknownWarnings: false }) return;
-            var queue = await client.GetQueueAsync().ConfigureAwait(false);
+            var queue = await client.GetQueueAsync(cancellationToken).ConfigureAwait(false);
             var actionableStatuses = arrConfig.QueueRules.Select(x => x.Message);
             var stuckRecords = queue.Records.Where(x => actionableStatuses.Any(x.HasStatusMessage));
             foreach (var record in stuckRecords)
-                await HandleStuckQueueItem(record, arrConfig, client).ConfigureAwait(false);
+                await HandleStuckQueueItem(record, arrConfig, client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception e)
         {
@@ -58,7 +65,7 @@ public class ArrMonitoringService : BackgroundService
         }
     }
 
-    private async Task HandleStuckQueueItem(ArrQueueRecord item, ArrConfig arrConfig, ArrClient client)
+    private async Task HandleStuckQueueItem(ArrQueueRecord item, ArrConfig arrConfig, ArrClient client, CancellationToken cancellationToken)
     {
         // since there may be multiple status messages, multiple actions may apply.
         // in such case, always perform the strongest action.
@@ -69,7 +76,7 @@ public class ArrMonitoringService : BackgroundService
             .Max();
 
         if (action is ArrConfig.QueueAction.DoNothing) return;
-        await client.DeleteQueueRecord(item.Id, action).ConfigureAwait(false);
+        await client.DeleteQueueRecord(item.Id, action, cancellationToken).ConfigureAwait(false);
         Log.Warning($"Resolved stuck queue item `{item.Title}` from `{client.Host}, with action `{action}`");
     }
 }

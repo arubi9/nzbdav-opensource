@@ -144,8 +144,8 @@ public class MediaProbeService : BackgroundService
     /// </summary>
     private async Task WarmFirstSegmentsIntoL2Async(IReadOnlyList<DavItem> videoItems, CancellationToken ct)
     {
-        var lowPriority = new DownloadPriorityContext { Priority = SemaphorePriority.Low };
-        using var priorityScope = ct.SetContext(lowPriority);
+        using var priorityScope = ct.SetContext(
+            new DownloadPriorityContext { Priority = SemaphorePriority.Low });
 
         var policy = _configManager.GetL2PrewarmPolicy();
         var itemsProcessed = 0;
@@ -215,11 +215,14 @@ public class MediaProbeService : BackgroundService
 
         try
         {
+            // Must NOT wrap this in _liveSegmentCache.GetOrAddHeaderAsync: the
+            // streaming client already routes through that same cache, so the
+            // inner call re-entered the Lazy this outer call was still running
+            // and every item failed with "ValueFactory attempted to access the
+            // Value property of this instance", leaving the four layout columns
+            // NULL and the O(1) fast path permanently dead.
             Func<string, CancellationToken, Task<UsenetYencHeader>> headerFetcher =
-                (segId, token) => _liveSegmentCache.GetOrAddHeaderAsync(
-                    segId,
-                    innerCt => _usenetClient.GetYencHeadersAsync(segId, innerCt),
-                    token);
+                (segId, token) => _usenetClient.GetYencHeadersAsync(segId, token);
 
             var (partSize, lastPartSize, segmentCount, uniform) =
                 await ComputeYencLayoutAsync(segmentIds, headerFetcher, ct).ConfigureAwait(false);
@@ -365,8 +368,8 @@ public class MediaProbeService : BackgroundService
         Func<DavItem, CancellationToken, Task> processItem,
         CancellationToken ct)
     {
-        var lowPriority = new DownloadPriorityContext { Priority = SemaphorePriority.Low };
-        using var priorityScope = ct.SetContext(lowPriority);
+        using var priorityScope = ct.SetContext(
+            new DownloadPriorityContext { Priority = SemaphorePriority.Low });
 
         var concurrency = GetBackfillConcurrency();
         Log.Information("ProbeDataGenerator backfill starting with concurrency={Concurrency}", concurrency);
@@ -381,7 +384,12 @@ public class MediaProbeService : BackgroundService
 
         await Parallel.ForEachAsync(items, options, async (item, innerCt) =>
         {
-            using var innerPriorityScope = innerCt.SetContext(lowPriority);
+            // The outer priority scope is keyed to `ct`, but each body receives
+            // its own linked `innerCt`, so the Low priority never reached the
+            // per-item downloads and backfill competed with live streams.
+            using var innerPriorityScope = innerCt.SetContext(
+                new DownloadPriorityContext { Priority = SemaphorePriority.Low });
+
             try
             {
                 await processItem(item, innerCt).ConfigureAwait(false);
@@ -489,8 +497,8 @@ public class MediaProbeService : BackgroundService
 
         // Run ffprobe against the NZBDAV stream URL (which now serves from cache)
         var baseUrl = _configManager.GetBaseUrl().TrimEnd('/');
-        var apiKey = _configManager.GetApiKey();
-        var streamUrl = $"{baseUrl}/api/stream/{videoFile.Id}?apikey={apiKey}";
+        var token = StreamTokenService.GenerateToken($"/api/stream/{videoFile.Id}", _configManager);
+        var streamUrl = $"{baseUrl}/api/stream/{videoFile.Id}?token={Uri.EscapeDataString(token)}";
 
         var probeResult = await RunFfprobe(streamUrl, ct).ConfigureAwait(false);
         if (probeResult is null) return;
@@ -498,6 +506,11 @@ public class MediaProbeService : BackgroundService
         // Write .mediainfo.json sidecar to cache directory
         var probeFilePath = Path.Combine(_liveSegmentCache.CacheDirectory, $"probe-{videoFile.Id:N}.json");
         await File.WriteAllTextAsync(probeFilePath, probeResult, ct).ConfigureAwait(false);
+
+        // The manifest reports HasProbeData by probing the filesystem, so this write
+        // changes the manifest without touching the database. Nothing else would
+        // invalidate a client's cached view of it.
+        ManifestVersion.Bump();
 
         Log.Debug("Pre-probed {Name} — mediainfo cached", videoFile.Name);
     }
