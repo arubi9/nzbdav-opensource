@@ -231,6 +231,24 @@ public sealed class NzbdavMediaSourceProviderTests
         => new(NullLogger<NzbdavMediaSourceProvider>.Instance,
             () => new NzbdavOperationConfiguration("https://nzbdav.example", root, string.Empty, 30));
 
+    [Fact]
+    public void FfprobeParser_AcceptsDuplicateEntriesInsideTags()
+    {
+        const string probe = """
+                             {
+                               "format": { "format_name": "matroska" },
+                               "streams": [
+                                 { "codec_type": "video", "tags": { "track": "2", "track": "9" } }
+                               ]
+                             }
+                             """;
+
+        var output = FfprobeJsonParser.Parse(Encoding.UTF8.GetBytes(probe));
+
+        Assert.Equal("matroska", output.Format!.FormatName);
+        Assert.Single(output.Streams);
+    }
+
     private static void WriteCompletionMarker(string root, string strm, string probe, Guid markerId)
     {
         var streamIdentity = CaptureIdentity(root, strm);

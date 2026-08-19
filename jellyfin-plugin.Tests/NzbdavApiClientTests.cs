@@ -81,8 +81,7 @@ public sealed class NzbdavApiClientTests
 
     [Theory]
     [InlineData("{\"format\":{\"format_name\":\"matroska\"},\"streams\":[],\"STREAMS\":[]}")]
-    [InlineData("{\"format\":{\"format_name\":\"matroska\",\"tags\":{\"title\":\"valid\",\"TITLE\":null}},\"streams\":[]}")]
-    public async Task GetProbeDataAsync_RejectsDuplicatePropertiesAtAnyDepth(string json)
+    public async Task GetProbeDataAsync_RejectsDuplicatePropertiesOutsideTags(string json)
     {
 
         var client = new NzbdavApiClient(new PluginConfiguration

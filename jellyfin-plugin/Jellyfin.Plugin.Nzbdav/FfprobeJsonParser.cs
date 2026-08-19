@@ -54,11 +54,11 @@ internal static class FfprobeJsonParser
         var arrays = 0;
         var properties = 0;
         var strings = 0L;
-        var stack = new Stack<JsonElement>();
-        stack.Push(element);
+        var stack = new Stack<(JsonElement Element, bool IsTagMap)>();
+        stack.Push((element, false));
         while (stack.Count > 0)
         {
-            var current = stack.Pop();
+            var (current, isTagMap) = stack.Pop();
             switch (current.ValueKind)
             {
                 case JsonValueKind.String:
@@ -70,17 +70,18 @@ internal static class FfprobeJsonParser
                     if (++arrays > MaxArrayItems || current.GetArrayLength() > MaxArrayItems)
                         throw new JsonException("Probe response contains too many array items.");
                     foreach (var child in current.EnumerateArray())
-                        stack.Push(child);
+                        stack.Push((child, false));
                     break;
                 case JsonValueKind.Object:
                     var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     foreach (var property in current.EnumerateObject())
                     {
-                        if (!names.Add(property.Name))
+                        if (!isTagMap && !names.Add(property.Name))
                             throw new JsonException($"Probe response contains duplicate property '{property.Name}'.");
                         if (++properties > MaxObjectProperties * MaxArrayItems)
                             throw new JsonException("Probe response contains too many object properties.");
-                        stack.Push(property.Value);
+                        stack.Push((property.Value,
+                            string.Equals(property.Name, "tags", StringComparison.OrdinalIgnoreCase)));
                     }
                     break;
             }
