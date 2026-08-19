@@ -164,7 +164,10 @@ services:
     # http2 (TCP) transport: QUIC/UDP kept dropping through the LXC->host NAT
     # layers ("failed to dial to edge with quic" every few minutes), and every
     # drop stalls in-flight streams. TCP is stabler through these middleboxes.
-    command: tunnel --no-autoupdate --metrics 127.0.0.1:2000 --protocol http2 run
+    # ha-connections: 4 (the default) capped aggregate throughput near 1 Gbps
+    # while the origin sustains ~3.5 Gbps on LAN. Each edge connection is a
+    # separate TCP path, so widening them raises the concurrent-stream ceiling.
+    command: tunnel --no-autoupdate --metrics 127.0.0.1:2000 --protocol http2 --ha-connections 8 run
     # TUNNEL_TOKEN lives in an untracked secrets file, not the tracked .env:
     # it is a credential, and .env gets overwritten by deploys.
     env_file:
