@@ -786,6 +786,45 @@ public sealed class NzbdavLibrarySyncTaskTests
     }
 
     [Fact]
+    public void BuildExpectedStrmRelativePaths_KeepsObfuscatedNameWhenCanonicalSiblingExists()
+    {
+        var parentId = Guid.NewGuid();
+        var parent = new ManifestItem
+        {
+            Id = parentId,
+            Name = "Movie.2026.1080p-GROUP",
+            Path = "/content/movies/Movie.2026.1080p-GROUP",
+            Type = "directory"
+        };
+        var canonical = new ManifestItem
+        {
+            Id = Guid.NewGuid(),
+            ParentId = parentId,
+            Name = parent.Name + ".mkv",
+            Path = parent.Path + "/" + parent.Name + ".mkv",
+            Type = "nzb_file"
+        };
+        var obfuscated = new ManifestItem
+        {
+            Id = Guid.NewGuid(),
+            ParentId = parentId,
+            Name = "ahm0ohchahcus8euDieh4Dah4fah4cah.mkv",
+            Path = parent.Path + "/ahm0ohchahcus8euDieh4Dah4fah4cah.mkv",
+            Type = "rar_file"
+        };
+        var items = new[] { parent, canonical, obfuscated };
+
+        var result = InvokeBuildExpectedStrmRelativePaths(items, items.ToDictionary(i => i.Id));
+
+        Assert.Equal(
+            [
+                Normalize(Path.Combine("movies", parent.Name, parent.Name + ".strm")),
+                Normalize(Path.Combine("movies", parent.Name, "ahm0ohchahcus8euDieh4Dah4fah4cah.strm"))
+            ],
+            result.Select(Normalize).ToArray());
+    }
+
+    [Fact]
     public void BuildStrmRelativePath_KeepsReadableReleaseName()
     {
         var parentId = Guid.NewGuid();

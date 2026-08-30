@@ -6404,7 +6404,8 @@ public class NzbdavLibrarySyncTask : IScheduledTask
         if (LooksObfuscated(fileName)
             && videoFile.ParentId.HasValue
             && allItems.TryGetValue(videoFile.ParentId.Value, out var parent)
-            && parent.Type == "directory")
+            && parent.Type == "directory"
+            && !HasCanonicalVideoSibling(videoFile, parent, allItems))
         {
             var parentDirectory = Path.GetDirectoryName(relativePath) ?? string.Empty;
             var normalizedParentName = ValidateManifestSegment(parent.Name, MaxManifestParentNameLength);
@@ -6879,6 +6880,18 @@ public class NzbdavLibrarySyncTask : IScheduledTask
     /// (e.g., "Family.Guy.S24E07.1080p"); obfuscated names are a single run of letters/digits
     /// (e.g., "W6Ss3ROn1dPrVxlU916rJLYwTk6QbtDe").
     /// </summary>
+    private static bool HasCanonicalVideoSibling(
+        ManifestItem videoFile,
+        ManifestItem parent,
+        IReadOnlyDictionary<Guid, ManifestItem> allItems)
+    {
+        return allItems.Values.Any(item =>
+            item.Id != videoFile.Id
+            && item.ParentId == videoFile.ParentId
+            && IsVideoFile(item.Name)
+            && string.Equals(Path.GetFileNameWithoutExtension(item.Name), parent.Name, StringComparison.OrdinalIgnoreCase));
+    }
+
     private static bool LooksObfuscated(string name)
     {
         if (name.Length < 12) return false;
