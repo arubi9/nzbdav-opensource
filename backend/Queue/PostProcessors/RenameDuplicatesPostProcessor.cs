@@ -12,7 +12,8 @@ public class RenameDuplicatesPostProcessor(DavDatabaseClient dbClient)
             .Where(x => x.State == EntityState.Added)
             .Select(x => x.Entity)
             .Where(x => x.Type != DavItem.ItemType.Directory)
-            .GroupBy(x => new DuplicateKey(x.ParentId!.Value, x.Name))
+            .GroupBy(x => x.ParentId!.Value)
+            .SelectMany(g => g.GroupBy(x => x.Name, StringComparer.OrdinalIgnoreCase))
             .Select(g => g.ToList())
             .Where(g => g.Count > 1);
 
@@ -33,5 +34,4 @@ public class RenameDuplicatesPostProcessor(DavDatabaseClient dbClient)
         }
     }
 
-    private record struct DuplicateKey(Guid ParentId, string Name);
 }
