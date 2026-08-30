@@ -188,6 +188,28 @@ public sealed class ManifestPaginationTests
         }
     }
 
+    [Fact]
+    public async Task ProbeVersionChangeDoesNotTearPagedWalk()
+    {
+        var (context, cacheDir) = await SeedItemsAsync(ctx => SeedBulk(ctx, PageSize + 1, pathPadding: 0));
+
+        await using (context)
+        using (var cache = new LiveSegmentCache(cacheDir))
+        {
+            var first = await InvokeAsync(context, cache, paged: true);
+            var firstPage = ReadManifest(first.Result);
+            var firstEtag = first.Context.Response.Headers.ETag.ToString();
+
+            ManifestVersion.Bump();
+
+            var second = await InvokeAsync(context, cache, paged: true, after: firstPage.NextCursor);
+            var secondPage = ReadManifest(second.Result);
+
+            Assert.Equal(firstPage.Version, secondPage.Version);
+            Assert.NotEqual(firstEtag, second.Context.Response.Headers.ETag.ToString());
+        }
+    }
+
     /// <summary>
     /// A 304 on a later page would answer "the tree is unchanged" to a question about
     /// one slice of it, leaving the caller holding a truncated walk it believes is whole.

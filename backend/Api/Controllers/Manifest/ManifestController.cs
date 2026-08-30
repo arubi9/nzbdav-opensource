@@ -187,7 +187,7 @@ public class ManifestController(DavDatabaseClient dbClient, LiveSegmentCache liv
             // unpaged response is byte-identical to the one served before paging
             // existed. That keeps existing ETags valid across this change.
             NextCursor = hasMore && cursorPath.Length > 0 ? EncodeCursor(cursorPath) : null,
-            Version = paged ? ManifestVersion.Token : null
+            Version = paged ? ManifestVersion.ContentToken : null
         };
         byte[] serialized;
         try

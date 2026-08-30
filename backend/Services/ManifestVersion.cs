@@ -18,14 +18,25 @@ namespace NzbWebDAV.Services;
 public static class ManifestVersion
 {
     private static long _current;
+    private static long _contentCurrent;
 
     /// <summary>Distinguishes counter values from different processes.</summary>
     public static Guid InstanceId { get; } = Guid.NewGuid();
 
     public static long Current => Interlocked.Read(ref _current);
+    public static long ContentCurrent => Interlocked.Read(ref _contentCurrent);
 
     public static void Bump() => Interlocked.Increment(ref _current);
 
+    public static void BumpContent()
+    {
+        Interlocked.Increment(ref _current);
+        Interlocked.Increment(ref _contentCurrent);
+    }
+
     /// <summary>An ETag-safe token that changes whenever the manifest would.</summary>
     public static string Token => $"{InstanceId:N}-{Current}";
+
+    /// <summary>A stable paging token that changes only when content rows change.</summary>
+    public static string ContentToken => $"{InstanceId:N}-{ContentCurrent}";
 }
