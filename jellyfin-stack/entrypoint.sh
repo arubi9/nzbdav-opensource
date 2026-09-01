@@ -33,14 +33,22 @@ volume_tree_is_safe() {
         awk -v target="$volume" 'index($5, target "/") == 1 { nested = 1 }
             END { exit(nested ? 1 : 0) }' /proc/self/mountinfo || return 1
     fi
+    # This scan runs on every start, before the ownership marker is consulted,
+    # so it walks the whole media volume each time. The [ ] tests are shell
+    # builtins and cost nothing; the stat calls were the entire expense, at two
+    # forks per file. Hoist the invariant root stat and batch the rest, taking
+    # a 160k-file volume from ~325k forks to two per find batch.
     find -P "$volume" -xdev -exec /bin/sh -eu -c '
         root=$1; shift
+        root_dev=$(stat -c "%d" "$root" 2>/dev/null) || exit 1
         for item do
             [ ! -L "$item" ] && { [ -d "$item" ] || [ -f "$item" ]; } || exit 1
-            # Config files may legitimately be hardlinked by Jellyfin; the
-            # no-link and same-filesystem checks still prevent path escapes.
-            [ "$(stat -c "%d" "$item" 2>/dev/null)" = "$(stat -c "%d" "$root" 2>/dev/null)" ] || exit 1
         done
+        # Config files may legitimately be hardlinked by Jellyfin; the
+        # no-link and same-filesystem checks still prevent path escapes.
+        # A vanished file makes stat exit non-zero, so this still fails closed.
+        devs=$(stat -c "%d" "$@" 2>/dev/null) || exit 1
+        if printf "%s\n" "$devs" | grep -qxv "$root_dev"; then exit 1; fi
     ' sh "$volume" {} +
 }
 
