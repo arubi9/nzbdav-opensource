@@ -400,8 +400,11 @@ public class NzbdavLibrarySyncTask : IScheduledTask
             if (!ownsOutputs && TryPathExistsAnchored(config.LibraryPath, intentPath, out _)
                 && TryReadManagedIntent(config.LibraryPath, intentPath, videoFile.Id, out var intent))
             {
-                return await CompleteManagedIntentAsync(
+                var intentCompleted = await CompleteManagedIntentAsync(
                     config, client, baseUri, videoFile, strmPath, probePath, intent, ct).ConfigureAwait(false);
+                if (!intentCompleted)
+                    _logger.LogWarning("Could not complete pending managed intent for {Id}", videoFile.Id);
+                return intentCompleted;
             }
             if (markerExists && !ownsOutputs)
             {
@@ -519,7 +522,10 @@ public class NzbdavLibrarySyncTask : IScheduledTask
                 if (!CommitProbeAddition(config, preparedProbe, probePath, markerPath,
                         probeOldMarkerIdentity.Value, probeOldMarkerBytes, probeCompletionBytes, ct,
                         out var committedProbe))
+                {
+                    _logger.LogWarning("Probe addition did not commit for {Id}", videoFile.Id);
                     return false;
+                }
 
                 // Carry the descriptor-verified probe ownership and committed
                 // marker bytes forward. A post-commit pathname read can observe
@@ -559,7 +565,10 @@ public class NzbdavLibrarySyncTask : IScheduledTask
                         config, strmPath, markerPath, rotationStreamIdentity,
                         ownership.Strm.Bytes, new UTF8Encoding(false).GetBytes(streamUrl),
                         rotationMarkerIdentity, oldMarkerBytes, newMarkerBytes, ct))
+                {
+                    _logger.LogWarning("Stream token rotation did not commit for {Id}", videoFile.Id);
                     return false;
+                }
             }
             else if (!completedOwnership || probeData is not null)
             {
@@ -2065,7 +2074,18 @@ public class NzbdavLibrarySyncTask : IScheduledTask
         return NormalizeRelativePathForComparison(path);
     }
 
-    private readonly record struct FileIdentity(ulong Device, ulong Inode);
+    // st_dev is not a durable identity. Device-mapper/LVM reassigns minor
+    // numbers when a volume is reactivated, so a marker written before a
+    // reboot compares unequal to the byte-identical file afterwards and every
+    // affected item fails closed forever, pinning the manifest ETag. Inode
+    // plus the caller's SHA-256 content proof is the stable identity; Device
+    // stays recorded in markers and journals for diagnostics.
+    private readonly record struct FileIdentity(ulong Device, ulong Inode)
+    {
+        public bool Equals(FileIdentity other) => Inode == other.Inode;
+
+        public override int GetHashCode() => Inode.GetHashCode();
+    }
     private readonly record struct WriteCommitResult(bool DestinationCommitted, FileIdentity? Identity);
     private readonly record struct RecoveryArtifacts(
         string JournalPath, string OldContentPath, FileIdentity OldIdentity,

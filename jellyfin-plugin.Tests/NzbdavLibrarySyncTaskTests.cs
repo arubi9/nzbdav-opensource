@@ -3318,6 +3318,63 @@ public sealed class NzbdavLibrarySyncTaskTests
         finally { DeleteTestLibrary(root); }
     }
 
+    [Fact]
+    public async Task SyncVideoFile_AdoptsMarkerAfterDeviceNumberChanged()
+    {
+        // Device-mapper reassigns LVM minor numbers whenever a volume is
+        // reactivated, so a marker written before a reboot records an st_dev
+        // that no longer matches a byte-identical file. Ownership must still
+        // be adopted; refusing pins the manifest ETag forever.
+        var now = DateTimeOffset.FromUnixTimeSeconds(1_700_000_000);
+        var id = Guid.NewGuid();
+        var libraryPath = Path.Combine(Path.GetTempPath(), "nzbdav-jellyfin-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(libraryPath);
+        var video = new ManifestItem
+        {
+            Id = id,
+            Name = "Movie.mkv",
+            Path = "/content/movies/Movie/Movie.mkv",
+            Type = "nzb_file"
+        };
+
+        var expectedRelativePath = Path.ChangeExtension(InvokeBuildStrmRelativePath(video, new Dictionary<Guid, ManifestItem>()), ".strm");
+        WriteFile(libraryPath, expectedRelativePath, $"https://nzbdav.example/api/stream/{id}?apikey=legacy-secret");
+        WriteManagedMarker(libraryPath, expectedRelativePath, id);
+
+        var markerPath = Path.Combine(libraryPath, expectedRelativePath) + ".nzbdav.managed";
+        var parts = File.ReadAllText(markerPath).Split('/');
+        parts[4] = (ulong.Parse(parts[4]) + 15).ToString();
+        File.WriteAllText(markerPath, string.Join('/', parts));
+
+        var config = new PluginConfiguration
+        {
+            LibraryPath = libraryPath,
+            NzbdavBaseUrl = "https://nzbdav.example",
+            ApiKey = "header"
+        };
+
+        try
+        {
+            var task = new NzbdavLibrarySyncTask(
+                NullLogger<NzbdavLibrarySyncTask>.Instance,
+                new FixedTimeProvider(now));
+            var client = new NzbdavApiClient(config, new TestHttpMessageHandler((request, _) =>
+                TestHttpMessageHandler.Json($"{{\"streamToken\":\"{now.AddDays(7).ToUnixTimeSeconds()}.{CanonicalToken}\"}}")));
+
+            var adopted = await InvokeSyncVideoFile(task, config, client, video, new Dictionary<Guid, ManifestItem>(), CancellationToken.None);
+
+            Assert.True(adopted);
+            Assert.Equal(
+                $"https://nzbdav.example/api/stream/{id}?token={now.AddDays(7).ToUnixTimeSeconds()}.{CanonicalToken}",
+                File.ReadAllText(Path.Combine(libraryPath, expectedRelativePath)));
+        }
+        finally
+        {
+            if (Directory.Exists(libraryPath))
+                Directory.Delete(libraryPath, recursive: true);
+        }
+    }
+
     private static void WriteFile(string libraryPath, string relativePath, string content)
     {
         var fullPath = Path.Combine(libraryPath, relativePath);
