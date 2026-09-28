@@ -13,6 +13,8 @@ internal sealed record NzbdavOperationConfiguration(
     string ApiKey,
     int TimeoutSeconds)
 {
+    public int MaxManifestItems { get; init; } = 250000;
+
     public bool IsValid
         => !string.IsNullOrWhiteSpace(NzbdavBaseUrl)
            && !string.IsNullOrWhiteSpace(LibraryPath)
@@ -34,7 +36,10 @@ internal sealed record NzbdavOperationConfiguration(
                 baseUri.AbsoluteUri.TrimEnd('/'),
                 GetCanonicalLibraryRoot(configuration.LibraryPath),
                 configuration.ApiKey ?? string.Empty,
-                configuration.TimeoutSeconds);
+                configuration.TimeoutSeconds)
+            {
+                MaxManifestItems = configuration.MaxManifestItems
+            };
         }
         catch
         {
@@ -49,7 +54,8 @@ internal sealed record NzbdavOperationConfiguration(
         NzbdavBaseUrl = NzbdavBaseUrl,
         LibraryPath = LibraryPath,
         ApiKey = ApiKey,
-        TimeoutSeconds = TimeoutSeconds
+        TimeoutSeconds = TimeoutSeconds,
+        MaxManifestItems = MaxManifestItems
     };
 
     private static bool TryParseBackendBaseUri(string value, out Uri baseUri)

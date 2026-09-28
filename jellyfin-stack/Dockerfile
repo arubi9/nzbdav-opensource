@@ -1,8 +1,8 @@
-# Jellyfin's 10.11.8 image declares /config as a volume and starts
+# Jellyfin's 12.0 image declares /config as a volume and starts
 # /jellyfin/jellyfin directly. The plugin payload contains exactly its DLL and
 # meta.json; the image also carries a checked source manifest outside the
 # writable config volume. Startup never trusts an existing persisted plugin.
-FROM mcr.microsoft.com/dotnet/sdk:9.0.308-alpine3.22@sha256:e0f7abfb9c18aa419198b2c4e05dc2f7fd864a6098f09bddb1ceb2b0bce67685 AS plugin-build
+FROM mcr.microsoft.com/dotnet/sdk:10.0.401-alpine3.23@sha256:84c5d09dfeb4275f6540084e69331f140223eb968b5ef48023923b0b2eda156b AS plugin-build
 WORKDIR /src
 COPY jellyfin-plugin/Jellyfin.Plugin.Nzbdav/ Jellyfin.Plugin.Nzbdav/
 RUN dotnet restore Jellyfin.Plugin.Nzbdav/Jellyfin.Plugin.Nzbdav.csproj --locked-mode \
@@ -21,15 +21,15 @@ RUN dotnet restore Jellyfin.Plugin.Nzbdav/Jellyfin.Plugin.Nzbdav.csproj --locked
   "name": "NZBDAV",
   "overview": "Integrates Jellyfin with NZBDAV for direct NNTP streaming.",
   "owner": "nzbdav",
-  "targetAbi": "10.11.0.0",
+  "targetAbi": "12.0.0.0",
   "timestamp": "0001-01-01T00:00:00.0000000Z",
-  "version": "1.1.0.0",
+  "version": "1.2.0.0",
   "status": "Active",
   "autoUpdate": true,
   "assemblies": []
 }
 EOF
-# Jellyfin 10.11.8 writes this metadata in the same canonical form during
+# Jellyfin 12.0 writes this metadata in the same canonical form during
 # discovery: the JSON has no terminal newline. Hash only that exact payload.
 RUN size=$(stat -c %s /opt/nzbdav-plugin/meta.json); test "$size" -gt 0; \
     truncate -s "$((size - 1))" /opt/nzbdav-plugin/meta.json
@@ -40,7 +40,7 @@ RUN set -eu; test "$(find /opt/nzbdav-plugin -mindepth 1 -maxdepth 1 -type f | w
     (cd /opt/nzbdav-plugin && sha256sum Jellyfin.Plugin.Nzbdav.dll meta.json | sort) \
       > /opt/nzbdav-plugin.manifest.sha256
 
-FROM jellyfin/jellyfin:10.11.8@sha256:1694ff069f0c9dafb283c36765175606866769f5d72f2ed56b6a0f1be922fc37
+FROM jellyfin/jellyfin:12.0@sha256:baba630419915985442f315f08b0cf46d9f4c8a0cc4bd38e94a6d35751dd5ef5
 COPY --from=plugin-build /opt/nzbdav-plugin/ /opt/nzbdav-plugin/
 COPY --from=plugin-build /opt/nzbdav-plugin.manifest.sha256 /opt/nzbdav-plugin.manifest.sha256
 COPY jellyfin-stack/entrypoint.sh /usr/local/bin/nzbdav-jellyfin-entrypoint

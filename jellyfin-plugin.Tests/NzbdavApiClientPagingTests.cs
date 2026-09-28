@@ -258,6 +258,81 @@ public sealed class NzbdavApiClientPagingTests
         Assert.Equal(3, manifest!.ItemCount);
     }
 
+    [Theory]
+    [InlineData(600000)]
+    [InlineData(2)]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void OperationSnapshotRoundTripsTheManifestCapWithoutSharingMutableConfiguration(int configured)
+    {
+        var config = new PluginConfiguration
+        {
+            NzbdavBaseUrl = "https://nzbdav.example",
+            MaxManifestItems = configured
+        };
+        var snapshot = NzbdavOperationConfiguration.Capture(config);
+        Assert.NotNull(snapshot);
+
+        config.MaxManifestItems = 1;
+        var copy = snapshot.ToPluginConfiguration();
+        Assert.Equal(configured, copy.MaxManifestItems);
+
+        copy.MaxManifestItems = 1;
+        Assert.Equal(configured, snapshot.ToPluginConfiguration().MaxManifestItems);
+    }
+
+    [Fact]
+    public void FourArgumentOperationSnapshotKeepsTheShippedManifestCap()
+    {
+        var snapshot = new NzbdavOperationConfiguration(
+            "https://nzbdav.example", "/media/nzbdav", string.Empty, 30);
+
+        Assert.Equal(250000, snapshot.ToPluginConfiguration().MaxManifestItems);
+    }
+
+    [Theory]
+    [InlineData(3)]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public async Task ClientCreatedFromOperationSnapshotAcceptsTheCompleteWalk(int configured)
+    {
+        var config = new PluginConfiguration
+        {
+            NzbdavBaseUrl = "https://nzbdav.example",
+            MaxManifestItems = configured
+        };
+        var snapshot = NzbdavOperationConfiguration.Capture(config);
+        Assert.NotNull(snapshot);
+        config.MaxManifestItems = 2;
+        var client = new NzbdavApiClient(snapshot.ToPluginConfiguration(), ThreeSinglePageItems());
+
+        var (manifest, _) = await client.GetManifestAsync(null, CancellationToken.None);
+
+        Assert.NotNull(manifest);
+        Assert.Equal(3, manifest.ItemCount);
+        Assert.Equal(new[] { "/content/a.mkv", "/content/b.mkv", "/content/c.mkv" },
+            manifest.Items.Select(item => item.Path).ToArray());
+    }
+
+    [Fact]
+    public async Task ClientCreatedFromOperationSnapshotRejectsThreeItemsAtCapTwo()
+    {
+        var config = new PluginConfiguration
+        {
+            NzbdavBaseUrl = "https://nzbdav.example",
+            MaxManifestItems = 2
+        };
+        var snapshot = NzbdavOperationConfiguration.Capture(config);
+        Assert.NotNull(snapshot);
+        config.MaxManifestItems = 3;
+        var client = new NzbdavApiClient(snapshot.ToPluginConfiguration(), ThreeSinglePageItems());
+
+        var error = await Assert.ThrowsAsync<HttpRequestException>(
+            () => client.GetManifestAsync(null, CancellationToken.None));
+
+        Assert.Contains("too many items", error.Message, StringComparison.Ordinal);
+    }
+
     private static TestHttpMessageHandler ThreeSinglePageItems()
         => new((request, _) => TestHttpMessageHandler.Json(CursorOf(request) switch
         {

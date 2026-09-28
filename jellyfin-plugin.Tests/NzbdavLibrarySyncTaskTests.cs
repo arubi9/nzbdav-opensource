@@ -758,6 +758,27 @@ public sealed class NzbdavLibrarySyncTaskTests
         }
     }
 
+    [Theory]
+    [InlineData("/content/movies/Dune.2021.2160p.UHD.BluRay.x265-GRP/Dune.2021.2160p.UHD.BluRay.x265-GRP.mkv", "movies-4k/Dune.2021.2160p.UHD.BluRay.x265-GRP/Dune.2021.2160p.UHD.BluRay.x265-GRP.mkv")]
+    [InlineData("/content/movies/Heat (1995) [4K]/Heat.mkv", "movies-4k/Heat (1995) [4K]/Heat.mkv")]
+    [InlineData("/content/movies/Dune.2021.1080p.BluRay.x264-GRP/Dune.2021.1080p.BluRay.x264-GRP.mkv", "movies/Dune.2021.1080p.BluRay.x264-GRP/Dune.2021.1080p.BluRay.x264-GRP.mkv")]
+    [InlineData("/content/movies/Movie.2021.1080p.4Kids.WEB/Movie.mkv", "movies/Movie.2021.1080p.4Kids.WEB/Movie.mkv")]
+    [InlineData("/content/tv/Show.S01E01.2160p.WEB/Show.S01E01.2160p.WEB.mkv", "tv/Show.S01E01.2160p.WEB/Show.S01E01.2160p.WEB.mkv")]
+    public void BuildStrmRelativePath_RoutesUhdMoviesToSeparateLibraryRoot(string manifestPath, string expected)
+    {
+        var video = new ManifestItem
+        {
+            Id = Guid.NewGuid(),
+            Name = Path.GetFileName(manifestPath),
+            Path = manifestPath,
+            Type = "nzb_file"
+        };
+
+        var result = InvokeBuildStrmRelativePath(video, new Dictionary<Guid, ManifestItem>());
+
+        Assert.Equal(Normalize(expected), Normalize(result));
+    }
+
     [Fact]
     public void BuildStrmRelativePath_UsesParentDirectoryName_ForObfuscatedVideoFile()
     {
@@ -2755,7 +2776,7 @@ public sealed class NzbdavLibrarySyncTaskTests
     {
         try
         {
-            return (string)BuildRelativePathMethod.Invoke(null, [video, allItems])!;
+            return (string)BuildRelativePathMethod.Invoke(null, [video, allItems, null])!;
         }
         catch (TargetInvocationException ex) when (ex.InnerException is not null)
         {
@@ -2779,7 +2800,7 @@ public sealed class NzbdavLibrarySyncTaskTests
     {
         try
         {
-            return (string[])BuildExpectedStrmRelativePathsMethod.Invoke(null, [items, allItems])!;
+            return (string[])BuildExpectedStrmRelativePathsMethod.Invoke(null, [items, allItems, null])!;
         }
         catch (TargetInvocationException ex) when (ex.InnerException is not null)
         {
@@ -2882,7 +2903,7 @@ public sealed class NzbdavLibrarySyncTaskTests
 
         var method = typeof(NzbdavLibrarySyncTask).GetMethod("SyncVideoFile", BindingFlags.NonPublic | BindingFlags.Instance)
             ?? throw new InvalidOperationException("Could not find SyncVideoFile.");
-        var operation = (Task<bool>?)method.Invoke(task, [config, client, baseUri, video, allItems, ct])
+        var operation = (Task<bool>?)method.Invoke(task, [config, client, baseUri, video, allItems, ct, null])
             ?? throw new InvalidOperationException("SyncVideoFile did not return a Task<bool>.");
         return await operation;
     }
@@ -3041,6 +3062,65 @@ public sealed class NzbdavLibrarySyncTaskTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => provider.GetMediaSources(
             new Video { Path = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"), "movie.strm"), Name = "Movie" },
             cts.Token));
+    }
+
+    [Fact]
+    public async Task SyncReleasesMediaGateBetweenItemsSoPlaybackIsNotBlockedForTheWholeRun()
+    {
+        // A sync over a large library can run for tens of minutes. Playback
+        // waits on the same gate, so it must be able to enter between items
+        // instead of waiting for the entire run.
+        var root = CreateTestLibrary();
+        try
+        {
+            var first = Guid.NewGuid();
+            var second = Guid.NewGuid();
+            Task? reader = null;
+            var readerEntered = false;
+            bool? readerEnteredBeforeSecondItem = null;
+            var handler = new TestHttpMessageHandler((request, _) =>
+            {
+                var path = request.RequestUri!.AbsolutePath;
+                if (path == "/api/manifest")
+                {
+                    return TestHttpMessageHandler.Json($$"""
+                        {"itemCount":2,"version":"v1","items":[
+                          {"id":"{{first}}","parentId":null,"name":"A.mkv","path":"/content/A.mkv","type":"nzb_file","fileSize":1,"createdAt":"2026-04-06T12:00:00Z","hasProbeData":true},
+                          {"id":"{{second}}","parentId":null,"name":"B.mkv","path":"/content/B.mkv","type":"nzb_file","fileSize":1,"createdAt":"2026-04-06T12:00:00Z","hasProbeData":true}]}
+                        """);
+                }
+
+                if (path == $"/api/meta/{first}" && reader is null)
+                {
+                    reader = Task.Run(async () =>
+                    {
+                        using var gate = await NzbdavLibrarySyncTask.EnterMediaGateAsync(CancellationToken.None);
+                        Volatile.Write(ref readerEntered, true);
+                    });
+                }
+                else if (path == $"/api/meta/{second}")
+                {
+                    readerEnteredBeforeSecondItem ??= Volatile.Read(ref readerEntered);
+                }
+
+                return path.StartsWith("/api/probe/", StringComparison.Ordinal)
+                    ? TestHttpMessageHandler.Json("{\"format\":{\"format_name\":\"matroska\"},\"streams\":[]}")
+                    : TestHttpMessageHandler.Json("{\"streamToken\":\"" + CurrentToken + "\"}");
+            });
+            var task = new NzbdavLibrarySyncTask(
+                NullLogger<NzbdavLibrarySyncTask>.Instance,
+                timeProvider: null,
+                pathMutationHook: null,
+                configurationAccessor: () => new NzbdavOperationConfiguration("https://nzbdav.example", root, "key", 30),
+                apiHandler: handler);
+
+            await task.ExecuteAsync(new Progress<double>(), TestContext.Current.CancellationToken)
+                .WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+            await reader!.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            Assert.True(readerEnteredBeforeSecondItem, "media reader could not enter between sync items");
+        }
+        finally { DeleteTestLibrary(root); }
     }
 
     [Fact]

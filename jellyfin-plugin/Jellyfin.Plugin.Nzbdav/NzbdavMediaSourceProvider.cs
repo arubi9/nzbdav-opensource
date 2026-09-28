@@ -59,6 +59,11 @@ public sealed class NzbdavMediaSourceProvider : IMediaSourceProvider
             if (operationConfiguration is null || !operationConfiguration.IsValid)
                 return [];
 
+            // Other .strm sources (e.g. a Real-Debrid mirror) are not ours and
+            // must not wait behind a sync that holds the media gate.
+            if (!NzbdavLibrarySyncTask.IsUnderLibraryRoot(operationConfiguration.LibraryPath, item.Path))
+                return [];
+
             using var gate = await NzbdavLibrarySyncTask.EnterMediaGateAsync(cancellationToken)
                 .ConfigureAwait(false);
 

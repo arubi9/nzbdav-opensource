@@ -105,12 +105,19 @@ public class NzbdavLibrarySyncTask : IScheduledTask
     private readonly Action<string>? _pathMutationHook;
     private readonly Func<NzbdavOperationConfiguration?> _configurationAccessor;
     private readonly MediaBrowser.Controller.Library.ILibraryManager? _libraryManager;
+    // Test seam only; production uses the default HTTP handler.
+    private readonly HttpMessageHandler? _apiHandler;
+    // ExecuteGate serializes each filesystem mutation with media readers.
+    // RunGate keeps whole sync runs single-flight. A run takes ExecuteGate per
+    // item, never for the whole run, because playback waits on ExecuteGate and
+    // a run over a large library can take tens of minutes.
     private static readonly SemaphoreSlim ExecuteGate = new(1, 1);
+    private static readonly SemaphoreSlim RunGate = new(1, 1);
     private string? _cachedETag;
     // Counts real filesystem mutations (strm writes, quarantine copies) during
     // the current run so a library scan is queued only when something changed.
     // Every mutation site routes through _pathMutationHook, so the composed
-    // hook below observes all of them. ExecuteGate makes runs single-flight,
+    // hook below observes all of them. RunGate makes runs single-flight,
     // so reset-at-start/read-at-end needs no cross-run coordination.
     private int _mutationsObserved;
 
@@ -128,8 +135,10 @@ public class NzbdavLibrarySyncTask : IScheduledTask
         TimeProvider? timeProvider,
         Action<string>? pathMutationHook,
         Func<NzbdavOperationConfiguration?> configurationAccessor,
-        MediaBrowser.Controller.Library.ILibraryManager? libraryManager = null)
+        MediaBrowser.Controller.Library.ILibraryManager? libraryManager = null,
+        HttpMessageHandler? apiHandler = null)
     {
+        _apiHandler = apiHandler;
         _logger = logger;
         _timeProvider = timeProvider ?? TimeProvider.System;
         var callerHook = pathMutationHook;
@@ -165,7 +174,7 @@ public class NzbdavLibrarySyncTask : IScheduledTask
         // must not acquire a different root, endpoint, or credential after an
         // administrator edits configuration while another run is in progress.
         var operationConfiguration = _configurationAccessor();
-        await ExecuteGate.WaitAsync(ct).ConfigureAwait(false);
+        await RunGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             Interlocked.Exchange(ref _mutationsObserved, 0);
@@ -173,7 +182,7 @@ public class NzbdavLibrarySyncTask : IScheduledTask
         }
         finally
         {
-            ExecuteGate.Release();
+            RunGate.Release();
         }
     }
 
@@ -195,14 +204,17 @@ public class NzbdavLibrarySyncTask : IScheduledTask
         // In-place updates are journaled before their first byte changes. A
         // previous process may have died after that point, so recovery must run
         // before the manifest can cause another mutation.
-        if (!RecoverPendingInPlaceUpdates(operationConfiguration.LibraryPath, ct))
+        bool recovered;
+        using (await EnterMediaGateAsync(ct).ConfigureAwait(false))
+            recovered = RecoverPendingInPlaceUpdates(operationConfiguration.LibraryPath, ct);
+        if (!recovered)
         {
             _logger.LogWarning("Pending NZBDAV recovery could not be resolved safely; skipping normal sync");
             progress.Report(100);
             return;
         }
 
-        var client = new NzbdavApiClient(config);
+        var client = new NzbdavApiClient(config, _apiHandler);
         progress.Report(0);
 
         // Single HTTP request for entire content tree, ETag-cached
@@ -269,7 +281,8 @@ public class NzbdavLibrarySyncTask : IScheduledTask
         try
         {
             var allItems = representableItems.ToDictionary(i => i.Id);
-            expectedRelativePaths = BuildExpectedStrmRelativePaths(representableItems, allItems);
+            var siblingIndex = new CanonicalVideoSiblingIndex(allItems);
+            expectedRelativePaths = BuildExpectedStrmRelativePaths(representableItems, allItems, siblingIndex);
 
             // Find all video files
             var videoFiles = representableItems
@@ -282,8 +295,11 @@ public class NzbdavLibrarySyncTask : IScheduledTask
             {
                 ct.ThrowIfCancellationRequested();
 
-                if (!await SyncVideoFile(config, client, baseUri, videoFile, allItems, ct).ConfigureAwait(false))
-                    anyFailures = true;
+                using (await EnterMediaGateAsync(ct).ConfigureAwait(false))
+                {
+                    if (!await SyncVideoFile(config, client, baseUri, videoFile, allItems, ct, siblingIndex).ConfigureAwait(false))
+                        anyFailures = true;
+                }
 
                 processed++;
                 progress.Report((double)processed / videoFiles.Length * 100);
@@ -299,7 +315,8 @@ public class NzbdavLibrarySyncTask : IScheduledTask
             bool didReconcile = false;
             try
             {
-                didReconcile = ReconcileStaleFiles(config, expectedRelativePaths, runId: CreateRunId(), ct: ct);
+                using (await EnterMediaGateAsync(ct).ConfigureAwait(false))
+                    didReconcile = ReconcileStaleFiles(config, expectedRelativePaths, runId: CreateRunId(), ct: ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -348,8 +365,9 @@ public class NzbdavLibrarySyncTask : IScheduledTask
         NzbdavApiClient client,
         Uri baseUri,
         ManifestItem videoFile,
-        Dictionary<Guid, ManifestItem> allItems,
-        CancellationToken ct)
+        IReadOnlyDictionary<Guid, ManifestItem> allItems,
+        CancellationToken ct,
+        CanonicalVideoSiblingIndex? siblingIndex = null)
     {
         var committedOutputs = new List<CommittedOutput>();
         var durableFreshIntent = false;
@@ -358,7 +376,7 @@ public class NzbdavLibrarySyncTask : IScheduledTask
             // A marker is the ownership proof.  Never adopt an unmarked sidecar:
             // doing so would let a failed/foreign file become quarantinable plugin
             // content on the next run.
-            var strmPath = BuildSafeStrmPath(config.LibraryPath, videoFile, allItems);
+            var strmPath = BuildSafeStrmPath(config.LibraryPath, videoFile, allItems, siblingIndex);
             var probePath = BuildSafeProbePath(strmPath);
             var markerPath = BuildManagedMarkerPath(strmPath);
             var intentPath = BuildManagedIntentMarkerPath(strmPath);
@@ -1111,6 +1129,7 @@ public class NzbdavLibrarySyncTask : IScheduledTask
         foreach (var strmPath in EnumerateAnchoredStrmFiles(canonicalRoot))
         {
             ct.ThrowIfCancellationRequested();
+            using var gate = await EnterMediaGateAsync(ct).ConfigureAwait(false);
 
             try
             {
@@ -1716,8 +1735,10 @@ public class NzbdavLibrarySyncTask : IScheduledTask
 
     private static string[] BuildExpectedStrmRelativePaths(
         ManifestItem[] items,
-        IReadOnlyDictionary<Guid, ManifestItem> allItems)
+        IReadOnlyDictionary<Guid, ManifestItem> allItems,
+        CanonicalVideoSiblingIndex? siblingIndex = null)
     {
+        siblingIndex ??= new CanonicalVideoSiblingIndex(allItems);
         // Validate the complete manifest namespace before any HTTP-dependent
         // output mutation. This catches case-folded duplicates and file/directory
         // prefixes even when one of the colliding entries is not a video.
@@ -1730,7 +1751,7 @@ public class NzbdavLibrarySyncTask : IScheduledTask
             if (item.Type is not ("nzb_file" or "rar_file" or "multipart_file") || !IsVideoFile(item.Name))
                 continue;
 
-            var relativePath = BuildStrmRelativePath(item, allItems);
+            var relativePath = BuildStrmRelativePath(item, allItems, siblingIndex);
             var managedRelativePath = Path.ChangeExtension(relativePath, ".strm");
             var normalized = NormalizeRelativePathForComparison(managedRelativePath);
 
@@ -1772,65 +1793,39 @@ public class NzbdavLibrarySyncTask : IScheduledTask
                 throw new InvalidOperationException($"Manifest path collision: '{entry.Path}'.");
         }
 
-        // A directory may legitimately prefix its children. Any other prefix
-        // is a file-vs-directory collision (foo.strm vs foo.strm/bar).
-        foreach (var entry in entries)
+        // Only files forbid descendants. Looking up each bounded ancestor avoids
+        // comparing every manifest entry with every other entry.
+        var files = entries
+            .Where(static e => !string.Equals(e.Type, "directory", StringComparison.Ordinal))
+            .Select(static e => e.Path)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        ValidateFileAncestorConflicts(entries.Select(static e => e.Path), files);
+
+        // Preserve the raw-parent alias rule at file/directory boundaries. A
+        // canonical parent maps to its one raw spelling, or null if directories
+        // use multiple spellings. In that case every file spelling conflicts
+        // with at least one directory, without a file-by-directory cross product.
+        var directoryParents = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in entries.Where(static e => string.Equals(e.Type, "directory", StringComparison.Ordinal)))
         {
-            var prefix = entry.Path + "/";
-            if (entries.Any(other => other.Path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                && !string.Equals(entry.Type, "directory", StringComparison.Ordinal))
-                throw new InvalidOperationException($"Manifest file/directory prefix collision: '{entry.Path}'.");
+            var parent = ParentOf(entry.Path);
+            var rawParent = ParentOf(entry.RawPath);
+            if (!directoryParents.TryAdd(parent, rawParent)
+                && !string.Equals(directoryParents[parent], rawParent, StringComparison.Ordinal))
+                directoryParents[parent] = null;
         }
-
-        static bool HasCanonicalAliasCollision(string[] left, string[] right)
-        {
-            if (left.Length != right.Length)
-                return false;
-
-            var hasAliasDiff = false;
-            for (var i = 0; i < left.Length; i++)
-            {
-                var leftSegment = left[i];
-                var rightSegment = right[i];
-                var leftNormalized = NormalizeRelativePathForComparison(leftSegment);
-                var rightNormalized = NormalizeRelativePathForComparison(rightSegment);
-
-                if (!string.Equals(leftNormalized, rightNormalized, StringComparison.OrdinalIgnoreCase))
-                    return false;
-
-                if (!string.Equals(leftSegment, rightSegment, StringComparison.Ordinal))
-                    hasAliasDiff = true;
-            }
-
-            return hasAliasDiff;
-        }
-
-        var directoryPaths = entries
-            .Where(static e => string.Equals(e.Type, "directory", StringComparison.Ordinal))
-            .Select(static e => e.RawPath)
-            .ToArray();
 
         foreach (var entry in entries.Where(static e => !string.Equals(e.Type, "directory", StringComparison.Ordinal)))
         {
-            var fileSegments = entry.RawPath.Split('/', StringSplitOptions.RemoveEmptyEntries);
-            if (fileSegments.Length < 2)
-                continue;
+            if (directoryParents.TryGetValue(ParentOf(entry.Path), out var rawDirectoryParent)
+                && !string.Equals(ParentOf(entry.RawPath), rawDirectoryParent, StringComparison.Ordinal))
+                throw new InvalidOperationException($"Manifest file/directory prefix collision: '{entry.Path}'.");
+        }
 
-            var fileParentSegments = fileSegments[..^1];
-            foreach (var directoryPath in directoryPaths)
-            {
-                var directorySegments = directoryPath.Split('/', StringSplitOptions.RemoveEmptyEntries);
-                if (directorySegments.Length != fileParentSegments.Length + 1)
-                    continue;
-
-                var directoryParentSegments = directorySegments[..^1];
-                if (HasCanonicalAliasCollision(
-                        fileParentSegments,
-                        directoryParentSegments))
-                {
-                    throw new InvalidOperationException($"Manifest file/directory prefix collision: '{entry.Path}'.");
-                }
-            }
+        static string ParentOf(string path)
+        {
+            var separator = path.LastIndexOf('/');
+            return separator < 0 ? string.Empty : path[..separator];
         }
     }
 
@@ -1848,18 +1843,26 @@ public class NzbdavLibrarySyncTask : IScheduledTask
                 throw new InvalidOperationException($"Manifest path collision: '{path}'.");
         }
 
-        var ordered = normalized
-            .Select(path => path.Split('/', StringSplitOptions.RemoveEmptyEntries))
-            .OrderBy(parts => parts.Length)
+        // Retain the old segment comparison's separator semantics, then check
+        // ancestors in a set rather than scanning every shorter output path.
+        var segmented = normalized
+            .Select(path => string.Join('/', path.Split('/', StringSplitOptions.RemoveEmptyEntries)))
             .ToArray();
-        foreach (var parts in ordered)
+        ValidateFileAncestorConflicts(segmented, segmented.ToHashSet(StringComparer.OrdinalIgnoreCase));
+    }
+
+    private static void ValidateFileAncestorConflicts(IEnumerable<string> paths, HashSet<string> files)
+    {
+        foreach (var path in paths)
         {
-            foreach (var prefix in ordered)
+            if (path.Length > 0 && files.Contains(string.Empty))
+                throw new InvalidOperationException("Manifest file/directory prefix collision: ''.");
+            for (var separator = path.LastIndexOf('/'); separator > 0;
+                separator = path.LastIndexOf('/', separator - 1))
             {
-                if (prefix.Length >= parts.Length)
-                    break;
-                if (parts.Take(prefix.Length).SequenceEqual(prefix, StringComparer.OrdinalIgnoreCase))
-                    throw new InvalidOperationException($"Manifest file/directory prefix collision: '{string.Join('/', prefix)}'.");
+                var ancestor = path[..separator];
+                if (files.Contains(ancestor))
+                    throw new InvalidOperationException($"Manifest file/directory prefix collision: '{ancestor}'.");
             }
         }
     }
@@ -2154,6 +2157,14 @@ public class NzbdavLibrarySyncTask : IScheduledTask
     {
         private int _released;
         public void Dispose() { if (Interlocked.Exchange(ref _released, 1) == 0) ExecuteGate.Release(); }
+    }
+
+    // Cheap lexical check a media reader can make before waiting on the gate.
+    // RecoverForMediaUnderGate repeats the full check under the gate.
+    internal static bool IsUnderLibraryRoot(string libraryRoot, string mediaPath)
+    {
+        try { return IsPathWithinRoot(GetCanonicalLibraryRoot(libraryRoot), Path.GetFullPath(mediaPath)); }
+        catch (Exception) { return false; }
     }
 
     internal static async Task<bool> RecoverForMediaAsync(
@@ -6406,13 +6417,15 @@ public class NzbdavLibrarySyncTask : IScheduledTask
             or ".m4v" or ".ts" or ".m2ts" or ".webm" or ".mpg" or ".mpeg";
     }
 
-    private static string BuildSafeStrmPath(string libraryPath, ManifestItem videoFile, IReadOnlyDictionary<Guid, ManifestItem> allItems)
+    private static string BuildSafeStrmPath(string libraryPath, ManifestItem videoFile,
+        IReadOnlyDictionary<Guid, ManifestItem> allItems, CanonicalVideoSiblingIndex? siblingIndex = null)
     {
-        var strmRelativePath = Path.ChangeExtension(BuildStrmRelativePath(videoFile, allItems), ".strm");
+        var strmRelativePath = Path.ChangeExtension(BuildStrmRelativePath(videoFile, allItems, siblingIndex), ".strm");
         return ResolveContentPathWithinLibrary(libraryPath, strmRelativePath);
     }
 
-    private static string BuildStrmRelativePath(ManifestItem videoFile, IReadOnlyDictionary<Guid, ManifestItem> allItems)
+    private static string BuildStrmRelativePath(ManifestItem videoFile, IReadOnlyDictionary<Guid, ManifestItem> allItems,
+        CanonicalVideoSiblingIndex? siblingIndex = null)
     {
         var relativePath = ValidateSafeRelativePath(videoFile.Path, isManifestPath: true);
 
@@ -6425,7 +6438,7 @@ public class NzbdavLibrarySyncTask : IScheduledTask
             && videoFile.ParentId.HasValue
             && allItems.TryGetValue(videoFile.ParentId.Value, out var parent)
             && parent.Type == "directory"
-            && !HasCanonicalVideoSibling(videoFile, parent, allItems))
+            && !(siblingIndex ?? new CanonicalVideoSiblingIndex(allItems)).HasSibling(videoFile))
         {
             var parentDirectory = Path.GetDirectoryName(relativePath) ?? string.Empty;
             var normalizedParentName = ValidateManifestSegment(parent.Name, MaxManifestParentNameLength);
@@ -6434,7 +6447,24 @@ public class NzbdavLibrarySyncTask : IScheduledTask
                 : Path.Combine(parentDirectory, normalizedParentName + ext);
         }
 
-        return relativePath;
+        return RouteUhdMovie(relativePath);
+    }
+
+    // 4K movies get their own library root (movies-4k/) so Jellyfin can show
+    // separate 4K and 1080p libraries. Classified by release name, matching the
+    // zurg movies-4k filter so both sources split the same way.
+    private static readonly System.Text.RegularExpressions.Regex UhdReleaseTag = new(
+        "(^|[^a-z0-9])(2160p|4k|uhd)([^a-z0-9]|$)",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    private static string RouteUhdMovie(string relativePath)
+    {
+        const string movies = "movies/";
+        var normalized = relativePath.Replace('\\', '/');
+        if (!normalized.StartsWith(movies, StringComparison.Ordinal)
+            || !UhdReleaseTag.IsMatch(normalized[movies.Length..]))
+            return relativePath;
+        return Path.Combine("movies-4k", relativePath[movies.Length..]);
     }
 
     private static string ValidateSafeRelativePath(string manifestPath, bool isManifestPath)
@@ -6894,24 +6924,44 @@ public class NzbdavLibrarySyncTask : IScheduledTask
             && WindowsDeviceNames.Contains(baseName, StringComparer.OrdinalIgnoreCase);
     }
 
+    // One immutable lookup belongs to the operation's manifest, not the task or
+    // plugin singleton. Both expected-path mapping and per-video writes reuse it.
+    private sealed class CanonicalVideoSiblingIndex
+    {
+        private readonly Dictionary<Guid, (Guid FirstId, bool MultipleIds)> _candidates = new();
+
+        public CanonicalVideoSiblingIndex(IReadOnlyDictionary<Guid, ManifestItem> allItems)
+        {
+            foreach (var item in allItems.Values)
+            {
+                if (item.ParentId is not { } parentId
+                    || !allItems.TryGetValue(parentId, out var parent)
+                    || !IsVideoFile(item.Name)
+                    || !string.Equals(Path.GetFileNameWithoutExtension(item.Name), parent.Name,
+                        StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                // Candidate Type and Path were never filters. Retain distinct
+                // IDs rather than a count so the video cannot be its own sibling.
+                if (_candidates.TryGetValue(parentId, out var existing))
+                    _candidates[parentId] = (existing.FirstId, existing.MultipleIds || existing.FirstId != item.Id);
+                else
+                    _candidates.Add(parentId, (item.Id, false));
+            }
+        }
+
+        public bool HasSibling(ManifestItem videoFile)
+            => videoFile.ParentId is { } parentId
+               && _candidates.TryGetValue(parentId, out var candidates)
+               && (candidates.MultipleIds || candidates.FirstId != videoFile.Id);
+    }
+
     /// <summary>
     /// Detects obfuscated filenames — random alphanumeric strings that Usenet uploaders
     /// use to evade DMCA bots. Real release names contain dots or hyphens as separators
     /// (e.g., "Family.Guy.S24E07.1080p"); obfuscated names are a single run of letters/digits
     /// (e.g., "W6Ss3ROn1dPrVxlU916rJLYwTk6QbtDe").
     /// </summary>
-    private static bool HasCanonicalVideoSibling(
-        ManifestItem videoFile,
-        ManifestItem parent,
-        IReadOnlyDictionary<Guid, ManifestItem> allItems)
-    {
-        return allItems.Values.Any(item =>
-            item.Id != videoFile.Id
-            && item.ParentId == videoFile.ParentId
-            && IsVideoFile(item.Name)
-            && string.Equals(Path.GetFileNameWithoutExtension(item.Name), parent.Name, StringComparison.OrdinalIgnoreCase));
-    }
-
     private static bool LooksObfuscated(string name)
     {
         if (name.Length < 12) return false;

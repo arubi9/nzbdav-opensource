@@ -227,6 +227,32 @@ public sealed class NzbdavMediaSourceProviderTests
         finally { DeleteRoot(root); }
     }
 
+    [Fact]
+    public async Task ProviderIgnoresStrmOutsideLibraryRootWithoutWaitingForSyncGate()
+    {
+        // Other .strm sources (for example a Real-Debrid mirror) must not queue
+        // behind a long NZBDAV sync that holds the media gate.
+        var root = CreateRoot();
+        var foreign = CreateRoot();
+        try
+        {
+            var strm = Path.Combine(foreign, "movie.strm");
+            File.WriteAllText(strm, "http://zurg:9999/http/__all__/movie.mkv");
+
+            using var gate = await NzbdavLibrarySyncTask.EnterMediaGateAsync(TestContext.Current.CancellationToken);
+            var sources = await Provider(root)
+                .GetMediaSources(new Video { Path = strm }, TestContext.Current.CancellationToken)
+                .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            Assert.Empty(sources);
+        }
+        finally
+        {
+            DeleteRoot(root);
+            DeleteRoot(foreign);
+        }
+    }
+
     private static NzbdavMediaSourceProvider Provider(string root)
         => new(NullLogger<NzbdavMediaSourceProvider>.Instance,
             () => new NzbdavOperationConfiguration("https://nzbdav.example", root, string.Empty, 30));

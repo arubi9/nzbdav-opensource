@@ -4,7 +4,7 @@ set -e
 PLUGIN_DIR="Jellyfin.Plugin.Nzbdav"
 OUTPUT_DIR="artifacts/Nzbdav"
 PLUGIN_GUID="a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-PLUGIN_VERSION="1.1.0.0"
+PLUGIN_VERSION="1.2.0.0"
 
 echo "Building NZBDAV Jellyfin plugin..."
 cd "$(dirname "$0")"
@@ -24,7 +24,7 @@ cat > "$OUTPUT_DIR/meta.json" <<METAJSON
     "owner": "nzbdav",
     "category": "General",
     "version": "$PLUGIN_VERSION",
-    "targetAbi": "10.11.0.0",
+    "targetAbi": "12.0.0.0",
     "status": "Active"
 }
 METAJSON

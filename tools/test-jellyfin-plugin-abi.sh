@@ -15,9 +15,9 @@ repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 for platform in $platforms; do
   arch=${platform#linux/}
   [ "$arch" = amd64 ] && arch=x64
-  echo "== Jellyfin plugin ABI probe: Alpine 3.22 $arch =="
-  MSYS_NO_PATHCONV=1 docker run --rm --platform "$platform" -e PROBE_ARCH="$arch" -e DOTNET_NOLOGO=1 -e DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 -v "$repo:/src" alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce sh -eu -c '
-    apk add --no-cache build-base dotnet9-sdk >/dev/null
+  echo "== Jellyfin plugin ABI probe: Alpine 3.23 $arch =="
+  MSYS_NO_PATHCONV=1 docker run --rm --platform "$platform" -e PROBE_ARCH="$arch" -e DOTNET_NOLOGO=1 -e DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 -v "$repo:/src" mcr.microsoft.com/dotnet/sdk:10.0.401-alpine3.23@sha256:84c5d09dfeb4275f6540084e69331f140223eb968b5ef48023923b0b2eda156b sh -eu -c '
+    apk add --no-cache build-base >/dev/null
     arch=$PROBE_ARCH
     work=$(mktemp -d)
     trap "rm -rf \"$work\"" EXIT
@@ -54,7 +54,7 @@ EOF
     native=$($work/native)
 
     cat >"$work/abi-probe.csproj" <<EOF
-<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net9.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><InvariantGlobalization>true</InvariantGlobalization></PropertyGroup><ItemGroup><ProjectReference Include="/src/jellyfin-plugin/Jellyfin.Plugin.Nzbdav/Jellyfin.Plugin.Nzbdav.csproj" /><PackageReference Include="Jellyfin.Controller" Version="10.11.8" /><PackageReference Include="Jellyfin.Model" Version="10.11.8" /></ItemGroup></Project>
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><InvariantGlobalization>true</InvariantGlobalization></PropertyGroup><ItemGroup><ProjectReference Include="/src/jellyfin-plugin/Jellyfin.Plugin.Nzbdav/Jellyfin.Plugin.Nzbdav.csproj" /><PackageReference Include="Jellyfin.Controller" Version="12.0.0" /><PackageReference Include="Jellyfin.Model" Version="12.0.0" /></ItemGroup></Project>
 EOF
     cat >"$work/Program.cs" <<'EOF'
 using System.Reflection;
@@ -76,7 +76,7 @@ EOF
     cat "$work/restore.stdout" >&2
     dotnet build "$work/abi-probe.csproj" --configuration Release --no-restore \
       --verbosity quiet -warnaserror -p:TreatWarningsAsErrors=true >&2
-    managed=$(dotnet "$work/bin/Release/net9.0/abi-probe.dll")
+    managed=$(dotnet "$work/bin/Release/net10.0/abi-probe.dll")
     case "$arch" in
       x64) expected="${native% nofollow=*} x64" ;;
       arm64) expected="${native% nofollow=*} arm64" ;;
