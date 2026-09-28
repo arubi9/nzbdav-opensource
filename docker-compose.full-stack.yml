@@ -6,6 +6,10 @@ name: nzbdav-full-stack
 services:
   nzbdav:
     image: nzbdav:0.6.4-full-stack
+    # CPU priority (cgroup weight, only matters under contention; default 1024).
+    # The streaming path (nzbdav, zurg, cloudflared) outranks Jellyfin's API so
+    # heavy browsing cannot starve playback; background Arr indexing ranks last.
+    cpu_shares: 2048
     # PID 1 is a deliberately tiny root supervisor: it must initialize named
     # volumes, then su-exec the two application processes. Its children are
     # non-root; these are the only capabilities needed during that bootstrap.
@@ -112,7 +116,11 @@ services:
       start_period: 45s
 
   jellyfin:
-    image: nzbdav-jellyfin:10.11.8
+    image: nzbdav-jellyfin:12.0
+    mem_limit: 8g
+    # Hard cap: the load test drove Jellyfin to ~10 of 12 cores. Two cores stay
+    # free for the streaming path even when nothing else is contending.
+    cpus: 10
     cap_drop:
       - ALL
     cap_add:
@@ -160,11 +168,15 @@ services:
   # Arrs, Prowlarr) stay LAN-only on purpose. The service is inert until
   # CLOUDFLARE_TUNNEL_TOKEN is set in .env.
   cloudflared:
+    cpu_shares: 2048
     image: cloudflare/cloudflared:2026.8.2@sha256:0aa26e284f05e6c77ae375b8c9c11d9eb6a448fb7bcd8d40f31cb6176189eb38
     # http2 (TCP) transport: QUIC/UDP kept dropping through the LXC->host NAT
     # layers ("failed to dial to edge with quic" every few minutes), and every
     # drop stalls in-flight streams. TCP is stabler through these middleboxes.
-    command: tunnel --no-autoupdate --metrics 127.0.0.1:2000 --protocol http2 run
+    # ha-connections: 4 (the default) capped aggregate throughput near 1 Gbps
+    # while the origin sustains ~3.5 Gbps on LAN. Each edge connection is a
+    # separate TCP path, so widening them raises the concurrent-stream ceiling.
+    command: tunnel --no-autoupdate --metrics 127.0.0.1:2000 --protocol http2 --ha-connections 8 run
     # TUNNEL_TOKEN lives in an untracked secrets file, not the tracked .env:
     # it is a credential, and .env gets overwritten by deploys.
     env_file:
@@ -187,6 +199,7 @@ services:
       start_period: 30s
 
   sonarr:
+    cpu_shares: 512
     image: linuxserver/sonarr:4.0.19.2979-ls321@sha256:373159ba768e23a3a1c497d9f2b936addf8fd5b1fdce7dd6a14080ac928bfda0
     # LinuxServer documents NET_RAW reduction for these images.
     cap_drop:
@@ -199,6 +212,8 @@ services:
       - "${BIND_ADDRESS:-127.0.0.1}:${SONARR_PORT:-8989}:8989"
     volumes:
       - sonarr_config:/config
+      # Artwork is ~1.2 MB/series and cold. Keep it off the NVMe thin pool.
+      - "${SONARR_MEDIACOVER_HOST_PATH:-/mnt/nas-sonarr}:/config/MediaCover"
       # Keep the category root identical to NZBDAV and ArrSetup's root path.
       - completed_downloads:/data/completed-downloads
       # Arr-organized library (Series/Season layout) that Jellyfin scans.
@@ -225,6 +240,7 @@ services:
       start_period: 30s
 
   radarr:
+    cpu_shares: 512
     image: linuxserver/radarr:6.3.0.10514-ls313@sha256:a45b5ab0f850f39edb4cc9c95bbd967b52ddc3d4574a4dfb45561177db6c88f4
     # LinuxServer documents NET_RAW reduction for these images.
     cap_drop:
@@ -237,6 +253,8 @@ services:
       - "${BIND_ADDRESS:-127.0.0.1}:${RADARR_PORT:-7878}:7878"
     volumes:
       - radarr_config:/config
+      # Artwork is ~2.3 MB/movie and cold. Keep it off the NVMe thin pool.
+      - "${RADARR_MEDIACOVER_HOST_PATH:-/mnt/nas-radarr}:/config/MediaCover"
       # Keep the category root identical to NZBDAV and ArrSetup's root path.
       - completed_downloads:/data/completed-downloads
       # Arr-organized library (Movie (Year) layout) that Jellyfin scans.
@@ -261,6 +279,7 @@ services:
       start_period: 30s
 
   prowlarr:
+    cpu_shares: 512
     image: linuxserver/prowlarr:2.5.2.5491-ls156@sha256:1295cff29d10b486c0d8324d1559a552140a5932bf8b3d87e398654414f63f92
     # LinuxServer documents NET_RAW reduction for these images.
     cap_drop:

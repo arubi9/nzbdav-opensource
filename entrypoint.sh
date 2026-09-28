@@ -363,13 +363,23 @@ initialize_shared_volume() {
     mountinfo_path_has_nested_mount "$SHARED_VOLUME" && return 1
     find -P "$SHARED_VOLUME" -xdev -exec /bin/sh -eu -c '
         root=$1; shift
-        for item do
-            [ ! -L "$item" ] && { [ -d "$item" ] || [ -f "$item" ]; } || exit 1
-            if [ -f "$item" ]; then
-                [ "$(stat -c "%h" "$item" 2>/dev/null)" = "1" ] || exit 1
-            fi
-            [ "$(stat -c "%d" "$item" 2>/dev/null)" = "$(stat -c "%d" "$root" 2>/dev/null)" ] || exit 1
-        done
+        # One stat per find batch instead of three per entry: the tree can hold
+        # >170k files, and the per-item form cost ~500k forks on every boot.
+        # stat does not dereference, so %F still rejects symlinks, devices,
+        # fifos and sockets exactly as the per-item tests did.
+        root_dev=$(stat -c "%d" "$root" 2>/dev/null) || exit 1
+        info=$(stat -c "%F|%h|%d" "$@" 2>/dev/null) || exit 1
+        while IFS="|" read -r type links dev; do
+            case $type in
+                "regular file"|"regular empty file")
+                    [ "$links" = "1" ] || exit 1 ;;
+                directory) ;;
+                *) exit 1 ;;
+            esac
+            [ "$dev" = "$root_dev" ] || exit 1
+        done <<EOF
+$info
+EOF
     ' sh "$SHARED_VOLUME" {} +
     SHARED_CHILDREN_READY=1
     for SHARED_CHILD in "$@"; do
@@ -395,13 +405,23 @@ initialize_shared_volume() {
     # Revalidate after creating categories and before changing ownership.
     find -P "$SHARED_VOLUME" -xdev -exec /bin/sh -eu -c '
         root=$1; shift
-        for item do
-            [ ! -L "$item" ] && { [ -d "$item" ] || [ -f "$item" ]; } || exit 1
-            if [ -f "$item" ]; then
-                [ "$(stat -c "%h" "$item" 2>/dev/null)" = "1" ] || exit 1
-            fi
-            [ "$(stat -c "%d" "$item" 2>/dev/null)" = "$(stat -c "%d" "$root" 2>/dev/null)" ] || exit 1
-        done
+        # One stat per find batch instead of three per entry: the tree can hold
+        # >170k files, and the per-item form cost ~500k forks on every boot.
+        # stat does not dereference, so %F still rejects symlinks, devices,
+        # fifos and sockets exactly as the per-item tests did.
+        root_dev=$(stat -c "%d" "$root" 2>/dev/null) || exit 1
+        info=$(stat -c "%F|%h|%d" "$@" 2>/dev/null) || exit 1
+        while IFS="|" read -r type links dev; do
+            case $type in
+                "regular file"|"regular empty file")
+                    [ "$links" = "1" ] || exit 1 ;;
+                directory) ;;
+                *) exit 1 ;;
+            esac
+            [ "$dev" = "$root_dev" ] || exit 1
+        done <<EOF
+$info
+EOF
     ' sh "$SHARED_VOLUME" {} +
     find -P "$SHARED_VOLUME" -xdev -exec chown -h "$PUID:$PGID" '{}' +
     for SHARED_CHILD in "$@"; do
@@ -600,13 +620,23 @@ data_tree_is_safe() {
     mountinfo_path_has_nested_mount "$CONFIG_PATH" && return 1
     find "$CONFIG_PATH" -exec /bin/sh -c '
         root=$1; shift
-        for item do
-            [ ! -L "$item" ] && { [ -d "$item" ] || [ -f "$item" ]; } || exit 1
-            if [ -f "$item" ]; then
-                [ "$(stat -c "%h" "$item" 2>/dev/null)" = "1" ] || exit 1
-            fi
-            [ "$(stat -c "%d" "$item" 2>/dev/null)" = "$(stat -c "%d" "$root" 2>/dev/null)" ] || exit 1
-        done
+        # One stat per find batch instead of three per entry: the tree can hold
+        # >170k files, and the per-item form cost ~500k forks on every boot.
+        # stat does not dereference, so %F still rejects symlinks, devices,
+        # fifos and sockets exactly as the per-item tests did.
+        root_dev=$(stat -c "%d" "$root" 2>/dev/null) || exit 1
+        info=$(stat -c "%F|%h|%d" "$@" 2>/dev/null) || exit 1
+        while IFS="|" read -r type links dev; do
+            case $type in
+                "regular file"|"regular empty file")
+                    [ "$links" = "1" ] || exit 1 ;;
+                directory) ;;
+                *) exit 1 ;;
+            esac
+            [ "$dev" = "$root_dev" ] || exit 1
+        done <<EOF
+$info
+EOF
     ' sh "$CONFIG_PATH" {} +
 }
 
