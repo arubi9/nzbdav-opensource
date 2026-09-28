@@ -95,6 +95,18 @@ public sealed class LiveSegmentCacheBehaviorTests
     }
 
     [Fact]
+    public async Task RehydrateFromDisk_KeepsNonSegmentFilesSuchAsProbeSidecars()
+    {
+        await using var cacheScope = new TempCacheScope();
+        var probePath = System.IO.Path.Combine(cacheScope.Path, $"probe-{Guid.NewGuid():N}.json");
+        await File.WriteAllTextAsync(probePath, "{}");
+
+        using var liveCache = new LiveSegmentCache(cacheScope.Path);
+
+        Assert.True(File.Exists(probePath));
+    }
+
+    [Fact]
     public async Task RehydrateFromDisk_RemovesCorruptedMetadataAndBody()
     {
         await using var cacheScope = new TempCacheScope();
@@ -267,6 +279,72 @@ public sealed class LiveSegmentCacheBehaviorTests
     public void SegmentCategoryClassifier_MapsExpectedExtensions(string fileName, SegmentCategory expectedCategory)
     {
         Assert.Equal(expectedCategory, SegmentCategoryClassifier.Classify(fileName));
+    }
+
+    [Fact]
+    public async Task GetOrAddBodyAsync_JoinerSurvivesCancellationOfTheCallerThatStartedTheFetch()
+    {
+        // A second request for the same segment joins the first request's fetch.
+        // If the first client disconnects, the second must still get the body.
+        await using var cacheScope = new TempCacheScope();
+        var fakeNntpClient = new FakeNntpClient()
+            .AddSegment("segment-a", Encoding.ASCII.GetBytes("AAAA"), partOffset: 0);
+        using var liveCache = new LiveSegmentCache(cacheScope.Path);
+
+        var firstFetchStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        Func<CancellationToken, Task<LiveSegmentCache.BodyFetchSource>> fetch = async ct =>
+        {
+            if (Interlocked.Increment(ref calls) == 1)
+            {
+                firstFetchStarted.SetResult();
+                await Task.Delay(Timeout.Infinite, ct);
+            }
+            var response = await fakeNntpClient.DecodedBodyAsync("segment-a", ct);
+            var header = await response.Stream.GetYencHeadersAsync(ct);
+            return new LiveSegmentCache.BodyFetchSource(response.Stream, header!, null);
+        };
+
+        using var firstCaller = new CancellationTokenSource();
+        var first = liveCache.GetOrAddBodyAsync("segment-a", fetch, firstCaller.Token);
+        await firstFetchStarted.Task;
+        var second = liveCache.GetOrAddBodyAsync("segment-a", fetch, CancellationToken.None);
+
+        firstCaller.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
+        var result = await second.WaitAsync(TimeSpan.FromSeconds(10));
+        await result.Response.Stream.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task GetOrAddHeaderAsync_JoinerSurvivesCancellationOfTheCallerThatStartedTheFetch()
+    {
+        await using var cacheScope = new TempCacheScope();
+        using var liveCache = new LiveSegmentCache(cacheScope.Path);
+
+        var firstFetchStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        Func<CancellationToken, Task<UsenetSharp.Models.UsenetYencHeader>> factory = async ct =>
+        {
+            if (Interlocked.Increment(ref calls) == 1)
+            {
+                firstFetchStarted.SetResult();
+                await Task.Delay(Timeout.Infinite, ct);
+            }
+            return CreateMetadata("segment-h", SegmentCategory.Unknown, ownerNzbId: null, sizeBytes: 4).ToYencHeader();
+        };
+
+        using var firstCaller = new CancellationTokenSource();
+        var first = liveCache.GetOrAddHeaderAsync("segment-h", factory, firstCaller.Token);
+        await firstFetchStarted.Task;
+        var second = liveCache.GetOrAddHeaderAsync("segment-h", factory, CancellationToken.None);
+
+        firstCaller.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
+        var header = await second.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.NotNull(header);
     }
 
     [Fact]

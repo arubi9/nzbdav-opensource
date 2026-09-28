@@ -213,6 +213,27 @@ public sealed class LiveSegmentCache : IDisposable
         _pruneLoopTask = Task.Run(PruneLoopAsync);
     }
 
+    // Fraction of the cap that compaction prunes down to. A full-but-pruned
+    // cache sits here in steady state; the health check treats it as healthy.
+    public const double CompactionTargetRatio = 0.85;
+
+    // Bytes left by the most recent prune pass (-1 until the first pass).
+    // Live utilization saw-tooths above the compaction target between passes
+    // under steady writes; this is the reading that shows whether compaction
+    // is actually keeping up.
+    private long _bytesAfterLastPrune = -1;
+
+    public double CompactedUtilization
+    {
+        get
+        {
+            var max = MaxCacheSizeBytes;
+            if (max <= 0) return 0;
+            var after = Interlocked.Read(ref _bytesAfterLastPrune);
+            return (double)(after < 0 ? Interlocked.Read(ref _cachedBytes) : after) / max;
+        }
+    }
+
     public string CacheDirectory { get; }
     public long MaxCacheSizeBytes => Interlocked.Read(ref _maxCacheSizeBytes);
 
@@ -246,6 +267,10 @@ public sealed class LiveSegmentCache : IDisposable
             return entry.YencHeaders;
         }
 
+        // A joined fetch runs under the token of the caller that started it. If that
+        // caller cancels while ours is still live, drop the dead entry and fetch again.
+        while (true)
+        {
         Lazy<Task<UsenetYencHeader>> lazyHeader;
         var created = false;
 
@@ -272,11 +297,21 @@ public sealed class LiveSegmentCache : IDisposable
         {
             return await lazyHeader.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
         }
+        catch (OperationCanceledException) when (!created && !cancellationToken.IsCancellationRequested)
+        {
+            lock (_headerCacheLock)
+            {
+                if (_headerCache.TryGetValue(segmentId, out Lazy<Task<UsenetYencHeader>>? current)
+                    && ReferenceEquals(current, lazyHeader))
+                    _headerCache.Remove(segmentId);
+            }
+        }
         catch
         {
             if (created)
                 _headerCache.Remove(segmentId);
             throw;
+        }
         }
     }
 
@@ -332,6 +367,10 @@ public sealed class LiveSegmentCache : IDisposable
 
         Interlocked.Increment(ref _misses);
 
+        // A joined fetch runs under the token of the caller that started it. If that
+        // caller cancels while ours is still live, drop the dead entry and fetch again.
+        while (true)
+        {
         var createdLazy = new Lazy<Task<BodyFetchOutcome>>(
             () => LoadBodyThroughCacheOrNetworkAsync(segmentId, fetchBodyAsync, cancellationToken, category, ownerNzbId),
             LazyThreadSafetyMode.ExecutionAndPublication
@@ -352,9 +391,19 @@ public sealed class LiveSegmentCache : IDisposable
             );
         }
 
-        var outcome = await activeLazy.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
+        BodyFetchOutcome outcome;
+        try
+        {
+            outcome = await activeLazy.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (usedExistingFetch && !cancellationToken.IsCancellationRequested)
+        {
+            _inflightBodies.TryRemove(KeyValuePair.Create(segmentId, activeLazy));
+            continue;
+        }
         var response = OpenBodyResponse(segmentId, outcome.Entry);
         return new BodyFetchResult(response, usedExistingFetch, outcome.Origin);
+        }
     }
 
     public async Task<UsenetDecodedArticleResponse> CreateArticleResponseAsync(
@@ -420,7 +469,7 @@ public sealed class LiveSegmentCache : IDisposable
             // for incoming writes before hitting the ceiling again. Reactive
             // eviction-at-cap oscillates between 100% and "saturated" on
             // every burst; aiming lower gives breathing room.
-            var pruneTarget = (long)(_maxCacheSizeBytes * 0.85);
+            var pruneTarget = (long)(_maxCacheSizeBytes * CompactionTargetRatio);
             if (Interlocked.Read(ref _cachedBytes) <= pruneTarget) return;
 
             // Pass 2: Evict VideoSegment by LRU
@@ -461,6 +510,7 @@ public sealed class LiveSegmentCache : IDisposable
         }
         finally
         {
+            Interlocked.Exchange(ref _bytesAfterLastPrune, Interlocked.Read(ref _cachedBytes));
             _pruneLock.Release();
         }
     }
@@ -872,6 +922,9 @@ public sealed class LiveSegmentCache : IDisposable
         };
     }
 
+    private static bool IsSegmentBodyFileName(string name) =>
+        name.Length == 64 && name.All(char.IsAsciiHexDigitUpper);
+
     private string GetCachePath(string segmentId)
     {
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(segmentId));
@@ -990,6 +1043,10 @@ public sealed class LiveSegmentCache : IDisposable
             foreach (var file in allFiles)
             {
                 if (file.EndsWith(".meta") || file.EndsWith(".tmp")) continue;
+                // Only segment bodies (SHA-256 hex names) can be orphans. Other files
+                // share this directory, e.g. MediaProbeService's probe-{id}.json sidecars;
+                // deleting those forced a full ffprobe re-backfill on every restart.
+                if (!IsSegmentBodyFileName(Path.GetFileName(file))) continue;
                 if (!knownBodyPaths.Contains(file))
                 {
                     DeleteFileQuietly(file);

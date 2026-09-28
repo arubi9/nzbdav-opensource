@@ -286,6 +286,35 @@ public sealed class ObjectStorageSegmentCacheTests
     }
 
     [Fact]
+    public async Task TryReadAsync_TimesOutWhenStoreBlocksWithoutObservingCancellation()
+    {
+        // Filesystem L2 on NFS blocks in synchronous calls (File.Exists, read
+        // syscalls) that never see the token. The timeout must still bound the
+        // caller so playback falls through to NNTP instead of stalling.
+        using var release = new ManualResetEventSlim();
+        using var cache = new ObjectStorageSegmentCache(
+            bucketName: "bucket",
+            queueCapacity: 4,
+            ensureBucketExistsAsync: _ => Task.CompletedTask,
+            tryReadAsync: (_, _) =>
+            {
+                release.Wait(TimeSpan.FromSeconds(10));
+                return Task.FromResult<ObjectStorageSegmentCache.ReadResult?>(null);
+            },
+            writeAsync: (_, _) => Task.CompletedTask,
+            readTimeout: TimeSpan.FromMilliseconds(100));
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var stream = await cache.TryReadAsync("segment-a", CancellationToken.None);
+        sw.Stop();
+        release.Set();
+
+        Assert.Null(stream);
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(2), $"read took {sw.Elapsed}");
+        Assert.Equal(1, cache.L2ReadTimeouts);
+    }
+
+    [Fact]
     public async Task MultipleWriters_DrainConcurrently()
     {
         // 8 writes, each takes 200 ms. Single writer = 1.6s, 4 writers = 400ms.

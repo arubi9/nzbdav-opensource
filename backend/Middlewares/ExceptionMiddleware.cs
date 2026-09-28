@@ -69,8 +69,8 @@ public class ExceptionMiddleware(RequestDelegate next)
 
             var filePath = GetRequestFilePath(context);
             var seekPosition = context.Request.GetRange()?.Start?.ToString() ?? "0";
-            Log.Error($"File `{filePath}` could not be read from byte position: {seekPosition} " +
-                      $"due to unhandled {e.GetType()}: {e.Message}");
+            Log.Error(e, $"File `{filePath}` could not be read from byte position: {seekPosition} " +
+                         $"due to unhandled {e.GetType()}: {e.Message}");
         }
     }
 

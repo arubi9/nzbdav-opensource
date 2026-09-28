@@ -9,6 +9,7 @@ using NzbWebDAV.Database.Models;
 using NzbWebDAV.Models;
 using NzbWebDAV.Services;
 using NzbWebDAV.Services.NntpLeasing;
+using NzbWebDAV.Tests.TestDoubles;
 using NzbWebDAV.Websocket;
 
 namespace backend.Tests.Services;
@@ -83,6 +84,49 @@ public sealed class NzbdavHealthCheckTests
         Assert.Equal(HealthStatus.Degraded, result.Status);
         Assert.False(Assert.IsType<bool>(result.Data["nntp_local_lease_ready"]));
         Assert.Equal(0, Assert.IsType<int>(result.Data["nntp_local_lease_total_granted_slots"]));
+    }
+
+    [Fact]
+    public async Task CheckHealthAsync_StaysHealthy_WhenWritesRefillACacheThatCompactionKeepsUnderTarget()
+    {
+        // Production symptom: a busy cache saw-tooths between the 85% compaction
+        // target and ~93% every prune interval, so the live reading crossed 90%
+        // on every cycle and the degraded flag never cleared.
+        await using var harness = await SqliteHealthCheckHarness.CreateAsync();
+        await using var cacheScope = new TempCacheScope();
+        var nntp = new FakeNntpClient();
+        for (var i = 0; i < 4; i++)
+            nntp.AddSegment($"s{i}", "12345"u8.ToArray(), partOffset: i * 5);
+        using var liveCache = new LiveSegmentCache(cacheScope.Path, maxCacheSizeBytes: 20, maxAge: TimeSpan.FromHours(1));
+        using var client = new LiveSegmentCachingNntpClient(nntp, liveCache);
+        async Task Fetch(string id) => await (await client.DecodedBodyAsync(id, CancellationToken.None)).Stream.DisposeAsync();
+
+        for (var i = 0; i < 3; i++) await Fetch($"s{i}");
+        await liveCache.PruneAsync(); // 15 of 20 bytes: already under the 85% target
+        await Fetch("s3");            // refilled to 100% before the next prune
+
+        using var usenetClient = new UsenetStreamingClient(CreateConfigManager(), new WebsocketManager(), liveCache);
+        var healthCheck = new NzbdavHealthCheck(
+            liveCache, usenetClient, new NntpLeaseState(), new TestApplicationLifetime(),
+            () => harness.Now, NodeRole.Combined, isMultiNode: false);
+
+        var result = await healthCheck.CheckHealthAsync(new HealthCheckContext());
+
+        Assert.Equal(1.0, Assert.IsType<double>(result.Data["cache_utilization"]));
+        Assert.False(Assert.IsType<bool>(result.Data["cache_degraded_latch"]));
+        Assert.Equal(HealthStatus.Healthy, result.Status);
+    }
+
+    [Theory]
+    [InlineData(false, 0.80, false)]
+    [InlineData(false, 0.90, false)]
+    [InlineData(false, 0.91, true)]
+    [InlineData(true, 0.86, true)]
+    [InlineData(true, 0.8499, false)] // steady state after compaction must clear the latch
+    [InlineData(true, LiveSegmentCache.CompactionTargetRatio, false)]
+    public void NextCacheDegradedLatch_ClearsOnceCompactionCatchesUp(bool wasDegraded, double utilization, bool expected)
+    {
+        Assert.Equal(expected, NzbdavHealthCheck.NextCacheDegradedLatch(wasDegraded, utilization));
     }
 
     private static ConfigManager CreateConfigManager()

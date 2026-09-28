@@ -30,6 +30,16 @@ public class NzbdavHealthCheck : IHealthCheck
     // health-check calls only causes a one-tick delay in flap resolution,
     // not incorrect state.
     private static volatile bool _cacheDegradedLatch;
+
+    // The L1 cache is LRU-compacted to LiveSegmentCache.CompactionTargetRatio
+    // of its cap, so a full cache normally rests there. Exiting below the
+    // generic 80% band would latch Degraded forever once the cache first
+    // filled; exit at the compaction target instead. Degraded then means
+    // "writes are outrunning compaction", not "the cache is in use".
+    internal static bool NextCacheDegradedLatch(bool wasDegraded, double utilization) =>
+        wasDegraded
+            ? utilization > LiveSegmentCache.CompactionTargetRatio
+            : utilization > DegradedEnterThreshold;
     private static volatile bool _nntpDegradedLatch;
 
     private readonly LiveSegmentCache _liveSegmentCache;
@@ -113,24 +123,27 @@ public class NzbdavHealthCheck : IHealthCheck
         var maxBytes = _liveSegmentCache.MaxCacheSizeBytes;
         var cacheUtilization = maxBytes > 0 ? (double)cacheStats.CachedBytes / maxBytes : 0;
         data["cache_utilization"] = cacheUtilization;
+        // Judge saturation on what compaction leaves behind, not on the
+        // between-pass peak: a busy cache refills past 90% before every prune.
+        var compactedUtilization = _liveSegmentCache.CompactedUtilization;
+        data["cache_compacted_utilization"] = compactedUtilization;
         data["cache_max_bytes"] = maxBytes;
 
         var totalLookups = cacheStats.Hits + cacheStats.Misses;
         data["cache_hit_rate"] = totalLookups > 0 ? (double)cacheStats.Hits / totalLookups : 0;
 
         var wasCacheDegraded = _cacheDegradedLatch;
-        if (!wasCacheDegraded && cacheUtilization > DegradedEnterThreshold)
+        _cacheDegradedLatch = NextCacheDegradedLatch(wasCacheDegraded, compactedUtilization);
+        if (!wasCacheDegraded && _cacheDegradedLatch)
         {
-            _cacheDegradedLatch = true;
             Log.Warning(
                 "Cache saturation entered degraded state. Utilization: {Utilization:P1} ({CachedMb:N0} MB / {MaxMb:N0} MB). " +
                 "Segments will fall through to L2. Increase NZBDAV_CACHE_MAX_SIZE_GB to reduce L2 round-trips.",
-                cacheUtilization, cacheStats.CachedBytes / (1024.0 * 1024), maxBytes / (1024.0 * 1024));
+                compactedUtilization, cacheStats.CachedBytes / (1024.0 * 1024), maxBytes / (1024.0 * 1024));
         }
-        else if (wasCacheDegraded && cacheUtilization < DegradedExitThreshold)
+        else if (wasCacheDegraded && !_cacheDegradedLatch)
         {
-            _cacheDegradedLatch = false;
-            Log.Information("Cache utilization recovered to {Utilization:P1}. Exiting degraded state.", cacheUtilization);
+            Log.Information("Cache utilization recovered to {Utilization:P1}. Exiting degraded state.", compactedUtilization);
         }
         data["cache_degraded_latch"] = _cacheDegradedLatch;
 

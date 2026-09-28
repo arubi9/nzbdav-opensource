@@ -181,13 +181,21 @@ public sealed class ObjectStorageSegmentCache : IDisposable
         ReadResult? result;
         using var timeoutCts = new CancellationTokenSource(_readTimeout);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+        // Filesystem stores on NFS can block inside synchronous calls
+        // (File.Exists, read syscalls) that never observe the token, so the
+        // token alone cannot bound the read. Run the store off the caller's
+        // thread and stop waiting at the deadline; an abandoned read only
+        // parks a pool thread until the kernel call returns.
+        var read = Task.Run(() => _tryReadAsync(segmentId, linkedCts.Token), CancellationToken.None);
         try
         {
-            result = await _tryReadAsync(segmentId, linkedCts.Token).ConfigureAwait(false);
+            result = await read.WaitAsync(_readTimeout, ct).ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
-            when (timeoutCts.IsCancellationRequested && !ct.IsCancellationRequested)
+        catch (Exception ex) when (!ct.IsCancellationRequested
+            && (ex is TimeoutException || (ex is OperationCanceledException && timeoutCts.IsCancellationRequested)))
         {
+            _ = read.ContinueWith(static t => _ = t.Exception, CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
             Interlocked.Increment(ref _l2ReadTimeouts);
             Log.Warning("L2 read timed out after {Timeout:c} for segment {SegmentId}", _readTimeout, segmentId);
             result = null;
