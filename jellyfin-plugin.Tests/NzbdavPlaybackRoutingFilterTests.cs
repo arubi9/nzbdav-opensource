@@ -1,6 +1,7 @@
 using Jellyfin.Plugin.Nzbdav;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.MediaInfo;
+using MediaBrowser.Model.Querying;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Abstractions;
@@ -142,6 +143,115 @@ public sealed class NzbdavPlaybackRoutingFilterTests
         Assert.True(source.SupportsDirectPlay);
     }
 
+    [Theory]
+    [InlineData("http://zurg:9999/strm/TEHFAXYF5KQ7IC2D")]
+    [InlineData("http://nzbdav:8080" + ViewPath)]
+    public void PointsPathAtJellyfinForClientsThatOpenItDirectly(string path)
+    {
+        // Infuse opens MediaSource.Path itself; the internal host is unreachable.
+        var http = new DefaultHttpContext();
+        http.Request.Scheme = "http";
+        http.Request.Host = new HostString("watch.example");
+        http.Request.Headers["X-Forwarded-Proto"] = "https";
+        http.Request.Headers["X-Emby-Authorization"] =
+            "MediaBrowser Client=\"Infuse-Direct\", Device=\"iPhone\", DeviceId=\"d1\", Version=\"8.5.5\", Token=\"tok123\"";
+        var source = Source(path);
+        // Negotiation may already have refused direct play (seen on NZB sources).
+        var negotiated = Source(path);
+        negotiated.SupportsDirectPlay = false;
+        Filter(new PlaybackInfoResponse { MediaSources = [source, negotiated] }, http: http);
+        Assert.False(source.SupportsDirectPlay);
+        var expected = $"https://watch.example/Videos/{Id}/stream?Static=true&MediaSourceId={Id}&ApiKey=tok123";
+        Assert.Equal(expected, source.Path);
+        Assert.Equal(expected, negotiated.Path);
+        Assert.True(negotiated.SupportsDirectStream);
+    }
+
+    [Fact]
+    public void UsesQueryTokenRequestSchemeAndPathBase()
+    {
+        var http = new DefaultHttpContext();
+        http.Request.Scheme = "http";
+        http.Request.Host = new HostString("192.168.1.116:8096");
+        http.Request.PathBase = "/jf";
+        http.Request.QueryString = new QueryString("?ApiKey=a%2Bb");
+        var source = Source("http://zurg:9999/strm/X");
+        Filter(new PlaybackInfoResponse { MediaSources = [source] }, http: http);
+        Assert.Equal(
+            $"http://192.168.1.116:8096/jf/Videos/{Id}/stream?Static=true&MediaSourceId={Id}&ApiKey=a%2Bb",
+            source.Path);
+    }
+
+    [Fact]
+    public void LeavesReachableSourcesAndItemDtosAloneEvenWithAToken()
+    {
+        var http = new DefaultHttpContext();
+        http.Request.Host = new HostString("watch.example");
+        http.Request.Headers["X-Emby-Token"] = "tok";
+        var reachable = Source("https://cdn.example/movie.mkv");
+        Filter(new PlaybackInfoResponse { MediaSources = [reachable] }, http: http);
+        Assert.Equal("https://cdn.example/movie.mkv", reachable.Path);
+        var dto = Source("http://zurg:9999/strm/X");
+        Filter(new BaseItemDto { MediaSources = [dto] }, http: http);
+        Assert.Equal("http://zurg:9999/strm/X", dto.Path);
+    }
+
+    [Fact]
+    public async Task ReplacesPointerFileSizeWithTheStreamsRealSize()
+    {
+        // Jellyfin reports a .strm item's Size as the pointer file's own length
+        // (38 bytes); Infuse refuses a source that small.
+        var probed = new List<string>();
+        var rd = Source("http://zurg:9999/strm/X");
+        rd.Size = 38;
+        rd.Container = "strm";
+        var nzb = Source("http://nzbdav:8080" + ApiPath);
+        nzb.Size = 1995565389;
+        var external = Source("https://cdn.example/a.mkv");
+        external.Size = 38;
+        var http = new DefaultHttpContext();
+        http.Request.Scheme = "http";
+        http.Request.Host = new HostString("watch.example");
+        http.Request.Headers["X-Emby-Token"] = "tok";
+        await FilterAsync(new PlaybackInfoResponse { MediaSources = [rd, nzb, external] }, (url, _) =>
+        {
+            lock (probed) probed.Add(url);
+            return Task.FromResult<NzbdavPlaybackRoutingFilter.StreamInfo?>(new(26119819645, "Flight.2160p.mkv"));
+        }, http);
+        Assert.Equal(["http://zurg:9999/strm/X"], probed); // looked up before Path is rewritten
+        Assert.Equal(26119819645, rd.Size);
+        Assert.Equal("mkv", rd.Container);
+        Assert.StartsWith("http://watch.example/Videos/", rd.Path);
+        Assert.Equal(1995565389, nzb.Size);
+        Assert.Equal(38, external.Size);
+    }
+
+    [Fact]
+    public async Task FixesSingleItemDtosButNotListsAndKeepsSizeWhenLookupFails()
+    {
+        var dto = Source("http://zurg:9999/strm/X");
+        dto.Size = 38;
+        await FilterAsync(new BaseItemDto { MediaSources = [dto] }, (_, _) =>
+            Task.FromResult<NzbdavPlaybackRoutingFilter.StreamInfo?>(new(5000000000, null)));
+        Assert.Equal(5000000000, dto.Size);
+        Assert.Equal("http://zurg:9999/strm/X", dto.Path);
+        Assert.Equal("mkv", dto.Container);
+
+        var listed = Source("http://zurg:9999/strm/X");
+        listed.Size = 38;
+        await FilterAsync(
+            new QueryResult<BaseItemDto>([new BaseItemDto { MediaSources = [listed] }]),
+            (_, _) => throw new InvalidOperationException("lists must not be probed"));
+        Assert.Equal(38, listed.Size);
+
+        var failed = Source("http://zurg:9999/strm/X");
+        failed.Size = 38;
+        await FilterAsync(new PlaybackInfoResponse { MediaSources = [failed] }, (_, _) =>
+            throw new HttpRequestException("down"));
+        Assert.Equal(38, failed.Size);
+        Assert.False(failed.SupportsDirectPlay);
+    }
+
     [Fact]
     public void RegistersFilterWithMvc()
     {
@@ -165,10 +275,26 @@ public sealed class NzbdavPlaybackRoutingFilterTests
         SupportsTranscoding = true
     };
 
-    private static void Filter(object response, string? baseUrl = "http://nzbdav:8080")
+    private static void Filter(object response, string? baseUrl = "http://nzbdav:8080", HttpContext? http = null)
     {
-        var action = new ActionContext(new DefaultHttpContext(), new RouteData(), new ActionDescriptor());
+        var action = new ActionContext(http ?? new DefaultHttpContext(), new RouteData(), new ActionDescriptor());
         var context = new ResultExecutingContext(action, [], new ObjectResult(response), new object());
         new NzbdavPlaybackRoutingFilter(() => baseUrl).OnResultExecuting(context);
+    }
+
+    private static async Task FilterAsync(
+        object response,
+        Func<string, CancellationToken, Task<NzbdavPlaybackRoutingFilter.StreamInfo?>> probe,
+        HttpContext? http = null)
+    {
+        var action = new ActionContext(http ?? new DefaultHttpContext(), new RouteData(), new ActionDescriptor());
+        var context = new ResultExecutingContext(action, [], new ObjectResult(response), new object());
+        var ran = false;
+        await new NzbdavPlaybackRoutingFilter(() => "http://nzbdav:8080", probe).OnResultExecutionAsync(context, () =>
+        {
+            ran = true;
+            return Task.FromResult(new ResultExecutedContext(action, [], context.Result, new object()));
+        });
+        Assert.True(ran);
     }
 }
