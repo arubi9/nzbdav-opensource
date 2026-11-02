@@ -5,3 +5,7 @@ services:
     gpus: all
     environment:
       NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
+      # Persist JIT-compiled CUDA kernels (scale_cuda/tonemap_cuda). Jellyfin runs as uid 1000 with
+      # HOME=/root (unwritable), so the default ~/.nv cache never persisted: ~2.3s lost per GPU transcode start.
+      CUDA_CACHE_PATH: /cache/cuda
+      CUDA_CACHE_MAXSIZE: "1073741824"
